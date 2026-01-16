@@ -4,7 +4,7 @@ import torch
 import logging
 import torch.distributed
 
-from data.data_loader import *
+from data.data_loader import UAVDataset, get_dataloader
 
 from models.transformer import SignalTransformerClassifier
 
@@ -271,9 +271,9 @@ def main(args):
         logger = logging.getLogger("ddp_logger")
         logger.addHandler(logging.NullHandler())
     
-    ## dataset 等待后续添加，暂时空缺
-    dataset = None
-    train_loader, val_loader = None
+    ## dataset 
+    dataset = UAVDataset(config, logger)
+    train_loader, val_loader = get_dataloader(dataset, config)
 
     ## model
     model = SignalTransformerClassifier(
