@@ -54,6 +54,10 @@ def get_parser():
         help="Batch size for training/validation."
     )
     g_data.add_argument(
+        "--sample_ratio", type=float, default=1.0,
+        help="The ratio of sampling in the dataset every epoch."
+    )
+    g_data.add_argument(
         "--feature_size", type=int, default=128,
         help="(Legacy/Optional) Feature size extracted by some network. Not used in token-transformer path unless you wire it."
     )
