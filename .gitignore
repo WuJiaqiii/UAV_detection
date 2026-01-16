@@ -1,0 +1,7 @@
+**/__pycache__/
+*.pkl
+*.pth
+*.hdf5
+*.png
+experiments/*
+!.gitignore
