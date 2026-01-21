@@ -229,35 +229,90 @@ def overlay_masks_on_rgb(
 
     return out
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input_dir", type=str, required=True, help="Directory containing .mat files")
-    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save outputs")
+import argparse
 
-    parser.add_argument("--mat_key", type=str, default="summed_submatrices", help="Key inside .mat")
+def get_parser():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
 
-    # Default paths per your message
-    parser.add_argument("--sam2_checkpoint", type=str, default="sam2/checkpoints/sam2.1_hiera_large.pt")
-    parser.add_argument("--model_cfg", type=str, default="sam2/configs/sam2.1/sam2.1_hiera_l.yaml")
+    # =========================
+    # I/O
+    # =========================
+    io = parser.add_argument_group("I/O")
+    io.add_argument("--input_dir", type=str, required=True,
+                    help="输入目录：包含待处理的 .mat 文件（默认仅扫描该目录，不递归子目录）")
+    io.add_argument("--output_dir", type=str, required=True,
+                    help="输出目录：保存灰度图/叠加图等结果")
+    io.add_argument("--mat_key", type=str, default="summed_submatrices",
+                    help="mat 文件中读取矩阵的键名（期望为 2D: 512x750 的 uint16/float）")
+    io.add_argument("--max_images", type=int, default=-1,
+                    help="最多处理多少个 .mat 文件；-1 表示全部处理")
 
-    # Filter constraints
-    parser.add_argument("--min_rectangularity", type=float, default=0.75, help="mask_area / bbox_area threshold")
-    parser.add_argument("--max_bbox_area_ratio", type=float, default=0.20, help="bbox_area / image_area <= this")
+    # =========================
+    # SAM2 model
+    # =========================
+    model = parser.add_argument_group("SAM2 Model")
+    model.add_argument("--sam2_checkpoint", type=str, default="sam2/checkpoints/sam2.1_hiera_large.pt",
+                       help="SAM2 权重路径（.pt）")
+    model.add_argument("--model_cfg", type=str, default="sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
+                       help="SAM2 模型配置（.yaml）")
 
-    # Visualization / save options
-    parser.add_argument("--save_gray", action="store_true", help="Also save grayscale input pngs")
-    parser.add_argument("--alpha", type=float, default=0.6, help="Overlay alpha for masks")
-    parser.add_argument("--random_color", action="store_true", help="Use random colors for each mask")
-    parser.add_argument("--no_borders", action="store_true", help="Disable contour borders")
-    parser.add_argument("--no_bboxes", action="store_true", help="Disable bbox drawing")
-    parser.add_argument("--max_images", type=int, default=-1, help="Process at most N mats (-1 all)")
+    # =========================
+    # Visualization / Save
+    # =========================
+    vis = parser.add_argument_group("Visualization / Save")
+    vis.add_argument("--save_gray", action="store_true",
+                     help="是否额外保存输入矩阵归一化后的灰度图 png（便于检查输入质量）")
+    vis.add_argument("--alpha", type=float, default=0.6,
+                     help="mask 叠加在灰度图上的透明度（仅影响可视化，不影响检测结果）")
+    vis.add_argument("--random_color", action="store_true",
+                     help="可视化时每个 mask 使用随机颜色（仅影响可视化）")
+    vis.add_argument("--no_borders", action="store_true",
+                     help="不绘制 mask 轮廓边界（仅影响可视化）")
+    vis.add_argument("--no_bboxes", action="store_true",
+                     help="不绘制绿色 bbox 框（仅影响可视化）")
+    
+    # =========================
+    # Post-filter (convert masks -> bboxes & keep)
+    # =========================
+    filt = parser.add_argument_group("Post-filter (Mask/BBox Filtering)")
+    filt.add_argument("--min_rectangularity", type=float, default=0.75,
+                      help="矩形度阈值：rect = mask_area / bbox_area；越大越严格，保留更“像矩形”的目标")
+    filt.add_argument("--max_bbox_area_ratio", type=float, default=0.20,
+                      help="外接框面积占整图比例上限：bbox_area / (H*W) <= 该值，用于剔除过大的干扰框")
 
-    # Optional SAM2 generator knobs (keep default if not set)
-    parser.add_argument("--points_per_side", type=int, default=64, help="SAM2 points_per_side (0 means default)")
-    parser.add_argument("--pred_iou_thresh", type=float, default=0.55, help="SAM2 pred_iou_thresh (-1 means default)")
-    parser.add_argument("--stability_score_thresh", type=float, default=-1.0, help="SAM2 stability_score_thresh (-1 means default)")
+    # =========================
+    # SAM2 Mask Generator knobs
+    # =========================
+    sam = parser.add_argument_group("SAM2 AutomaticMaskGenerator")
+    sam.add_argument("--points_per_side", type=int, default=32,
+                     help="采样点密度（每边点数）。增大 -> 召回更高、mask更多、更慢")
+    sam.add_argument("--points_per_batch", type=int, default=128,
+                     help="每次前向处理点数。增大 -> 吞吐更高但更占显存")
 
-    args = parser.parse_args()
+    sam.add_argument("--crop_n_layers", type=int, default=0,
+                     help="多尺度裁剪层数。0 表示关闭裁剪；>0 开启（小目标召回↑，mask数与耗时↑）")
+    sam.add_argument("--crop_n_points_downscale_factor", type=int, default=2,
+                     help="每层 crop 的点密度衰减因子（仅 crop_n_layers>0 时生效）")
+    sam.add_argument("--crop_overlap_ratio", type=float, default=0.25,
+                     help="crop 窗口重叠比例（仅 crop_n_layers>0 时生效）")
+    sam.add_argument("--crop_nms_thresh", type=float, default=0.6,
+                     help="跨 crop 的 NMS 阈值（仅 crop_n_layers>0 时生效）")
+
+    sam.add_argument("--pred_iou_thresh", type=float, default=0.85,
+                     help="质量阈值（越高越严格）：提高 -> mask更少更干净，但可能漏检弱目标")
+    sam.add_argument("--stability_score_thresh", type=float, default=0.85,
+                     help="稳定性阈值（越高越严格）：提高 -> mask更少更干净，但可能漏检边界/弱目标")
+    sam.add_argument("--box_nms_thresh", type=float, default=0.6,
+                     help="box NMS 去重阈值：降低 -> 去重更强、重复框更少；提高 -> 可能保留更多相近框")
+    sam.add_argument("--min_mask_region_area", type=int, default=120,
+                     help="最小 mask 面积（像素数）：提高 -> 过滤小噪声/小碎片，但可能漏小目标")
+
+    return parser.parse_args()
+
+
+def main(args):
 
     os.makedirs(args.output_dir, exist_ok=True)
     out_pred = os.path.join(args.output_dir, "pred_overlays")
@@ -298,29 +353,27 @@ def main():
 
     sam2_model = build_sam2(args.model_cfg, args.sam2_checkpoint, device=device)
 
-    gen_kwargs = {}
-    if args.points_per_side and args.points_per_side > 0:
-        gen_kwargs["points_per_side"] = args.points_per_side
-    if args.pred_iou_thresh is not None and args.pred_iou_thresh >= 0:
-        gen_kwargs["pred_iou_thresh"] = args.pred_iou_thresh
-    if args.stability_score_thresh is not None and args.stability_score_thresh >= 0:
-        gen_kwargs["stability_score_thresh"] = args.stability_score_thresh
-
-    # mask_generator = SAM2AutomaticMaskGenerator(sam2_model, **gen_kwargs)
-    mask_generator = SAM2AutomaticMaskGenerator(
-        sam2_model,
-        points_per_side=32,
-        points_per_batch=128,
-        crop_n_layers=0,
-        # crop_n_layers=1,
-        # crop_n_points_downscale_factor=2,
-        # crop_overlap_ratio=0.25,
-        pred_iou_thresh=0.85,
-        stability_score_thresh=0.85,
-        box_nms_thresh=0.6,
-        crop_nms_thresh=0.6,
-        min_mask_region_area=120,
+    gen_kwargs = dict(
+        points_per_side=args.points_per_side,
+        points_per_batch=args.points_per_batch,
+        pred_iou_thresh=args.pred_iou_thresh,
+        stability_score_thresh=args.stability_score_thresh,
+        box_nms_thresh=args.box_nms_thresh,
+        min_mask_region_area=args.min_mask_region_area,
+        crop_n_layers=max(0, int(args.crop_n_layers)),
     )
+
+    if args.crop_n_layers and args.crop_n_layers > 0:
+        gen_kwargs.update(
+            crop_n_points_downscale_factor=args.crop_n_points_downscale_factor,
+            crop_overlap_ratio=args.crop_overlap_ratio,
+            crop_nms_thresh=args.crop_nms_thresh,
+        )
+    else:
+        # crop_n_layers == 0: ignore crop-related knobs
+        pass
+    
+    mask_generator = SAM2AutomaticMaskGenerator(sam2_model, **gen_kwargs)
 
     # gather files
     mat_files = sorted(glob.glob(os.path.join(args.input_dir, "*.mat")))
@@ -380,6 +433,7 @@ def main():
                 except Exception as e:
                     print(f"[{i:4d}/{len(mat_files):4d}] FAIL: {name} | {e}")
 
-
 if __name__ == "__main__":
-    main()
+    
+    args = get_parser()
+    main(args)
