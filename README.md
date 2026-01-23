@@ -1,8 +1,8 @@
 # 安装 SAM2 ：
 ```bash
-git clone https://github.com/facebookresearch/sam2.git  ## 或者可以使用 git submodule update --init --recursive 来获取sam2子模块
+git clone https://github.com/facebookresearch/sam2.git sam2lib ## 或者可以使用 git submodule update --init --recursive 来获取sam2子模块
 
-cd sam2
+cd sam2lib
 pip install -e .
 
 cd checkpoints && \
