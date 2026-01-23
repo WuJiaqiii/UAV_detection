@@ -62,7 +62,7 @@ class Trainer:
         loss_record = AverageMeter()
         self.model.train()
 
-        for batch_idx, (inputs, labels) in enumerate(tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}", leave=True)):
+        for batch_idx, (inputs, labels, freq, bw, snr) in enumerate(tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}", leave=True)):
             
             inputs = inputs.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
@@ -109,7 +109,7 @@ class Trainer:
         total_correct, total_count = 0, 0
         all_preds, all_targets = [], []
 
-        for batch_idx, (inputs, labels) in enumerate(tqdm(self.val_loader, desc=f"Validating Epoch {epoch + 1}", leave=True)):
+        for batch_idx, (inputs, labels, freq, bw, snr) in enumerate(tqdm(self.val_loader, desc=f"Validating Epoch {epoch + 1}", leave=True)):
             inputs = inputs.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
@@ -181,13 +181,13 @@ class Trainer:
                 self.logger.info(f"--Current learning rate: {self.scheduler.get_last_lr()}")
             
                 if (epoch + 1) % self.config.save_interval == 0:  
-                    checkpoint_path = os.path.join(self.config.model_dir, f'{self.config.model_type}_epoch_{epoch + 1}.pth')
+                    checkpoint_path = os.path.join(self.config.model_dir, f'epoch_{epoch + 1}.pth')
                     save_checkpoint({"model": self.model}, optimizer=None, scheduler=None, epoch=epoch, path=checkpoint_path, cfg=None, logger=self.logger)
                     self.logger.info(f"--Checkpoint saved at epoch {epoch + 1} to {checkpoint_path}")
                     
                 if global_val_main < best_val_loss:
                     best_val_loss = global_val_main 
-                    best_path = os.path.join(self.config.model_dir, f'{self.config.model_type}_best.pth')
+                    best_path = os.path.join(self.config.model_dir, f'best.pth')
                     save_checkpoint({"model": self.model}, optimizer=None, scheduler=None, epoch=epoch, path=best_path, cfg=None, logger=self.logger)
                     self.logger.info(f"--Best model saved at epoch {epoch + 1} with validation loss: {global_val_main:.4f}")
                     
@@ -199,7 +199,7 @@ class Trainer:
                 dist.broadcast(early_stop_flag, src=0)
 
         if (not dist.is_initialized()) or dist.get_rank() == 0:
-            checkpoint_path = os.path.join(self.config.model_dir, f'{self.config.model_type}_last.pth')
+            checkpoint_path = os.path.join(self.config.model_dir, f'last.pth')
             save_checkpoint({"model": self.model}, optimizer=None, scheduler=None, epoch=epoch, path=checkpoint_path, cfg=None, logger=self.logger)
             
         if dist.is_initialized():

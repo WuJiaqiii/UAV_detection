@@ -3,7 +3,6 @@ import yaml
 import torch
 import datetime
 import pytz
-import random
 
 class Config:
     def __setattr__(self, name, value):
@@ -18,7 +17,7 @@ class Config:
             setattr(self, key, value)
             
         self.classes = {"FPV1": 0, "Lightbridge1": 1, "Ocusync_mini1": 2, "Ocusync21": 3, "Ocusync31": 4, "Skylink11": 5}
-
+        self.mat_key = "summed_submatrices"
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         self.base_dir = 'experiments'

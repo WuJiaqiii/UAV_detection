@@ -11,8 +11,8 @@ from models.transformer import SignalTransformerClassifier
 from util.trainer import Trainer
 
 from util.preprocess import SignalPreprocessor
-from sam2.sam2.build_sam import build_sam2
-from sam2.sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+from sam2lib.sam2.build_sam import build_sam2
+from sam2lib.sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 
 from util.checkpoint import load_checkpoint
 from util.utils import create_logger, set_seed
@@ -38,7 +38,7 @@ def get_parser():
     # Dataset / DataLoader
     g_data = parser.add_argument_group("Dataset & DataLoader")
     g_data.add_argument(
-        "--dataset_path", type=str, default="data/RML2016.10a_dict.pkl",
+        "--dataset_path", type=str, required=True,
         help="Path to dataset file. You should modify this to your own dataset index/annotation file."
     )
     g_data.add_argument(
@@ -142,11 +142,11 @@ def get_parser():
     # SAM2 Detector (Inference-only)
     g_sam2 = parser.add_argument_group("SAM2 Detector (Inference-only)")
     g_sam2.add_argument(
-        "--sam2_checkpoint", type=str, default="sam2/checkpoints/sam2.1_hiera_large.pt",
+        "--sam2_checkpoint", type=str, default="sam2lib/checkpoints/sam2.1_hiera_large.pt",
         help="Path to SAM2 checkpoint (.pt). Used for box generation only (no training)."
     )
     g_sam2.add_argument(
-        "--model_cfg", type=str, default="sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
+        "--model_cfg", type=str, default="configs/sam2.1/sam2.1_hiera_l.yaml",
         help="Path to SAM2 model config (.yaml)."
     )
     g_sam2.add_argument(

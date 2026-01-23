@@ -1,3 +1,6 @@
 [submodule "sam2"]
-	path = sam2
+	path = sam2lib
+	url = https://github.com/facebookresearch/sam2.git
+[submodule "sam2lib"]
+	path = sam2lib
 	url = https://github.com/facebookresearch/sam2.git

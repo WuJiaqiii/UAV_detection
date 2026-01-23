@@ -4,7 +4,7 @@ import glob
 import numpy as np
 import torch
 import random
-from torch.utils.data import Dataset, DataLoader, Sampler, DistributedSampler, Subset, TensorDataset
+from torch.utils.data import Dataset, DataLoader, Sampler, DistributedSampler, Subset
 from sklearn.model_selection import train_test_split
 import torch.distributed as dist
 
@@ -22,145 +22,150 @@ class UAVDataset(Dataset):
         re.VERBOSE,
     )# 例：Skylink11-[0,-22.0,1000,20]-SNR-20-SNRSPACE1.046149e+01-Figure-1.mat
 
-    def __init__(self, config, logger):
+    def __init__(self, config, logger, validate_on_init: bool = False):
         self.config = config
         self.logger = logger
 
-        dataset_dir = config.dataset_path
+        dataset_dir = getattr(config, "dataset_path", None)
         if not dataset_dir or not os.path.isdir(dataset_dir):
             raise ValueError(f"config.dataset_path must be an existing directory, got: {dataset_dir}")
 
-        self.mod2label = {str(k): int(v) for k, v in self.config.classes.items()}
-        self.mat_key = "summed_submatrices"
+        self.mod2label = {str(k): int(v) for k, v in getattr(config, "classes", {}).items()}
 
         mat_files = sorted(glob.glob(os.path.join(dataset_dir, "*.mat")))
         if not mat_files:
             raise FileNotFoundError(f"No .mat files found under: {dataset_dir}")
 
-        data_list, protocol_list, freq_list, bw_list, snr_list = [], [], [], [], []
+        files, protocol_list, freq_list, bw_list, snr_list = [], [], [], [], []
+        
+        bad = 0
+        
+        def skip(reason: str, fname: str):
+            nonlocal bad
+            bad += 1
+            logger.warning(f"[Skip] {reason}: {fname}")
 
-        bad_files = 0
         for fp in mat_files:
             fname = os.path.basename(fp)
-
             m = self._FNAME_RE.search(fname)
             if not m:
-                bad_files += 1
-                self.logger.warning(f"[Skip] filename regex not matched: {fname}")
+                skip("filename regex not matched", fname)
                 continue
 
             protocol = m.group("protocol").strip()
-            bracket = m.group("bracket")
-            snr_str = m.group("snr")
+            if protocol not in self.mod2label:
+                raise KeyError(
+                    f"protocol '{protocol}' not found in config.classes mapping. "
+                    f"Available keys (sample): {list(self.mod2label.keys())[:10]} ..."
+                )
 
-            parts = [p.strip() for p in bracket.split(",")]
+            parts = [p.strip() for p in m.group("bracket").split(",")]
             if len(parts) < 4:
-                bad_files += 1
-                self.logger.warning(f"[Skip] bracket parse failed (need 4 fields): {fname}")
+                skip("bracket parse failed (need 4 fields)", fname)
                 continue
 
             try:
                 freq = float(parts[1])
                 bw = float(parts[3])
             except ValueError:
-                bad_files += 1
-                self.logger.warning(f"[Skip] freq/bw parse failed: {fname}")
+                skip("freq/bw parse failed", fname)
                 continue
 
-            snr = None
+            snr = float("nan")
+            snr_str = m.group("snr")
             if snr_str is not None:
                 try:
                     snr = float(snr_str)
                 except ValueError:
-                    snr = None  
+                    snr = float("nan")
 
-            try:
-                mat = loadmat(fp)
-                if self.mat_key not in mat:
-                    bad_files += 1
-                    self.logger.warning(f"[Skip] key '{self.mat_key}' not found in mat: {fname}")
+            # Optional heavy validation (loads the matrix once at init; turn on only for debugging)
+            if validate_on_init:
+                try:
+                    _ = self._load_x(fp)
+                except Exception as e:
+                    skip(f"validate_on_init failed ({e})", fname)
                     continue
 
-                x = mat[self.mat_key]  #  (512, 750)
-                x = np.asarray(x)
-
-                if x.ndim != 2:
-                    bad_files += 1
-                    self.logger.warning(f"[Skip] data dim != 2, got {x.shape}: {fname}")
-                    continue
-
-                x = x.astype(np.float32)
-
-            except Exception as e:
-                bad_files += 1
-                self.logger.warning(f"[Skip] failed to load mat '{fname}': {e}")
-                continue
-
-            if protocol not in self.mod2label:
-                raise KeyError(
-                    f"protocol '{protocol}' not found in config.classes mapping. "
-                    f"Available keys (sample): {list(self.mod2label.keys())[:10]} ..."
-                )
-            proto_out = self.mod2label[protocol]
-
-            data_list.append(x)
-            protocol_list.append(proto_out)
+            files.append(fp)
+            protocol_list.append(self.mod2label[protocol])
             freq_list.append(freq)
             bw_list.append(bw)
             snr_list.append(snr)
 
-        if not data_list:
-            raise RuntimeError(
-                f"All files were skipped. Check filename format / mat key / directory. "
-                f"bad_files={bad_files}, total={len(mat_files)}"
-            )
+        if not files:
+            raise RuntimeError(f"All files were skipped. bad={bad}, total={len(mat_files)}")
 
-        self.data = torch.from_numpy(np.stack(data_list, axis=0))  #  (N, 512, 750)
+        self.files = files
         self.protocol = torch.tensor(protocol_list, dtype=torch.int64)
         self.freq = torch.tensor(freq_list, dtype=torch.float32)
         self.bw = torch.tensor(bw_list, dtype=torch.float32)
-        self.snr = torch.tensor([float(s) if s is not None else float("nan") for s in snr_list],
-                                dtype=torch.float32)
+        self.snr = torch.tensor(snr_list, dtype=torch.float32)
 
-        self.logger.info(f"Loaded {len(self.data)} samples from {dataset_dir} (skipped {bad_files})")
-        self.logger.info(f"Data shape: {list(self.data.shape)}")
+        logger.info(f"Indexed {len(self.files)} samples from {dataset_dir} (skipped {bad})")
+        logger.info(f"Lazy-loading mat key: '{self.config.mat_key}', validate_on_init={validate_on_init}")
+
+    def _load_x(self, fp: str) -> torch.Tensor:
+
+        mat = loadmat(fp, variable_names=[self.config.mat_key])
+        if self.config.mat_key not in mat:
+            raise KeyError(f"key '{self.config.mat_key}' not found in mat")
+
+        x = np.asarray(mat[self.config.mat_key])
+        if x.ndim != 2:
+            raise ValueError(f"data dim != 2, got shape {x.shape}")
+
+        # Ensure float32 + contiguous for torch.from_numpy
+        x = np.asarray(x, dtype=np.float32)
+        x = np.ascontiguousarray(x)
+        t = torch.from_numpy(x)
+
+        return t
 
     def __len__(self):
-        return len(self.protocol)
+        return self.protocol.numel()
 
-    def __getitem__(self, idx):
-        return self.data[idx], self.protocol[idx], self.freq[idx], self.bw[idx], self.snr[idx]
+    def __getitem__(self, idx: int):
+        fp = self.files[idx]
+        try:
+            x = self._load_x(fp)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load '{os.path.basename(fp)}': {e}") from e
 
+        return x, self.protocol[idx], self.freq[idx], self.bw[idx], self.snr[idx]
 
 class RandomSampler(Sampler): 
     def __init__(self, data_source, sample_ratio):
         self.data_source = data_source
-        self.sample_ratio = sample_ratio
+        self.sample_ratio = float(sample_ratio)
         self.num_samples = len(data_source)
 
     def __iter__(self):
         k = int(self.num_samples * self.sample_ratio)
-        sampled = random.sample(range(self.num_samples), k)
-        return iter(sampled)
+        if k <= 0:
+            return iter([])
+        idx = torch.randperm(self.num_samples).tolist()[:k]
+        return iter(idx)
 
     def __len__(self):
         return int(self.num_samples * self.sample_ratio)
 
-def build_ddp_sampler(dataset, shuffle: bool, sample_ratio: float):
+def build_ddp_sampler(dataset, shuffle: bool, sample_ratio: float, seed: int = 42):
 
     rank = dist.get_rank()
     world = dist.get_world_size()
-    num_keep = round(len(dataset) * sample_ratio)
-    device = torch.device(f"cuda:{rank}") 
+    num_keep = int(round(len(dataset) * float(sample_ratio)))
+    num_keep = max(0, min(num_keep, len(dataset)))
 
-    if rank == 0:
-        idx_tensor = torch.randperm(len(dataset), device=device)[:num_keep]
-    else:
-        idx_tensor = torch.empty(num_keep, dtype=torch.int64, device=device)
+    g = torch.Generator()
+    g.manual_seed(int(seed))
 
-    dist.broadcast(idx_tensor, src=0)
-    subset = Subset(dataset, idx_tensor.cpu().tolist())
-    sampler = DistributedSampler(subset, num_replicas=world, rank=rank, shuffle=shuffle, drop_last=False)
+    idx = torch.randperm(len(dataset), generator=g)[:num_keep].tolist()
+    subset = Subset(dataset, idx)
+
+    sampler = DistributedSampler(
+        subset, num_replicas=world, rank=rank, shuffle=shuffle, drop_last=False
+    )
     return subset, sampler
 
 def create_dataloader(dataset: Dataset, config, shuffle):
