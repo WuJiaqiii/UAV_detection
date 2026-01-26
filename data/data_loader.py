@@ -132,7 +132,7 @@ class UAVDataset(Dataset):
         except Exception as e:
             raise RuntimeError(f"Failed to load '{os.path.basename(fp)}': {e}") from e
 
-        return x, self.protocol[idx], self.freq[idx], self.bw[idx], self.snr[idx]
+        return x, self.protocol[idx], self.freq[idx], self.bw[idx], self.snr[idx], fp
 
 class RandomSampler(Sampler): 
     def __init__(self, data_source, sample_ratio):

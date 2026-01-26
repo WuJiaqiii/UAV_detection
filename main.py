@@ -240,6 +240,28 @@ def get_parser():
         help="Enable AMP autocast (CUDA only). Recommended for faster training if stable."
     )
 
+    # Token cache (SAM2 detection + preprocessing outputs)
+    g_cache = parser.add_argument_group("Token Cache")
+    g_cache.add_argument(
+        "--token_cache_mode", type=str, default="readwrite",
+        choices=["off", "read", "write", "readwrite", "refresh"],
+        help="Caching mode for per-sample tokens. "
+             "off: no cache; read: only read; write: only write; "
+             "readwrite: read+write; refresh: recompute and overwrite."
+    )
+    g_cache.add_argument(
+        "--token_cache_dir", type=str, default="experiments/sam2_cache",
+        help="Directory to store token cache"
+    )
+    g_cache.add_argument(
+        "--token_cache_mem", type=int, default=256,
+        help="In-memory LRU cache size (number of samples). 0 disables memory cache."
+    )
+    g_cache.add_argument(
+        "--precompute_tokens", action=argparse.BooleanOptionalAction, default=False,
+        help="Only precompute tokens for the train loader (and optionally persist cache), then exit."
+    )
+
     args = parser.parse_args()
     return args
 
@@ -321,6 +343,11 @@ def main(args):
     )
     
     trainer = Trainer(config, (train_loader, val_loader), logger, model, mask_generator, preprocessor)
+
+    if getattr(config, 'precompute_tokens', False):
+        trainer.precompute_tokens(train_loader)
+        return
+
     trainer.train()
 
 
