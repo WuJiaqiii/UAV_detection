@@ -90,6 +90,24 @@ class TransformerEncoderLayer(nn.Module):
         """
         # MultiheadAttention supports:
         #   attn_mask: (S,S) or (B*nhead,S,S) for batch_first=True (PyTorch 1.12+ / 2.x stable)
+        
+        attn_mask = attn_bias
+        key_padding = src_key_padding_mask
+
+        # 如果 attn_mask 是 float（相对位置 bias），把 padding 也写进 attn_mask
+        if attn_mask is not None and key_padding is not None:
+            B, S, _ = src.shape
+            H = self.nhead
+
+            # (B*H,S,S) -> (B,H,S,S)
+            m = attn_mask.view(B, H, S, S)
+
+            # 对 padding 的 key 位置加 -inf（等价于 key_padding_mask 的效果）
+            m = m.masked_fill(key_padding[:, None, None, :], float("-inf"))
+
+            attn_mask = m.view(B * H, S, S)
+            key_padding = None  # 关键：避免类型不一致 warning
+        
         attn_output, _ = self.self_attn(
             src, src, src,
             key_padding_mask=src_key_padding_mask,

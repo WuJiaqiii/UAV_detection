@@ -15,8 +15,6 @@ python main.py \
   --dataset_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/train_data_space_awgn/1 \
   --epochs 1000 \
   --batch_size 16 \
-  --token_cache_mode read \
-  --lr 1e-5 # \
-
-
-#   --checkpoint_path /root/Desktop/AMR_NCD/experiments/RadioF_ResNet_20-5_20251028_154827/models/ResNet_best.pth
+  --token_cache_mode readwrite \
+  --lr 1e-5 \
+  --checkpoint_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/UAV_20260127_142302/models/best.pth
