@@ -3,4 +3,4 @@
 	url = https://github.com/facebookresearch/sam2.git
 [submodule "sam2lib"]
 	path = sam2lib
-	url = https://github.com/facebookresearch/sam2.git
+	url = git@github.com:WuJiaqiii/sam2.git
