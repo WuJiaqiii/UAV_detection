@@ -107,6 +107,29 @@ def _parse_bbox_any(bbox):
     return int(x0), int(y0), int(a), int(c)
 
 
+def bbox_xyxy_from_bbox(bbox):
+    """Public wrapper: convert bbox (xywh or xyxy) into int xyxy."""
+    return _parse_bbox_any(bbox)
+
+
+def bbox_xyxy_from_segmentation(segmentation: np.ndarray):
+    """Public wrapper: compute bbox xyxy from a boolean segmentation mask."""
+    return _bbox_from_segmentation(np.asarray(segmentation).astype(bool))
+
+
+def mask_dict_to_bbox_xyxy(mask: dict):
+    """Extract bbox xyxy from a SAM/SAM2 mask dict using `bbox` or `segmentation`."""
+    if mask is None:
+        return None
+    if "bbox" in mask and mask["bbox"] is not None:
+        xyxy = _parse_bbox_any(mask["bbox"])
+        if xyxy is not None:
+            return xyxy
+    seg = mask.get("segmentation", None)
+    if seg is None:
+        return None
+    return _bbox_from_segmentation(np.asarray(seg).astype(bool))
+
 def filter_masks_rect_and_area(
     masks: list,
     H: int,
@@ -156,6 +179,56 @@ def filter_masks_rect_and_area(
             kept.append(m)
 
     return kept
+
+def draw_boxes_on_rgb(
+    rgb_u8: np.ndarray,
+    boxes_xyxy: list,
+    color=(255, 0, 0),
+    width: int = 2,
+    labels: list | None = None,
+):
+    """Draw bbox rectangles on an RGB uint8 image and return uint8 RGB array."""
+    if boxes_xyxy is None:
+        boxes_xyxy = []
+    img = Image.fromarray(np.asarray(rgb_u8).astype(np.uint8), mode="RGB")
+    draw = ImageDraw.Draw(img)
+    for i, b in enumerate(boxes_xyxy):
+        if b is None:
+            continue
+        x0, y0, x1, y1 = map(int, b)
+        # clamp
+        x0 = max(0, min(x0, img.width - 1))
+        x1 = max(0, min(x1, img.width))
+        y0 = max(0, min(y0, img.height - 1))
+        y1 = max(0, min(y1, img.height))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        draw.rectangle([x0, y0, x1 - 1, y1 - 1], outline=tuple(color), width=int(width))
+        if labels is not None and i < len(labels) and labels[i] is not None:
+            draw.text((x0 + 2, y0 + 2), str(labels[i]), fill=tuple(color))
+    return np.array(img, dtype=np.uint8)
+
+
+def overlay_raw_and_filtered_boxes(
+    rgb_u8: np.ndarray,
+    raw_boxes_xyxy: list,
+    filt_boxes_xyxy: list,
+    raw_color=(0, 160, 255),
+    filt_color=(255, 64, 64),
+    width: int = 2,
+    add_legend: bool = True,
+):
+    """Overlay raw and filtered boxes on one image."""
+    img = draw_boxes_on_rgb(rgb_u8, raw_boxes_xyxy, color=raw_color, width=width)
+    img = draw_boxes_on_rgb(img, filt_boxes_xyxy, color=filt_color, width=max(2, width))
+    if add_legend:
+        pil = Image.fromarray(img, mode="RGB")
+        dr = ImageDraw.Draw(pil)
+        txt = f"raw={len(raw_boxes_xyxy)}  filtered={len(filt_boxes_xyxy)}"
+        dr.rectangle([0, 0, 260, 22], fill=(0, 0, 0))
+        dr.text((6, 4), txt, fill=(255, 255, 255))
+        img = np.array(pil, dtype=np.uint8)
+    return img
 
 def overlay_masks_on_rgb(
     rgb_u8: np.ndarray,
@@ -341,9 +414,9 @@ def main(args):
         )
 
     # Build SAM2 + automatic mask generator
-    from sam2.sam2.build_sam import build_sam2
+    from sam2lib.sam2.build_sam import build_sam2
     try:
-        from sam2.sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+        from sam2lib.sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
     except Exception as e:
         raise RuntimeError(
             "Import sam2.automatic_mask_generator failed. "

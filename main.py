@@ -239,27 +239,36 @@ def get_parser():
         "--use_amp_autocast", action=argparse.BooleanOptionalAction, default=False,
         help="Enable AMP autocast (CUDA only). Recommended for faster training if stable."
     )
-
-    # Token cache (SAM2 detection + preprocessing outputs)
-    g_cache = parser.add_argument_group("Token Cache")
-    g_cache.add_argument(
-        "--token_cache_mode", type=str, default="readwrite",
-        choices=["off", "read", "write", "readwrite", "refresh"],
-        help="Caching mode for per-sample tokens. "
-             "off: no cache; read: only read; write: only write; "
-             "readwrite: read+write; refresh: recompute and overwrite."
+    
+    # BBox cache: persist SAM2 raw + filtered detection boxes for each sample
+    g_bbox = parser.add_argument_group("BBox Cache (SAM2 detections)")
+    g_bbox.add_argument(
+        "--bbox_cache_mode", type=str, default="readwrite", choices=["off", "read", "write", "readwrite", "refresh"],
+        help="Cache mode for SAM2 detection bboxes: off/read/write/readwrite/refresh."
     )
-    g_cache.add_argument(
-        "--token_cache_dir", type=str, default="experiments/sam2_cache",
-        help="Directory to store token cache"
+    g_bbox.add_argument(
+        "--bbox_cache_dir", type=str, default="experiments/sam2_bbox_cache",
+        help="Base directory for bbox cache (per-signature subfolder will be created)."
     )
-    g_cache.add_argument(
-        "--token_cache_mem", type=int, default=256,
+    g_bbox.add_argument(
+        "--bbox_cache_mem", type=int, default=256,
         help="In-memory LRU cache size (number of samples). 0 disables memory cache."
     )
-    g_cache.add_argument(
-        "--precompute_tokens", action=argparse.BooleanOptionalAction, default=False,
-        help="Only precompute tokens for the train loader (and optionally persist cache), then exit."
+    g_bbox.add_argument(
+        "--bbox_viz", action=argparse.BooleanOptionalAction, default=True,
+        help="When computing new bboxes (write/readwrite/refresh), save a visualization overlay PNG."
+    )
+    g_bbox.add_argument(
+        "--bbox_viz_dir", type=str, default=None,
+        help="Override bbox visualization output directory. Default: <bbox_cache_dir>/<sig_hash>/viz"
+    )
+    g_bbox.add_argument(
+        "--bbox_viz_limit", type=int, default=2000,
+        help="Maximum number of visualization images to write (rank0 only). 0 = unlimited."
+    )
+    g_bbox.add_argument(
+        "--precompute_boxes", action=argparse.BooleanOptionalAction, default=False,
+        help="Only precompute and persist SAM2 bboxes for the train loader, then exit."
     )
 
     args = parser.parse_args()
@@ -344,8 +353,8 @@ def main(args):
     
     trainer = Trainer(config, (train_loader, val_loader), logger, model, mask_generator, preprocessor)
 
-    if getattr(config, 'precompute_tokens', False):
-        trainer.precompute_tokens(train_loader)
+    if getattr(config, 'precompute_boxes', False):
+        trainer.precompute_boxes(train_loader)
         return
 
     trainer.train()

@@ -22,17 +22,28 @@ import matplotlib
 matplotlib.use("Agg")
 from sklearn.metrics import confusion_matrix
 
+class BBoxCache:
+    """Cache for per-sample detection bounding boxes from SAM2.
 
-class TokenCache:
-    """Cache for per-sample token features produced by (SAM2 detection + preprocessing).
+    Stores BOTH:
+      - raw_boxes_xyxy: boxes extracted from all SAM2 masks before filtering
+      - filt_boxes_xyxy: boxes after rectangularity/area filtering
 
-    - In-memory: small LRU to avoid repeated disk reads within an epoch.
-    - On-disk: stores each sample's variable-length token tensor as a .pt file.
-    - Safe for multi-process (DDP): writes use atomic rename (tmp -> final).
+    Cache format (.pt per sample):
+      {
+        "sig_hash": <str>,
+        "source": {"rel":..., "size":..., "mtime":...},
+        "raw_boxes": IntTensor [N,4],
+        "filt_boxes": IntTensor [M,4],
+        "stats": {"num_masks":..., "num_raw":..., "num_filt":...}
+      }
+
+    Disk writes use atomic rename, safe for multi-process (DDP).
     """
 
     def __init__(self, base_dir: str, signature: dict, dataset_root: str | None,
-                 mode: str = "readwrite", mem_max: int = 0, logger=None):
+                 mode: str = "readwrite", mem_max: int = 0, logger=None,
+                 viz_dir: str | None = None, viz: bool = False, viz_limit: int = 0):
         self.mode = str(mode).lower()
         self.mem_max = int(mem_max) if mem_max else 0
         self.logger = logger
@@ -43,6 +54,12 @@ class TokenCache:
 
         self.cache_dir = os.path.join(base_dir, self.sig_hash)
         os.makedirs(self.cache_dir, exist_ok=True)
+
+        self.viz = bool(viz)
+        self.viz_limit = int(viz_limit) if viz_limit else 0
+        self.viz_dir = viz_dir or os.path.join(self.cache_dir, "viz")
+        if self.viz:
+            os.makedirs(self.viz_dir, exist_ok=True)
 
         # Write signature for reproducibility (rank0 only)
         try:
@@ -55,10 +72,11 @@ class TokenCache:
         except Exception:
             pass
 
-        self._mem = OrderedDict()  # key -> torch.Tensor (CPU)
+        self._mem = OrderedDict()  # key -> dict(raw_boxes, filt_boxes)
         self.hits = 0
         self.misses = 0
         self.disk_writes = 0
+        self.viz_writes = 0
 
     @staticmethod
     def _safe_relpath(fp: str, root: str | None) -> str:
@@ -82,8 +100,12 @@ class TokenCache:
     def _path_for_key(self, key: str) -> str:
         return os.path.join(self.cache_dir, f"{key}.pt")
 
+    def _viz_path(self, fp: str, key: str) -> str:
+        base = os.path.splitext(os.path.basename(fp))[0]
+        return os.path.join(self.viz_dir, f"{base}__{key[:8]}.png")
+
     def get(self, fp: str):
-        """Return cached feats tensor on CPU, or None."""
+        """Return (raw_boxes, filt_boxes) as CPU int tensors, or None."""
         if self.mode in ("off", "write"):
             return None
         if self.mode == "refresh":
@@ -91,12 +113,11 @@ class TokenCache:
 
         key, meta = self._key_and_meta(fp)
 
-        # memory LRU
         if key in self._mem:
-            t = self._mem.pop(key)
-            self._mem[key] = t
+            obj = self._mem.pop(key)
+            self._mem[key] = obj
             self.hits += 1
-            return t
+            return obj.get("raw_boxes"), obj.get("filt_boxes")
 
         path = self._path_for_key(key)
         if not os.path.isfile(path):
@@ -107,82 +128,120 @@ class TokenCache:
             if not isinstance(obj, dict) or obj.get("sig_hash") != self.sig_hash:
                 return None
             src = obj.get("source", {})
-            # if we can stat, verify size/mtime to avoid stale cache
             if meta["size"] is not None and src.get("size") is not None and int(src.get("size")) != int(meta["size"]):
                 return None
             if meta["mtime"] is not None and src.get("mtime") is not None and int(src.get("mtime")) != int(meta["mtime"]):
                 return None
 
-            t = obj.get("feats", None)
-            if not isinstance(t, torch.Tensor):
-                return None
-            t = t.to(dtype=torch.float32, copy=False).contiguous()
+            raw_boxes = obj.get("raw_boxes", None)
+            filt_boxes = obj.get("filt_boxes", None)
+            if raw_boxes is None:
+                raw_boxes = torch.zeros((0, 4), dtype=torch.int32)
+            if filt_boxes is None:
+                filt_boxes = torch.zeros((0, 4), dtype=torch.int32)
 
+            if not isinstance(raw_boxes, torch.Tensor):
+                raw_boxes = torch.as_tensor(raw_boxes, dtype=torch.int32)
+            if not isinstance(filt_boxes, torch.Tensor):
+                filt_boxes = torch.as_tensor(filt_boxes, dtype=torch.int32)
+
+            pack = {"raw_boxes": raw_boxes.to(dtype=torch.int32), "filt_boxes": filt_boxes.to(dtype=torch.int32)}
             if self.mem_max > 0:
-                self._mem[key] = t
+                self._mem[key] = pack
                 while len(self._mem) > self.mem_max:
                     self._mem.popitem(last=False)
 
             self.hits += 1
-            return t
+            return pack["raw_boxes"], pack["filt_boxes"]
         except Exception:
             return None
 
-    def put(self, fp: str, feats_cpu: torch.Tensor):
-        """Persist feats tensor (CPU) to disk cache (best-effort)."""
+    def put(self, fp: str, raw_boxes: torch.Tensor, filt_boxes: torch.Tensor, stats: dict | None = None):
+        """Persist boxes to disk, respecting mode."""
         if self.mode in ("off", "read"):
-            return
+            return False
+
         key, meta = self._key_and_meta(fp)
         path = self._path_for_key(key)
 
-        # in refresh mode we always overwrite; otherwise avoid rewriting if exists
-        if self.mode != "refresh" and os.path.isfile(path):
-            if self.mem_max > 0 and key not in self._mem:
-                self._mem[key] = feats_cpu
+        # refresh/write/readwrite all allow writing; write/readwrite: skip if exists
+        if self.mode in ("write", "readwrite") and os.path.isfile(path):
+            return False
+
+        try:
+            obj = {
+                "sig_hash": self.sig_hash,
+                "source": meta,
+                "raw_boxes": raw_boxes.to(dtype=torch.int32, device="cpu"),
+                "filt_boxes": filt_boxes.to(dtype=torch.int32, device="cpu"),
+                "stats": stats or {},
+            }
+            tmp = path + f".tmp.{os.getpid()}"
+            torch.save(obj, tmp)
+            os.replace(tmp, path)
+            self.disk_writes += 1
+
+            if self.mem_max > 0:
+                self._mem[key] = {"raw_boxes": obj["raw_boxes"], "filt_boxes": obj["filt_boxes"]}
                 while len(self._mem) > self.mem_max:
                     self._mem.popitem(last=False)
-            return
-
-        obj = {
-            "sig_hash": self.sig_hash,
-            "feats": feats_cpu.to(dtype=torch.float32, copy=False).contiguous(),
-            "source": meta,
-        }
-
-        tmp = f"{path}.tmp.{os.getpid()}"
-        try:
-            torch.save(obj, tmp)
-            os.replace(tmp, path)  # atomic on POSIX
-            self.disk_writes += 1
-        except Exception:
+            return True
+        except Exception as e:
             try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
+                if self.logger:
+                    self.logger.warning(f"[BBoxCache] failed to write cache for {os.path.basename(fp)}: {e}")
             except Exception:
                 pass
+            return False
 
-        if self.mem_max > 0:
-            self._mem[key] = obj["feats"]
-            while len(self._mem) > self.mem_max:
-                self._mem.popitem(last=False)
+    def maybe_save_viz(self, fp: str, rgb_u8: np.ndarray, raw_boxes, filt_boxes):
+        """Save a visualization overlay if enabled and under limit."""
+        if not self.viz:
+            return None
+        if self.viz_limit > 0 and self.viz_writes >= self.viz_limit:
+            return None
+
+        try:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+        except Exception:
+            rank = 0
+        if rank != 0:
+            return None
+
+        key, _ = self._key_and_meta(fp)
+        out = self._viz_path(fp, key)
+        if os.path.isfile(out) and self.mode != "refresh":
+            return out
+
+        try:
+            overlay = detlib.overlay_raw_and_filtered_boxes(rgb_u8, raw_boxes_xyxy=raw_boxes, filt_boxes_xyxy=filt_boxes)
+            from PIL import Image
+            Image.fromarray(overlay).save(out)
+            self.viz_writes += 1
+            return out
+        except Exception as e:
+            try:
+                if self.logger:
+                    self.logger.warning(f"[BBoxCache] failed to write viz for {os.path.basename(fp)}: {e}")
+            except Exception:
+                pass
+            return None
 
     @classmethod
-    def from_config(cls, config, logger=None):
-        mode = str(getattr(config, "token_cache_mode", "off")).lower()
+    def from_config(cls, config, logger=None, bbox_sig_hash: str | None = None):
+        mode = str(getattr(config, "bbox_cache_mode", "off")).lower()
         if mode == "off":
             return None
 
-        base_dir = getattr(config, "token_cache_dir", None)
-        if not base_dir:
-            base_dir = os.path.join(getattr(config, "dataset_path", "."), ".token_cache")
+        base_dir = getattr(config, "bbox_cache_dir", None) or "experiments/sam2_bbox_cache"
+        mem_max = int(getattr(config, "bbox_cache_mem", 0) or 0)
+        viz = bool(getattr(config, "bbox_viz", False))
+        viz_dir = getattr(config, "bbox_viz_dir", None)
+        viz_limit = int(getattr(config, "bbox_viz_limit", 0) or 0)
 
-        mem_max = int(getattr(config, "token_cache_mem", 0) or 0)
-
-        # Anything that changes tokenization should be part of the signature.
         signature = {
             "version": 1,
-            "max_tokens": int(getattr(config, "max_tokens", 0) or 0),
-            "feature_dim": int(getattr(config, "feature_dim", 0) or 0),
+            "image_hw": [int(getattr(config, "image_height", 512) or 512), int(getattr(config, "image_width", 750) or 750)],
             "mask_filter": {
                 "min_rectangularity": float(getattr(config, "min_rectangularity", 0.0) or 0.0),
                 "max_bbox_area_ratio": float(getattr(config, "max_bbox_area_ratio", 0.0) or 0.0),
@@ -195,31 +254,22 @@ class TokenCache:
                 "crop_n_layers": int(getattr(config, "sam2_crop_n_layers", 0) or 0),
                 "pred_iou_thresh": float(getattr(config, "sam2_pred_iou_thresh", 0.0) or 0.0),
                 "stability_score_thresh": float(getattr(config, "sam2_stability_score_thresh", 0.0) or 0.0),
-                "box_nms_thresh": float(getattr(config, "sam2_box_nms_thresh", 0.0) or 0.0),
-                "crop_nms_thresh": float(getattr(config, "sam2_crop_nms_thresh", 0.0) or 0.0),
                 "min_mask_region_area": int(getattr(config, "sam2_min_mask_region_area", 0) or 0),
-            },
-            "preprocess": {
-                "sampling_rate": float(getattr(config, "sampling_rate", 0.0) or 0.0),
-                "n_fft": int(getattr(config, "n_fft", 0) or 0),
-                "hop_length": int(getattr(config, "hop_length", 0) or 0),
-                "min_area": int(getattr(config, "pre_min_area", 0) or 0),
-                "min_ratio": float(getattr(config, "pre_min_ratio", 0.0) or 0.0),
-                "freq_eps": float(getattr(config, "pre_freq_eps", 0.0) or 0.0),
-                "freq_min_samples": int(getattr(config, "pre_freq_min_samples", 0) or 0),
-                "nms_iou_thresh": float(getattr(config, "pre_nms_iou_thresh", 0.0) or 0.0),
             },
         }
 
+        dataset_root = getattr(config, "dataset_path", None)
         return cls(
-            base_dir=str(base_dir),
+            base_dir=base_dir,
             signature=signature,
-            dataset_root=getattr(config, "dataset_path", None),
+            dataset_root=dataset_root,
             mode=mode,
             mem_max=mem_max,
             logger=logger,
+            viz_dir=viz_dir,
+            viz=viz,
+            viz_limit=viz_limit,
         )
-
 
 class Trainer:
     def __init__(self, config, data_loaders, logger, model, mask_generator, preprocessor):
@@ -254,9 +304,10 @@ class Trainer:
         
         self.scaler = GradScaler(enabled=(self.config.use_amp_autocast and self.device.type == "cuda"))
         self.writer = SummaryWriter(log_dir=config.result_dir)
-        # Token cache for (SAM2 detection + preprocessing) outputs
-        self.token_cache = TokenCache.from_config(self.config, logger=self.logger)
-        self._cache_stats = {'hit': 0, 'miss': 0, 'write': 0}
+        # BBox cache for SAM2 detections (raw + filtered boxes)
+        self.bbox_cache = BBoxCache.from_config(self.config, logger=self.logger)
+        # Optional token cache (computed from cached boxes). Disable if you want to iterate on preprocessing.
+        self._bbox_stats = {'hit': 0, 'miss': 0, 'write': 0}
 
         
     def train_one_epoch(self, epoch):
@@ -364,37 +415,37 @@ class Trainer:
 
         return loss_record.avg, acc
 
-    def precompute_tokens(self, loader=None):
-        """Precompute and persist token cache for a loader (train by default)."""
-        if self.token_cache is None:
-            self.logger.warning("[TokenCache] token_cache_mode=off; nothing to precompute.")
+    
+    def precompute_boxes(self, loader=None):
+        """Precompute and persist bbox cache for a loader (train by default), then exit."""
+        if self.bbox_cache is None:
+            self.logger.warning("[BBoxCache] bbox_cache_mode=off; nothing to precompute.")
             return
 
         self.model.eval()
         dl = loader if loader is not None else self.train_loader
-        self._cache_stats = {'hit': 0, 'miss': 0, 'write': 0}
+        self._bbox_stats = {'hit': 0, 'miss': 0, 'write': 0}
 
         with torch.inference_mode():
-            for batch in tqdm(dl, desc="Precomputing tokens", leave=True):
+            for batch in tqdm(dl, desc="Precomputing bboxes", leave=True):
                 if len(batch) == 5:
                     inputs, labels, freq, bw, snr = batch
                     fps = None
                 else:
                     inputs, labels, freq, bw, snr, fps = batch
-
                 inputs = inputs.to(self.device, non_blocking=True)
+                # Call tokenization which will populate bbox cache (and optionally viz)
                 _ = self._batch_to_tokens(inputs, sample_fps=fps)
 
         # DDP: aggregate stats
         if dist.is_initialized():
-            t = torch.tensor([self._cache_stats['hit'], self._cache_stats['miss'], self._cache_stats['write']],
+            t = torch.tensor([self._bbox_stats['hit'], self._bbox_stats['miss'], self._bbox_stats['write']],
                              device=self.device, dtype=torch.long)
             dist.all_reduce(t, op=dist.ReduceOp.SUM)
             if dist.get_rank() == 0:
-                self.logger.info(f"[TokenCache] precompute done: hit={int(t[0])} miss={int(t[1])} write={int(t[2])}")
+                self.logger.info(f"[BBoxCache] precompute done: hit={int(t[0])} miss={int(t[1])} write={int(t[2])}")
         else:
-            self.logger.info(f"[TokenCache] precompute done: hit={self._cache_stats['hit']} miss={self._cache_stats['miss']} write={self._cache_stats['write']}")
-
+            self.logger.info(f"[BBoxCache] precompute done: hit={self._bbox_stats['hit']} miss={self._bbox_stats['miss']} write={self._bbox_stats['write']}")
 
 
     def train(self):
@@ -445,10 +496,11 @@ class Trainer:
             dist.barrier()
         return best_path if (not dist.is_initialized() or dist.get_rank()==0) else None
 
+    
     def _batch_to_tokens(self, inputs_bhw: torch.Tensor, sample_fps=None):
         """
-        inputs_bhw: (B,H,W) torch.Tensor (on GPU/CPU)
-        sample_fps: Optional[list[str]]; if provided, enables persistent token caching.
+        inputs_bhw: (B,H,W) torch.Tensor
+        sample_fps: Optional[list[str]]; if provided, enables persistent bbox/token caching keyed by file path.
         return:
           tokens: (B, Smax, F) float32 on self.device
           key_padding_mask: (B, Smax) bool on self.device; True=padding
@@ -467,47 +519,81 @@ class Trainer:
                     except Exception:
                         fp = None
 
-                feats_t = None
-                if fp is not None and self.token_cache is not None:
-                    feats_t = self.token_cache.get(fp)
-                    if feats_t is not None:
-                        self._cache_stats['hit'] += 1
+                # Load spec as numpy
+                spec = inputs_bhw[i].detach().to("cpu").numpy().astype(np.float32)  # (H,W)
 
-                if feats_t is None:
-                    # Cache miss -> run SAM2 + preprocessing
-                    self._cache_stats['miss'] += 1
+                # Get detection boxes (prefer bbox cache)
+                raw_boxes_t = None
+                filt_boxes_t = None
 
-                    spec = inputs_bhw[i].detach().to("cpu").numpy()  # (H,W)
+                if fp is not None and self.bbox_cache is not None:
+                    got = self.bbox_cache.get(fp)
+                    if got is not None:
+                        raw_boxes_t, filt_boxes_t = got
+                        self._bbox_stats['hit'] += 1
+
+                if filt_boxes_t is None:
+                    self._bbox_stats['miss'] += 1
+
+                    if fp is not None and self.bbox_cache is not None and getattr(self.bbox_cache, 'mode', '').lower() == 'read':
+                        raise RuntimeError(f"[BBoxCache] cache miss in read mode for: {fp}")
+
+                    # Cache miss -> run SAM2 detection and filtering
                     gray_u8 = detlib.to_uint8_grayscale(spec)
                     rgb = np.stack([gray_u8, gray_u8, gray_u8], axis=-1)
 
                     masks = self.mask_generator.generate(rgb)
 
-                    masks = detlib.filter_masks_rect_and_area(
+                    # raw boxes: extract from all masks BEFORE filtering
+                    raw_boxes = []
+                    for m in masks:
+                        xyxy = detlib.mask_dict_to_bbox_xyxy(m)
+                        if xyxy is not None:
+                            raw_boxes.append(xyxy)
+
+                    # filtered boxes
+                    kept = detlib.filter_masks_rect_and_area(
                         masks, H, W,
                         min_rectangularity=self.config.min_rectangularity,
                         max_bbox_area_ratio=self.config.max_bbox_area_ratio,
                     )
-                    boxes = [m["_bbox_xyxy"] for m in masks if "_bbox_xyxy" in m]
+                    filt_boxes = [m["_bbox_xyxy"] for m in kept if "_bbox_xyxy" in m]
 
-                    feats = self.preprocessor.process(boxes, spec.astype(np.float32))
+                    raw_boxes_t = torch.as_tensor(raw_boxes, dtype=torch.int32) if len(raw_boxes) else torch.zeros((0, 4), dtype=torch.int32)
+                    filt_boxes_t = torch.as_tensor(filt_boxes, dtype=torch.int32) if len(filt_boxes) else torch.zeros((0, 4), dtype=torch.int32)
 
-                    # 没检测到就塞一个全 0 token，避免序列长度为 0
-                    if feats is None or feats.size == 0:
-                        feats = np.zeros((1, self.config.feature_dim), dtype=np.float32)
+                    # Persist bbox cache if enabled
+                    if fp is not None and self.bbox_cache is not None:
+                        wrote = self.bbox_cache.put(
+                            fp,
+                            raw_boxes=raw_boxes_t,
+                            filt_boxes=filt_boxes_t,
+                            stats={"num_masks": int(len(masks)), "num_raw": int(raw_boxes_t.shape[0]), "num_filt": int(filt_boxes_t.shape[0])},
+                        )
+                        if wrote:
+                            self._bbox_stats['write'] += 1
 
-                    # 限制最大 token 数
-                    if feats.shape[0] > self.config.max_tokens:
-                        feats = feats[: self.config.max_tokens]
+                        # Visualization (only in write/readwrite/refresh and if bbox_viz enabled)
+                        try:
+                            self.bbox_cache.maybe_save_viz(fp, rgb_u8=rgb, raw_boxes=raw_boxes, filt_boxes=filt_boxes)
+                        except Exception:
+                            pass
+                    else:
+                        # If bbox_cache_mode=read and cache missing, error out early
+                        if fp is not None and str(getattr(self.config, "bbox_cache_mode", "off")).lower() == "read":
+                            raise RuntimeError(f"[BBoxCache] cache miss in read mode for: {fp}")
 
-                    feats_t = torch.from_numpy(feats).to(dtype=torch.float32).contiguous()  # CPU
+                # Compute token feats from FILTERED boxes
+                boxes = filt_boxes_t.cpu().numpy().tolist()
+                feats = self.preprocessor.process(boxes, spec)
 
-                    # Persist
-                    if fp is not None and self.token_cache is not None:
-                        before = self.token_cache.disk_writes
-                        self.token_cache.put(fp, feats_t)
-                        if self.token_cache.disk_writes > before:
-                            self._cache_stats['write'] += 1
+                if feats is None or feats.size == 0:
+                    feats = np.zeros((1, self.config.feature_dim), dtype=np.float32)
+
+                if feats.shape[0] > self.config.max_tokens:
+                    feats = feats[: self.config.max_tokens]
+
+                feats_t = torch.from_numpy(feats).to(dtype=torch.float32).contiguous()  # CPU
 
                 # Ensure correct dtype/shape
                 if feats_t.ndim != 2:
@@ -525,4 +611,4 @@ class Trainer:
             tokens[i, :si] = ft
             key_padding_mask[i, :si] = False
 
-        return tokens.to(self.device, non_blocking=True), key_padding_mask.to(self.device, non_blocking=True)
+        return tokens, key_padding_mask
