@@ -142,15 +142,15 @@ def get_parser():
     # SAM2 Detector (Inference-only)
     g_sam2 = parser.add_argument_group("SAM2 Detector (Inference-only)")
     g_sam2.add_argument(
-        "--sam2_checkpoint", type=str, default="sam2lib/checkpoints/sam2.1_hiera_large.pt",
+        "--sam2_checkpoint", type=str, default="sam2lib/checkpoints/sam2.1_hiera_tiny.pt",
         help="Path to SAM2 checkpoint (.pt). Used for box generation only (no training)."
     )
     g_sam2.add_argument(
-        "--model_cfg", type=str, default="configs/sam2.1/sam2.1_hiera_l.yaml",
+        "--model_cfg", type=str, default="configs/sam2.1/sam2.1_hiera_t.yaml",
         help="Path to SAM2 model config (.yaml)."
     )
     g_sam2.add_argument(
-        "--sam2_points_per_side", type=int, default=32,
+        "--sam2_points_per_side", type=int, default=128,
         help="SAM2 mask generator sampling density. Lower -> faster & fewer masks; Higher -> more recall but slower."
     )
     g_sam2.add_argument(
@@ -263,7 +263,7 @@ def get_parser():
         help="Override bbox visualization output directory. Default: <bbox_cache_dir>/<sig_hash>/viz"
     )
     g_bbox.add_argument(
-        "--bbox_viz_limit", type=int, default=2000,
+        "--bbox_viz_limit", type=int, default=0,
         help="Maximum number of visualization images to write (rank0 only). 0 = unlimited."
     )
     g_bbox.add_argument(
@@ -273,7 +273,6 @@ def get_parser():
 
     args = parser.parse_args()
     return args
-
 
 def main(args):
     
@@ -355,6 +354,7 @@ def main(args):
 
     if getattr(config, 'precompute_boxes', False):
         trainer.precompute_boxes(train_loader)
+        trainer.precompute_boxes(val_loader)
         return
 
     trainer.train()

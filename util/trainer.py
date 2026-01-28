@@ -356,7 +356,6 @@ class Trainer:
 
         return loss_record.avg
 
-
     @torch.no_grad()
     def validate(self, epoch):
 
@@ -414,7 +413,6 @@ class Trainer:
                 np.save(cm_path, cm)
 
         return loss_record.avg, acc
-
     
     def precompute_boxes(self, loader=None):
         """Precompute and persist bbox cache for a loader (train by default), then exit."""

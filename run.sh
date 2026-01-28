@@ -5,7 +5,7 @@ export PYTHONPATH="$ROOT/sam2lib:$ROOT:$PYTHONPATH"
 
 python main.py \
   --dataset_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/train_data_space_awgn/1 \
-  --batch_size 16 \
+  --batch_size 1 \
   --bbox_cache_mode refresh \
   --precompute_boxes \
   --bbox_viz \
