@@ -366,6 +366,31 @@ def overlay_bboxes_on_rgb(
 
     return np.array(img)
 
+def overlay_raw_filtered_clustered_boxes(
+    rgb_u8: np.ndarray,
+    raw_boxes_xyxy: list,
+    filt_boxes_xyxy: list,
+    cluster_boxes_xyxy: list,
+    raw_color=(0, 160, 255),
+    filt_color=(255, 64, 64),
+    cluster_color=(80, 255, 80),
+    width: int = 2,
+    add_legend: bool = True,
+):
+    """Overlay raw / filtered / clustered boxes on one image."""
+    img = draw_boxes_on_rgb(rgb_u8, raw_boxes_xyxy, color=raw_color, width=width)
+    img = draw_boxes_on_rgb(img, filt_boxes_xyxy, color=filt_color, width=max(2, width))
+    img = draw_boxes_on_rgb(img, cluster_boxes_xyxy, color=cluster_color, width=max(2, width))
+    if add_legend:
+        pil = Image.fromarray(img, mode="RGB")
+        dr = ImageDraw.Draw(pil)
+        txt = f"raw={len(raw_boxes_xyxy)}  filtered={len(filt_boxes_xyxy)}  clustered={len(cluster_boxes_xyxy)}"
+        dr.rectangle([0, 0, 360, 22], fill=(0, 0, 0))
+        dr.text((6, 4), txt, fill=(255, 255, 255))
+        img = np.array(pil, dtype=np.uint8)
+    return img
+
+
 import argparse
 
 def get_parser():

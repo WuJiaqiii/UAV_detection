@@ -150,7 +150,7 @@ def get_parser():
         help="Path to SAM2 model config (.yaml)."
     )
     g_sam2.add_argument(
-        "--sam2_points_per_side", type=int, default=128,
+        "--sam2_points_per_side", type=int, default=64,
         help="SAM2 mask generator sampling density. Lower -> faster & fewer masks; Higher -> more recall but slower."
     )
     g_sam2.add_argument(

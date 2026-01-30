@@ -3,6 +3,7 @@ import json
 import hashlib
 from collections import OrderedDict
 import numpy as np
+from PIL import Image
 
 import torch
 import torch.nn as nn
@@ -194,38 +195,40 @@ class BBoxCache:
                 pass
             return False
 
-    def maybe_save_viz(self, fp: str, rgb_u8: np.ndarray, raw_boxes, filt_boxes):
-        """Save a visualization overlay if enabled and under limit."""
+
+
+    def maybe_save_viz(self, fp: str, rgb_u8: np.ndarray, raw_boxes, filt_boxes, cluster_boxes=None):
+        """Save visualization image for a sample, if viz is enabled."""
         if not self.viz:
             return None
-        if self.viz_limit > 0 and self.viz_writes >= self.viz_limit:
-            return None
-
         try:
-            rank = dist.get_rank() if dist.is_initialized() else 0
-        except Exception:
-            rank = 0
-        if rank != 0:
-            return None
+            if cluster_boxes is not None:
+                overlay = detlib.overlay_raw_filtered_clustered_boxes(
+                    rgb_u8,
+                    raw_boxes_xyxy=raw_boxes,
+                    filt_boxes_xyxy=filt_boxes,
+                    cluster_boxes_xyxy=cluster_boxes,
+                )
+            else:
+                overlay = detlib.overlay_raw_and_filtered_boxes(
+                    rgb_u8, raw_boxes_xyxy=raw_boxes, filt_boxes_xyxy=filt_boxes
+                )
 
-        key, _ = self._key_and_meta(fp)
-        out = self._viz_path(fp, key)
-        if os.path.isfile(out) and self.mode != "refresh":
-            return out
+            # Flat output dir: <cache_dir>/viz/*.png
+            viz_dir = os.path.join(self.cache_dir, 'viz')
+            os.makedirs(viz_dir, exist_ok=True)
 
-        try:
-            overlay = detlib.overlay_raw_and_filtered_boxes(rgb_u8, raw_boxes_xyxy=raw_boxes, filt_boxes_xyxy=filt_boxes)
-            from PIL import Image
-            Image.fromarray(overlay).save(out)
-            self.viz_writes += 1
-            return out
+            base = os.path.splitext(os.path.basename(fp))[0]
+            out_fp = os.path.join(viz_dir, base + '.png')
+            Image.fromarray(overlay).save(out_fp)
+            return out_fp
         except Exception as e:
-            try:
-                if self.logger:
-                    self.logger.warning(f"[BBoxCache] failed to write viz for {os.path.basename(fp)}: {e}")
-            except Exception:
-                pass
+            if self.logger:
+                self.logger.warning(
+                    f"[BBoxCache] failed to write viz for {os.path.basename(fp)}: {e}"
+                )
             return None
+
 
     @classmethod
     def from_config(cls, config, logger=None, bbox_sig_hash: str | None = None):
@@ -414,36 +417,56 @@ class Trainer:
 
         return loss_record.avg, acc
     
+
     def precompute_boxes(self, loader=None):
-        """Precompute and persist bbox cache for a loader (train by default), then exit."""
+        """Precompute & cache SAM2 bboxes.
+
+        Note: This precomputes ONLY raw/filtered boxes (and optional viz). It does NOT compute tokens.
+        """
         if self.bbox_cache is None:
-            self.logger.warning("[BBoxCache] bbox_cache_mode=off; nothing to precompute.")
+            self.logger.info("BBox cache disabled; skip precompute_boxes().")
             return
 
-        self.model.eval()
+        if self.bbox_cache.mode == "read":
+            self.logger.info("BBox cache is read-only; skip precompute_boxes().")
+            return
+
         dl = loader if loader is not None else self.train_loader
-        self._bbox_stats = {'hit': 0, 'miss': 0, 'write': 0}
+        if dl is None:
+            raise ValueError("train_loader is None; pass loader to precompute_boxes(loader=...).")
 
-        with torch.inference_mode():
-            for batch in tqdm(dl, desc="Precomputing bboxes", leave=True):
-                if len(batch) == 5:
-                    inputs, labels, freq, bw, snr = batch
-                    fps = None
-                else:
-                    inputs, labels, freq, bw, snr, fps = batch
-                inputs = inputs.to(self.device, non_blocking=True)
-                # Call tokenization which will populate bbox cache (and optionally viz)
-                _ = self._batch_to_tokens(inputs, sample_fps=fps)
+        # Reset stats
+        self._bbox_stats = {"hit": 0, "miss": 0, "write": 0}
 
-        # DDP: aggregate stats
-        if dist.is_initialized():
-            t = torch.tensor([self._bbox_stats['hit'], self._bbox_stats['miss'], self._bbox_stats['write']],
-                             device=self.device, dtype=torch.long)
-            dist.all_reduce(t, op=dist.ReduceOp.SUM)
-            if dist.get_rank() == 0:
-                self.logger.info(f"[BBoxCache] precompute done: hit={int(t[0])} miss={int(t[1])} write={int(t[2])}")
-        else:
-            self.logger.info(f"[BBoxCache] precompute done: hit={self._bbox_stats['hit']} miss={self._bbox_stats['miss']} write={self._bbox_stats['write']}")
+        total = len(dl.dataset) if hasattr(dl, "dataset") else None
+        pbar = tqdm(total=total, desc="Precomputing bboxes", unit="img")
+
+        for batch in dl:
+            if not isinstance(batch, (list, tuple)):
+                raise ValueError("Expected batch to be tuple/list")
+
+            if len(batch) == 6:
+                inputs, labels, freqs, bws, snrs, fps = batch
+            elif len(batch) == 5:
+                inputs, labels, freqs, bws, snrs = batch
+                fps = None
+            else:
+                raise ValueError(f"Unexpected batch size: {len(batch)}")
+
+            # Keep inputs on CPU (SAM2 takes numpy); avoid GPU->CPU round trips.
+            self._batch_to_boxes(inputs, sample_fps=fps)
+            try:
+                pbar.update(int(inputs.shape[0]))
+            except Exception:
+                pbar.update(1)
+
+        pbar.close()
+
+        # Log stats
+        st = self._bbox_stats
+        self.logger.info(
+            f"BBox precompute done. hit={st['hit']} miss={st['miss']} write={st['write']} | mode={self.bbox_cache.mode}"
+        )
 
 
     def train(self):
@@ -495,6 +518,90 @@ class Trainer:
         return best_path if (not dist.is_initialized() or dist.get_rank()==0) else None
 
     
+
+
+    def _batch_to_boxes(self, inputs_bhw: torch.Tensor, sample_fps=None):
+        """Ensure raw/filtered boxes are cached for a batch."""
+        B, H, W = inputs_bhw.shape
+
+        for i in range(B):
+            fp = sample_fps[i] if sample_fps is not None else None
+
+            # spec: float32 numpy
+            spec = inputs_bhw[i].detach().to("cpu").numpy()
+            if spec.dtype != np.float32:
+                spec = spec.astype(np.float32, copy=False)
+
+            # Cache hit?
+            if fp is not None and self.bbox_cache is not None and self.bbox_cache.mode != "refresh":
+                got = self.bbox_cache.get(fp)
+                if got is not None:
+                    self._bbox_stats["hit"] += 1
+                    continue
+
+            self._bbox_stats["miss"] += 1
+
+            # In read mode we shouldn't be here
+            if fp is not None and self.bbox_cache is not None and self.bbox_cache.mode == "read":
+                raise RuntimeError(f"BBox cache is read-only but missing entry for: {fp}")
+
+            gray_u8 = detlib.to_uint8_grayscale(spec)
+            rgb = np.stack([gray_u8] * 3, axis=-1)
+
+            # SAM2 masks
+            masks = self.mask_generator.generate(rgb)
+
+            # raw boxes
+            raw_boxes = []
+            for m in masks:
+                if "_bbox_xyxy" not in m:
+                    m["_bbox_xyxy"] = detlib.mask_dict_to_bbox_xyxy(m)
+                raw_boxes.append(m["_bbox_xyxy"])
+
+            # filtered boxes (rectangularity + size)
+            kept = detlib.filter_masks_rect_and_area(
+                masks,
+                H, W,
+                min_rectangularity=self.config.min_rectangularity,
+                max_bbox_area_ratio=self.config.max_bbox_area_ratio,
+            )
+
+            filt_boxes = []
+            for m in kept:
+                if "_bbox_xyxy" not in m:
+                    m["_bbox_xyxy"] = detlib.mask_dict_to_bbox_xyxy(m)
+                filt_boxes.append(m["_bbox_xyxy"])
+
+            if fp is not None and self.bbox_cache is not None:
+                raw_t = torch.as_tensor(raw_boxes, dtype=torch.int16)
+                filt_t = torch.as_tensor(filt_boxes, dtype=torch.int16)
+                if raw_t.ndim == 1:
+                    raw_t = raw_t.reshape(0, 4)
+                if filt_t.ndim == 1:
+                    filt_t = filt_t.reshape(0, 4)
+
+                wrote = self.bbox_cache.put(fp, raw_t, filt_t)
+                if wrote:
+                    self._bbox_stats["write"] += 1
+
+                    if self.bbox_cache.viz:
+                        cluster_boxes = None
+                        try:
+                            cluster_boxes = self.preprocessor.select_main_boxes(filt_boxes)
+                            if hasattr(cluster_boxes, 'tolist'):
+                                cluster_boxes = cluster_boxes.tolist()
+                        except Exception:
+                            cluster_boxes = None
+
+                        self.bbox_cache.maybe_save_viz(
+                            fp,
+                            rgb_u8=rgb,
+                            raw_boxes=raw_boxes,
+                            filt_boxes=filt_boxes,
+                            cluster_boxes=cluster_boxes,
+                        )
+
+
     def _batch_to_tokens(self, inputs_bhw: torch.Tensor, sample_fps=None):
         """
         inputs_bhw: (B,H,W) torch.Tensor
@@ -573,7 +680,22 @@ class Trainer:
 
                         # Visualization (only in write/readwrite/refresh and if bbox_viz enabled)
                         try:
-                            self.bbox_cache.maybe_save_viz(fp, rgb_u8=rgb, raw_boxes=raw_boxes, filt_boxes=filt_boxes)
+                            
+                            cluster_boxes = None
+                            try:
+                                cluster_boxes = self.preprocessor.select_main_boxes(filt_boxes)
+                                if hasattr(cluster_boxes, 'tolist'):
+                                    cluster_boxes = cluster_boxes.tolist()
+                            except Exception:
+                                cluster_boxes = None
+
+                            self.bbox_cache.maybe_save_viz(
+                                fp,
+                                rgb_u8=rgb,
+                                raw_boxes=raw_boxes,
+                                filt_boxes=filt_boxes,
+                                cluster_boxes=cluster_boxes,
+                            )
                         except Exception:
                             pass
                     else:
