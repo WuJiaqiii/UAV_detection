@@ -11,6 +11,11 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import torch
 
+# Allow running this file as a script (python util/detection.py)
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+
 def load_summed_submatrices(mat_path: str, key: str = "summed_submatrices") -> np.ndarray:
     """
     Load `key` from a .mat file.
@@ -302,6 +307,65 @@ def overlay_masks_on_rgb(
 
     return out
 
+
+def overlay_bboxes_on_rgb(
+    rgb_u8: np.ndarray,
+    raw_boxes=None,
+    filtered_boxes=None,
+    clustered_boxes=None,
+    show_text: bool = True,
+):
+    """Draw multiple bbox sets on top of the input image.
+
+    Colors (RGB):
+      - raw_boxes: red
+      - filtered_boxes: green
+      - clustered_boxes (DBSCAN+NMS): yellow
+
+    Args:
+      rgb_u8: HxWx3 uint8
+      raw_boxes/filtered_boxes/clustered_boxes: iterable of [x1,y1,x2,y2]
+    Returns:
+      overlay: HxWx3 uint8
+    """
+    img = Image.fromarray(rgb_u8)
+    draw = ImageDraw.Draw(img)
+
+    def _draw_set(boxes, color, width):
+        if boxes is None:
+            return 0
+        n = 0
+        for b in boxes:
+            if b is None:
+                continue
+            x1, y1, x2, y2 = [int(v) for v in b]
+            if x2 <= x1 or y2 <= y1:
+                continue
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=width)
+            n += 1
+        return n
+
+    n_raw = _draw_set(raw_boxes, (255, 0, 0), 1)
+    n_flt = _draw_set(filtered_boxes, (0, 255, 0), 2)
+    n_clu = _draw_set(clustered_boxes, (255, 255, 0), 3)
+
+    if show_text:
+        # Legend and counts
+        lines = [
+            f"raw={n_raw} (red)",
+            f"filtered={n_flt} (green)",
+            f"clustered={n_clu} (yellow)",
+        ]
+        x0, y0 = 6, 6
+        for line in lines:
+            # text background
+            tw, th = draw.textlength(line), 12
+            draw.rectangle([x0-2, y0-2, x0+int(tw)+6, y0+th+4], fill=(0, 0, 0))
+            draw.text((x0, y0), line, fill=(255, 255, 255))
+            y0 += th + 6
+
+    return np.array(img)
+
 import argparse
 
 def get_parser():
@@ -382,6 +446,37 @@ def get_parser():
     sam.add_argument("--min_mask_region_area", type=int, default=120,
                      help="最小 mask 面积（像素数）：提高 -> 过滤小噪声/小碎片，但可能漏小目标")
 
+
+    # =========================
+    # DBSCAN clustering (same logic as util/preprocess.py)
+    # =========================
+    pre = parser.add_argument_group("Preprocessor (DBSCAN + NMS)")
+    pre.add_argument("--pre_min_area", type=int, default=20,
+                     help="DBSCAN 前的基本过滤：最小 bbox 面积（像素）")
+    pre.add_argument("--pre_min_ratio", type=float, default=2.0,
+                     help="DBSCAN 前的基本过滤：最小宽高比 (w/h)，偏向保留横向条形")
+    pre.add_argument("--pre_freq_eps", type=float, default=5,
+                     help="DBSCAN eps（按频率中心 y 聚类，单位为像素/频率 bin）")
+    pre.add_argument("--pre_freq_min_samples", type=int, default=1,
+                     help="DBSCAN min_samples")
+    pre.add_argument("--pre_nms_iou_thresh", type=float, default=0.5,
+                     help="主簇内部 NMS 的 IoU 阈值")
+
+    # These are only used to compute physical-unit features; for bbox clustering itself they don't matter.
+    pre.add_argument("--sampling_rate", type=float, default=1.0,
+                     help="采样率(Hz)。仅用于将像素坐标换算为物理单位特征；不影响 DBSCAN 选框")
+    pre.add_argument("--n_fft", type=int, default=1024,
+                     help="FFT 点数。仅用于特征换算，不影响 DBSCAN 选框")
+    pre.add_argument("--hop_length", type=int, default=1,
+                     help="STFT hop_length。仅用于特征换算，不影响 DBSCAN 选框")
+
+    # =========================
+    # BBox overlay output
+    # =========================
+    bx = parser.add_argument_group("BBox Overlay")
+    bx.add_argument("--no_bbox_overlay", action="store_true",
+                    help="不额外保存 raw/filtered/clustered 三套 bbox 叠加图")
+
     return parser.parse_args()
 
 
@@ -391,6 +486,9 @@ def main(args):
     out_pred = os.path.join(args.output_dir, "pred_overlays")
     os.makedirs(out_pred, exist_ok=True)
     out_gray = os.path.join(args.output_dir, "gray_inputs")
+    out_bbox = os.path.join(args.output_dir, "bbox_overlays")
+    if not args.no_bbox_overlay:
+        os.makedirs(out_bbox, exist_ok=True)
     if args.save_gray:
         os.makedirs(out_gray, exist_ok=True)
 
@@ -448,6 +546,19 @@ def main(args):
     
     mask_generator = SAM2AutomaticMaskGenerator(sam2_model, **gen_kwargs)
 
+    # Preprocessor for DBSCAN+NMS (used only for clustered bbox visualization)
+    from util.preprocess import SignalPreprocessor
+    _pre_for_viz = SignalPreprocessor(
+        sampling_rate=args.sampling_rate,
+        n_fft=args.n_fft,
+        hop_length=args.hop_length,
+        min_area=args.pre_min_area,
+        min_ratio=args.pre_min_ratio,
+        freq_eps=args.pre_freq_eps,
+        freq_min_samples=args.pre_freq_min_samples,
+        nms_iou_thresh=args.pre_nms_iou_thresh,
+    )
+
     # gather files
     mat_files = sorted(glob.glob(os.path.join(args.input_dir, "*.mat")))
     if not mat_files:
@@ -478,16 +589,56 @@ def main(args):
                     H, W = rgb.shape[:2]
 
                     masks = mask_generator.generate(rgb)
-                    print("raw masks:", len(masks))
+                    masks_raw = masks  # keep a copy for raw bbox visualization
+                    print("raw masks:", len(masks_raw))
+
+                    # Parse raw bboxes (from mask dict) for visualization
+                    raw_boxes = []
+                    for m0 in masks_raw:
+                        xyxy0 = None
+                        if "bbox" in m0 and m0["bbox"] is not None:
+                            xyxy0 = _parse_bbox_any(m0["bbox"])
+                        if xyxy0 is None:
+                            seg0 = m0.get("segmentation", None)
+                            if seg0 is not None:
+                                xyxy0 = _bbox_from_segmentation(np.asarray(seg0).astype(bool))
+                        if xyxy0 is None:
+                            continue
+                        x0, y0, x1, y1 = xyxy0
+                        # clamp
+                        x0 = int(max(0, min(W, x0)))
+                        x1 = int(max(0, min(W, x1)))
+                        y0 = int(max(0, min(H, y0)))
+                        y1 = int(max(0, min(H, y1)))
+                        if x1 > x0 and y1 > y0:
+                            raw_boxes.append([x0, y0, x1, y1])
 
                     # filter by rectangularity + bbox area ratio
                     masks = filter_masks_rect_and_area(
-                        masks,
+                        masks_raw,
                         H, W,
                         min_rectangularity=args.min_rectangularity,
                         max_bbox_area_ratio=args.max_bbox_area_ratio,
                     )
                     print("kept masks:", len(masks))
+
+                    filtered_boxes = [list(m["_bbox_xyxy"]) for m in masks if "_bbox_xyxy" in m]
+
+                    # DBSCAN+NMS main boxes (same as training preprocess)
+                    clustered_boxes = []
+                    if not args.no_bbox_overlay:
+                        main_boxes = _pre_for_viz.select_main_boxes(filtered_boxes)
+                        clustered_boxes = main_boxes.tolist() if main_boxes is not None and main_boxes.size else []
+                        # Save bbox overlay image: raw (red), filtered (green), clustered (yellow)
+                        bbox_overlay = overlay_bboxes_on_rgb(
+                            rgb_u8=rgb,
+                            raw_boxes=raw_boxes,
+                            filtered_boxes=filtered_boxes,
+                            clustered_boxes=clustered_boxes,
+                            show_text=True,
+                        )
+                        out_box_path = os.path.join(out_bbox, f"{name}_bboxes.png")
+                        Image.fromarray(bbox_overlay).save(out_box_path)
 
                     overlay = overlay_masks_on_rgb(
                         rgb_u8=rgb,
