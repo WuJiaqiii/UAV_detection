@@ -329,6 +329,8 @@ class Trainer:
 
             # 构造 token 序列（检测+预处理）
             tokens, key_padding_mask = self._batch_to_tokens(inputs, sample_fps=fps)
+            tokens = tokens.to(self.config.device)
+            key_padding_mask = key_padding_mask.to(self.config.device)
 
             self.optimizer.zero_grad(set_to_none=True)
 
@@ -373,6 +375,8 @@ class Trainer:
             labels = labels.to(self.device, non_blocking=True)
 
             tokens, key_padding_mask = self._batch_to_tokens(inputs, sample_fps=fps)
+            tokens = tokens.to(self.config.device)
+            key_padding_mask = key_padding_mask.to(self.config.device)
 
             with autocast(enabled=self.config.use_amp_autocast, device_type=self.device.type):
                 try:

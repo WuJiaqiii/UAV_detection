@@ -107,11 +107,16 @@ class TransformerEncoderLayer(nn.Module):
 
             attn_mask = m.view(B * H, S, S)
             key_padding = None  # 关键：避免类型不一致 warning
-        
+
+        if key_padding is not None:
+            key_padding = key_padding.to(device=src.device, dtype=torch.bool)
+        if attn_mask is not None:
+            attn_mask = attn_mask.to(device=src.device)
+
         attn_output, _ = self.self_attn(
             src, src, src,
-            key_padding_mask=src_key_padding_mask,
-            attn_mask=attn_bias
+            key_padding_mask=key_padding,   
+            attn_mask=attn_mask             
         )
         src = self.norm1(src + self.dropout_attn(attn_output))
 
@@ -172,11 +177,13 @@ class SignalTransformerClassifier(nn.Module):
         # Classification head
         self.fc_out = nn.Linear(d_model, num_classes)
 
-    def forward(self, x, src_key_padding_mask=None):
+    def forward(self, x, src_key_padding_mask=None, key_padding_mask=None):
         """
         x: (B,S,feature_dim) raw tokens (包含时间/频率等特征)
         src_key_padding_mask: (B,S) bool, True where padded
         """
+        if src_key_padding_mask is None and key_padding_mask is not None:
+            src_key_padding_mask = key_padding_mask
         # 计算 attention bias（基于原始 tokens 的 t,f），然后再做 embedding
         attn_bias = None
         if self.use_rel_pos_bias and self.relpos is not None:

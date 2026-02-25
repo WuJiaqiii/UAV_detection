@@ -80,7 +80,7 @@ def get_parser():
     # Optimizer / Scheduler
     g_opt = parser.add_argument_group("Optimizer & LR Scheduler")
     g_opt.add_argument(
-        "--lr", type=float, default=1e-6,
+        "--lr", type=float, default=1e-4,
         help="Base learning rate (e.g., 1e-4~1e-6 depending on your setup)."
     )
     g_opt.add_argument(
