@@ -172,7 +172,6 @@ class BBoxCache:
 
         try:
             obj = {
-                "sig_hash": self.sig_hash,
                 "source": meta,
                 "raw_boxes": raw_boxes.to(dtype=torch.int32, device="cpu"),
                 "filt_boxes": filt_boxes.to(dtype=torch.int32, device="cpu"),

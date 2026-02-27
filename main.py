@@ -54,7 +54,7 @@ def get_parser():
         help="Batch size for training/validation."
     )
     g_data.add_argument(
-        "--sample_ratio", type=float, default=1.0,
+        "--sample_ratio", type=float, default=0.1,
         help="The ratio of sampling in the dataset every epoch."
     )
     g_data.add_argument(
