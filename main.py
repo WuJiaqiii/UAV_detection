@@ -61,6 +61,10 @@ def get_parser():
         "--feature_size", type=int, default=128,
         help="(Legacy/Optional) Feature size extracted by some network. Not used in token-transformer path unless you wire it."
     )
+    g_data.add_argument(
+        "--whitelist_csv", type=str, default='/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/data/viz.csv',
+        help="CSV file with a column 'filename' listing .png/.mat (or basename) to KEEP."
+    )
 
     # Experiment / IO
     g_exp = parser.add_argument_group("Experiment & Checkpoints")
@@ -150,11 +154,11 @@ def get_parser():
         help="Path to SAM2 model config (.yaml)."
     )
     g_sam2.add_argument(
-        "--sam2_points_per_side", type=int, default=64,
+        "--sam2_points_per_side", type=int, default=32,
         help="SAM2 mask generator sampling density. Lower -> faster & fewer masks; Higher -> more recall but slower."
     )
     g_sam2.add_argument(
-        "--sam2_points_per_batch", type=int, default=128,
+        "--sam2_points_per_batch", type=int, default=512,
         help="SAM2 points processed per batch. Increase may speed up but uses more VRAM."
     )
     g_sam2.add_argument(
@@ -213,7 +217,7 @@ def get_parser():
         help="Minimum bbox area (pixels) used in preprocess.py filtering."
     )
     g_pre.add_argument(
-        "--pre_min_ratio", type=float, default=2.0,
+        "--pre_min_ratio", type=float, default=0,
         help="Minimum width/height ratio for bboxes in preprocess.py. Larger -> prefer horizontal boxes."
     )
     g_pre.add_argument(
@@ -221,7 +225,7 @@ def get_parser():
         help="DBSCAN eps on frequency-center (pixels). Larger -> merge clusters more easily."
     )
     g_pre.add_argument(
-        "--pre_freq_min_samples", type=int, default=1,
+        "--pre_freq_min_samples", type=int, default=2,
         help="DBSCAN min_samples. 1 means every box can form a cluster; >1 suppresses isolated boxes."
     )
     g_pre.add_argument(
@@ -268,7 +272,15 @@ def get_parser():
     )
     g_bbox.add_argument(
         "--precompute_boxes", action=argparse.BooleanOptionalAction, default=False,
-        help="Only precompute and persist SAM2 bboxes for the train loader, then exit."
+        help="Only precompute and persist SAM2 bboxes for the train and val loader, then exit."
+    )
+    g_bbox.add_argument(
+        "--render_cached_viz", action=argparse.BooleanOptionalAction, default=False,
+        help="Read cached bbox .pt and render raw/filtered/clustered overlays for the whole dataset; no SAM2."
+    )
+    g_bbox.add_argument(
+        "--render_boxes_source", type=str, default="filt", choices=["filt", "raw"],
+        help="Use filt_boxes or raw_boxes as input of select_main_boxes() when rendering."
     )
 
     args = parser.parse_args()
@@ -351,6 +363,11 @@ def main(args):
     )
     
     trainer = Trainer(config, (train_loader, val_loader), logger, model, mask_generator, preprocessor)
+    
+    if getattr(config, "render_cached_viz", False):
+        trainer.render_cached_viz(train_loader, boxes_source=config.render_boxes_source)
+        trainer.render_cached_viz(val_loader, boxes_source=config.render_boxes_source)
+        return
 
     if getattr(config, 'precompute_boxes', False):
         trainer.precompute_boxes(train_loader)

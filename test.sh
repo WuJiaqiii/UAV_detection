@@ -1,0 +1,13 @@
+python postfilter_viz_by_protocol.py \
+  --dataset_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/train_data_space_awgn/1 \
+  --whitelist_csv /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/data/viz.csv \
+  --cache_sig_dir experiments/sam2_bbox_cache/2559bf7b5149 \
+  --per_protocol_ratio 0.6 \
+  --min_per_protocol 1000 --max_per_protocol 20000 \
+  --boxes_from filt \
+  --pre_min_area 20 \
+  --pre_min_ratio 0 \
+  --pre_freq_eps 5 \
+  --pre_freq_min_samples 2 \
+  --pre_nms_iou_thresh 0.5 \
+  --out_dir experiments/postfilter_viz/run1

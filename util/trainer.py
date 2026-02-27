@@ -51,9 +51,8 @@ class BBoxCache:
         self.dataset_root = dataset_root
 
         self.sig_json = json.dumps(signature, sort_keys=True, ensure_ascii=False)
-        self.sig_hash = hashlib.sha1(self.sig_json.encode("utf-8")).hexdigest()[:12]
 
-        self.cache_dir = os.path.join(base_dir, self.sig_hash)
+        self.cache_dir = os.path.join(base_dir)
         os.makedirs(self.cache_dir, exist_ok=True)
 
         self.viz = bool(viz)
@@ -90,7 +89,9 @@ class BBoxCache:
 
     def _key_and_meta(self, fp: str):
         rel = self._safe_relpath(fp, self.dataset_root)
-        key = hashlib.sha1(rel.encode("utf-8")).hexdigest()
+        # key = hashlib.sha1(rel.encode("utf-8")).hexdigest()
+        base = os.path.splitext(os.path.basename(fp))[0]
+        key = base
         try:
             st = os.stat(fp)
             meta = {"rel": rel, "size": int(st.st_size), "mtime": int(st.st_mtime)}
@@ -126,13 +127,13 @@ class BBoxCache:
 
         try:
             obj = torch.load(path, map_location="cpu")
-            if not isinstance(obj, dict) or obj.get("sig_hash") != self.sig_hash:
-                return None
-            src = obj.get("source", {})
-            if meta["size"] is not None and src.get("size") is not None and int(src.get("size")) != int(meta["size"]):
-                return None
-            if meta["mtime"] is not None and src.get("mtime") is not None and int(src.get("mtime")) != int(meta["mtime"]):
-                return None
+            # if not isinstance(obj, dict) or obj.get("sig_hash") != self.sig_hash:
+            #     return None
+            # src = obj.get("source", {})
+            # if meta["size"] is not None and src.get("size") is not None and int(src.get("size")) != int(meta["size"]):
+            #     return None
+            # if meta["mtime"] is not None and src.get("mtime") is not None and int(src.get("mtime")) != int(meta["mtime"]):
+            #     return None
 
             raw_boxes = obj.get("raw_boxes", None)
             filt_boxes = obj.get("filt_boxes", None)
@@ -214,14 +215,22 @@ class BBoxCache:
                     rgb_u8, raw_boxes_xyxy=raw_boxes, filt_boxes_xyxy=filt_boxes
                 )
 
-            # Flat output dir: <cache_dir>/viz/*.png
-            viz_dir = os.path.join(self.cache_dir, 'viz')
+            # rank0 only + viz_limit
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            if rank != 0:
+                return None
+            if self.viz_limit > 0 and self.viz_writes >= self.viz_limit:
+                return None
+
+            viz_dir = self.viz_dir or os.path.join(self.cache_dir, "viz")
             os.makedirs(viz_dir, exist_ok=True)
 
             base = os.path.splitext(os.path.basename(fp))[0]
-            out_fp = os.path.join(viz_dir, base + '.png')
+            out_fp = os.path.join(viz_dir, base + ".png")
             Image.fromarray(overlay).save(out_fp)
+            self.viz_writes += 1
             return out_fp
+        
         except Exception as e:
             if self.logger:
                 self.logger.warning(
@@ -471,6 +480,82 @@ class Trainer:
         self.logger.info(
             f"BBox precompute done. hit={st['hit']} miss={st['miss']} write={st['write']} | mode={self.bbox_cache.mode}"
         )
+        
+    @torch.no_grad()
+    def render_cached_viz(self, loader=None, boxes_source: str = "filt"):
+        """
+        Read bbox cache (.pt) for each sample, run select_main_boxes(), and write overlay images.
+        Requires bbox_cache enabled. Does NOT run SAM2.
+        """
+        if self.bbox_cache is None:
+            raise RuntimeError("BBox cache is disabled. Set --bbox_cache_mode read (or readwrite).")
+
+        dl = loader if loader is not None else self.train_loader
+        if dl is None:
+            raise ValueError("loader is None.")
+
+        # allow read mode; but require cache hits
+        total = len(dl.dataset) if hasattr(dl, "dataset") else None
+        pbar = tqdm(total=total, desc="Rendering cached bbox viz", unit="img")
+
+        hit, miss, wrote = 0, 0, 0
+        for batch in dl:
+            if len(batch) == 6:
+                inputs, labels, freqs, bws, snrs, fps = batch
+            else:
+                inputs, labels, freqs, bws, snrs = batch
+                fps = None
+
+            B, H, W = inputs.shape
+            for i in range(B):
+                fp = fps[i] if fps is not None else None
+                if fp is None:
+                    continue
+
+                got = self.bbox_cache.get(fp)
+                if got is None:
+                    miss += 1
+                    # 强制只读缓存：不允许 miss
+                    if str(getattr(self.config, "bbox_cache_mode", "off")).lower() == "read":
+                        raise RuntimeError(f"[BBoxCache] miss in read mode: {fp}")
+                    continue
+
+                hit += 1
+                raw_t, filt_t = got
+                raw_boxes = raw_t.cpu().numpy().tolist()
+                filt_boxes = filt_t.cpu().numpy().tolist()
+
+                # 输入 select_main_boxes 的候选框来源
+                det_boxes = filt_boxes if boxes_source == "filt" else raw_boxes
+
+                # spec -> rgb
+                spec = inputs[i].detach().cpu().numpy().astype(np.float32)
+                gray_u8 = detlib.to_uint8_grayscale(spec)
+                rgb = np.stack([gray_u8] * 3, axis=-1)
+
+                # clustered/main boxes（用你已修改过的参数/逻辑）
+                try:
+                    cluster_boxes = self.preprocessor.select_main_boxes(det_boxes)
+                    if hasattr(cluster_boxes, "tolist"):
+                        cluster_boxes = cluster_boxes.tolist()
+                except Exception:
+                    cluster_boxes = None
+
+                out = self.bbox_cache.maybe_save_viz(
+                    fp, rgb_u8=rgb,
+                    raw_boxes=raw_boxes, filt_boxes=filt_boxes,
+                    cluster_boxes=cluster_boxes
+                )
+                if out is not None:
+                    wrote += 1
+
+            try:
+                pbar.update(int(B))
+            except Exception:
+                pbar.update(1)
+
+        pbar.close()
+        self.logger.info(f"Render cached viz done. hit={hit} miss={miss} wrote={wrote}")
 
 
     def train(self):

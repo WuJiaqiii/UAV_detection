@@ -3,5 +3,6 @@
 *.pth
 *.hdf5
 *.png
+*.csv
 experiments/*
 !.gitignore

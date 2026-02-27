@@ -1,6 +1,7 @@
 import os
 import re
 import glob
+import csv
 import numpy as np
 import torch
 import random
@@ -35,6 +36,53 @@ class UAVDataset(Dataset):
         mat_files = sorted(glob.glob(os.path.join(dataset_dir, "*.mat")))
         if not mat_files:
             raise FileNotFoundError(f"No .mat files found under: {dataset_dir}")
+        
+        def _load_whitelist(csv_path: str) -> set[str]:
+            keep = set()
+            with open(csv_path, "r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                if reader.fieldnames is None:
+                    raise ValueError(f"Invalid CSV (no header): {csv_path}")
+
+                # 优先用 filename 列；否则用第一列
+                col = "filename" if "filename" in reader.fieldnames else reader.fieldnames[0]
+
+                for row in reader:
+                    v = (row.get(col) or "").strip()
+                    if not v:
+                        continue
+                    # 统一成 basename，避免带路径
+                    v = os.path.basename(v)
+                    # 去掉可能残留的引号
+                    v = v.strip('"').strip("'")
+                    keep.add(v)
+            return keep
+
+        whitelist_csv = getattr(config, "whitelist_csv", None)
+        if whitelist_csv:
+            if not os.path.isfile(whitelist_csv):
+                raise FileNotFoundError(f"--whitelist_csv not found: {whitelist_csv}")
+
+            keep_names = _load_whitelist(whitelist_csv)
+
+            before = len(mat_files)
+            filtered = []
+            for fp in mat_files:
+                fname = os.path.basename(fp)                 # xxx.mat
+                base = os.path.splitext(fname)[0]            # xxx
+                png_name = base + ".png"                     # xxx.png
+
+                # 兼容：csv 里可能放 png / mat / 或者不带扩展名
+                if (fname in keep_names) or (png_name in keep_names) or (base in keep_names):
+                    filtered.append(fp)
+
+            mat_files = filtered
+            logger.info(
+                f"[Whitelist] Applied whitelist_csv={whitelist_csv}: keep {len(mat_files)}/{before}, drop {before-len(mat_files)}"
+            )
+
+            if not mat_files:
+                raise RuntimeError("Whitelist filtered out all .mat files. Check filename mapping (.mat <-> .png) and CSV content.")
 
         files, protocol_list, freq_list, bw_list, snr_list = [], [], [], [], []
         
