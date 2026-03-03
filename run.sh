@@ -19,4 +19,4 @@ python main.py \
   --epochs 1000 \
   --batch_size 16 \
   --bbox_cache_mode readwrite \
-  --lr 1e-5 \
+  --lr 1e-6 \
