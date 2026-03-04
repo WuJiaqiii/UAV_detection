@@ -424,8 +424,19 @@ class Trainer:
             y_true = np.concatenate(all_targets) if len(all_targets) else np.array([], dtype=np.int64)
             if y_true.size > 0:
                 cm = confusion_matrix(y_true, y_pred)
-                cm_path = os.path.join(self.config.result_dir, f"confusion_matrix_epoch_{epoch+1}.npy")
-                np.save(cm_path, cm)
+                # Create a heatmap for the confusion matrix
+                plt.figure(figsize=(10, 8))
+                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=np.unique(y_true), yticklabels=np.unique(y_true))
+                plt.title(f'Confusion Matrix - Epoch {epoch + 1}')
+                plt.xlabel('Predicted Label')
+                plt.ylabel('True Label')
+
+                # Save the figure as PNG
+                cm_path = os.path.join(self.config.result_dir, f"confusion_matrix_epoch_{epoch+1}.png")
+                plt.savefig(cm_path, bbox_inches='tight')  # Save the figure as .png
+                plt.close()  # Close the plot to avoid display issues
+
+                self.logger.info(f"Confusion matrix saved at {cm_path}")
 
         return loss_record.avg, acc
     
