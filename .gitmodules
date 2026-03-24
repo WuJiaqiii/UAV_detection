@@ -1,6 +1,3 @@
-[submodule "sam2"]
-	path = sam2lib
-	url = https://github.com/facebookresearch/sam2.git
-[submodule "sam2lib"]
-	path = sam2lib
-	url = git@github.com:WuJiaqiii/sam2.git
+[submodule "yolov5"]
+	path = yolov5
+	url = git@github.com:WuJiaqiii/yolov5.git
