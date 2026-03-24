@@ -426,12 +426,20 @@ class Trainer:
             y_true = np.concatenate(all_targets) if len(all_targets) else np.array([], dtype=np.int64)
             if y_true.size > 0:
                 cm = confusion_matrix(y_true, y_pred)
+
+                # 使用 self.config.classes 来替换数字标签为真实名称
+                labels = list(self.config.classes.keys())  # 获取所有标签名称
+
                 # Create a heatmap for the confusion matrix
                 plt.figure(figsize=(10, 8))
-                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=np.unique(y_true), yticklabels=np.unique(y_true))
+                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
                 plt.title(f'Confusion Matrix - Epoch {epoch + 1}')
                 plt.xlabel('Predicted Label')
                 plt.ylabel('True Label')
+
+                # Rotate the axis labels to avoid overlap
+                plt.xticks(rotation=45, ha='right')  # Rotate x-axis labels by 45 degrees
+                plt.yticks(rotation=45, ha='right')  # Rotate y-axis labels by 45 degrees
 
                 # Save the figure as PNG
                 cm_path = os.path.join(self.config.result_dir, f"confusion_matrix_epoch_{epoch+1}.png")

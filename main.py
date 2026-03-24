@@ -131,7 +131,7 @@ def get_parser():
         help="Number of Transformer encoder layers."
     )
     g_model.add_argument(
-        "--num_classes", type=int, default=10,
+        "--num_classes", type=int, default=8,
         help="Number of protocol classes (multi-class classification)."
     )
     g_model.add_argument(
@@ -139,7 +139,7 @@ def get_parser():
         help="Dropout probability used in Transformer."
     )
     g_model.add_argument(
-        "--max_tokens", type=int, default=128,
+        "--max_tokens", type=int, default=64,
         help="Max number of tokens per sample (truncate if too many boxes survive)."
     )
 
