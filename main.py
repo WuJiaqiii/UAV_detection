@@ -92,11 +92,15 @@ def get_parser():
         "--sample_ratio", type=float, default=1.0,
         help="The ratio of sampling in the dataset every epoch."
     )
+    g_data.add_argument(
+        "--exclude_classes", type=str, nargs="*", default=[],
+        help="Class names to exclude from dataset, e.g. --exclude_classes Skylink21 FPV1"
+    )
     
     # YOLOv5 Detector
     g_yolo = parser.add_argument_group("YOLOv5 Detector")
     g_yolo.add_argument(
-        "--yolo_weights", type=str, default="",
+        "--yolo_weights", type=str, default="/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/train/exp5/weights/best.pt",
         help="Path to YOLOv5 weights (.pt / .onnx / etc.)."
     )
     g_yolo.add_argument(
@@ -150,6 +154,18 @@ def get_parser():
         "--checkpoint_path", type=str, default=None,
         help="Optional path to resume training or load pretrained transformer weights."
     )
+    g_exp.add_argument(
+        "----bbox_cache_mode", type=str, default='readwrite',
+        help="off / read / write / readwrite / refresh"
+    )
+    g_exp.add_argument(
+        "--precompute_boxes", action=argparse.BooleanOptionalAction, default=False,
+        help="Only precompute and persist SAM2 bboxes for the train and val loader, then exit."
+    )
+    g_exp.add_argument(
+        "--bbox_cache_path", type=str, default=None,
+        help="Bbox cache save path."
+    )
 
     # Optimizer / Scheduler
     g_opt = parser.add_argument_group("Optimizer & LR Scheduler")
@@ -177,11 +193,11 @@ def get_parser():
     # Transformer Model
     g_model = parser.add_argument_group("Transformer Model")
     g_model.add_argument(
-        "--feature_dim", type=int, default=8,
+        "--feature_dim", type=int, default=4,
         help="Feature size extracted by preprocess network."
     )
     g_model.add_argument(
-        "--d_model", type=int, default=128,
+        "--d_model", type=int, default=64,
         help="Transformer hidden size (token embedding dimension)."
     )
     g_model.add_argument(
@@ -234,6 +250,14 @@ def main(args):
     if world_size > 1:
         config.device = torch.device(f'cuda:{local_rank}')
     config.rank, config.world_size, config.local_rank = rank, world_size, local_rank
+    
+    # exclude classes
+    exclude_set = set(getattr(config, "exclude_classes", []) or [])
+    config.classes_all = dict(config.classes)
+    kept_items = [(name, old_idx) for name, old_idx in sorted(config.classes.items(), key=lambda x: x[1])
+                if name not in exclude_set]
+    config.classes = {name: new_idx for new_idx, (name, _) in enumerate(kept_items)}
+    config.num_classes = len(config.classes)
 
     if rank == 0:
         config.freeze()
@@ -292,6 +316,11 @@ def main(args):
     )
     
     trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier)
+    
+    if config.precompute_boxes:
+        trainer.precompute_boxes(train_loader)
+        trainer.precompute_boxes(val_loader)
+        return
 
     trainer.train()
 

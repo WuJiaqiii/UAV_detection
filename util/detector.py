@@ -12,6 +12,39 @@ from yolov5.models.common import DetectMultiBackend
 from yolov5.utils.general import check_img_size, non_max_suppression, scale_boxes
 from yolov5.utils.torch_utils import select_device
 
+import sys
+
+def register_yolov5_legacy_module_aliases():
+    """
+    Make old YOLOv5 checkpoint module names (models.*, utils.*)
+    resolvable after yolov5 is integrated as a subpackage.
+    """
+    import yolov5.models as y5_models
+    import yolov5.models.yolo as y5_models_yolo
+    import yolov5.models.common as y5_models_common
+    import yolov5.models.experimental as y5_models_experimental
+
+    import yolov5.utils as y5_utils
+    import yolov5.utils.general as y5_utils_general
+    import yolov5.utils.torch_utils as y5_utils_torch_utils
+    import yolov5.utils.autoanchor as y5_utils_autoanchor
+    import yolov5.utils.dataloaders as y5_utils_dataloaders
+    import yolov5.utils.plots as y5_utils_plots
+    import yolov5.utils.loss as y5_utils_loss
+
+    sys.modules.setdefault("models", y5_models)
+    sys.modules.setdefault("models.yolo", y5_models_yolo)
+    sys.modules.setdefault("models.common", y5_models_common)
+    sys.modules.setdefault("models.experimental", y5_models_experimental)
+
+    sys.modules.setdefault("utils", y5_utils)
+    sys.modules.setdefault("utils.general", y5_utils_general)
+    sys.modules.setdefault("utils.torch_utils", y5_utils_torch_utils)
+    sys.modules.setdefault("utils.autoanchor", y5_utils_autoanchor)
+    sys.modules.setdefault("utils.dataloaders", y5_utils_dataloaders)
+    sys.modules.setdefault("utils.plots", y5_utils_plots)
+    sys.modules.setdefault("utils.loss", y5_utils_loss)
+
 def _to_uint8_gray(spec: np.ndarray) -> np.ndarray:
     """
     Robustly convert spectrogram array to uint8 grayscale image.
@@ -94,9 +127,12 @@ class YoloV5Detector:
     """
     
     def __init__(self, config, device):
+        
+        register_yolov5_legacy_module_aliases()
+        
         self.config = config
         self.device = device
-        self.model = DetectMultiBackend(config.yolo_weights, device=self.device, dnn=False, data=None, fp16=config.yolo_half)
+        self.model = DetectMultiBackend(config.yolo_weights, device=select_device(self.device), dnn=False, data=None, fp16=config.yolo_half)
         self.stride = int(self.model.stride)
         self.pt = bool(self.model.pt)
 

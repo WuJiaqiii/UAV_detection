@@ -101,11 +101,9 @@ class UAVDataset(Dataset):
                 continue
 
             protocol = m.group("protocol").strip()
-            if protocol not in self.mod2label:
-                raise KeyError(
-                    f"protocol '{protocol}' not found in config.classes mapping. "
-                    f"Available keys (sample): {list(self.mod2label.keys())[:10]} ..."
-                )
+            
+            if protocol not in config.classes:
+                continue
 
             parts = [p.strip() for p in m.group("bracket").split(",")]
             if len(parts) < 4:
