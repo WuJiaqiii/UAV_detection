@@ -26,8 +26,6 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=r".*find_unused_parameters=True was specified in DDP constructor.*", category=UserWarning)
 
-import argparse
-
 def get_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -270,7 +268,8 @@ def main(args):
         load_checkpoint({"model": classifier}, path=checkpoint_path, device='cpu', logger=logger)
     else:
         checkpoint_path = None
-        logger.warning(f'Checkpoint "{config.checkpoint_path}" not found')
+        if config.checkpoint_path:
+            logger.warning(f'Checkpoint "{config.checkpoint_path}" not found')
     
     ## yolo 矩形框检测    
     if torch.distributed.is_initialized():

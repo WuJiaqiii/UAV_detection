@@ -39,19 +39,19 @@ class Trainer:
         if dist.is_initialized():
             if dist.get_rank() == 0:
                 self.logger.info(f"Using DistributedDataParallel on {dist.get_world_size()} processes")
-            self.model = nn.parallel.DistributedDataParallel(
-                module=classifier,
+            self.classifier = nn.parallel.DistributedDataParallel(
+                module=self.classifier,
                 device_ids=[self.config.local_rank],
                 broadcast_buffers=False,
                 find_unused_parameters=False,
                 output_device=self.config.local_rank)
         elif torch.cuda.device_count() > 1 and self.config.use_data_parallel:
             self.logger.info(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
-            self.model = nn.DataParallel(self.model)
+            self.classifier = nn.DataParallel(self.classifier)
             
         self.criterion = torch.nn.CrossEntropyLoss()
             
-        self.optimizer = torch.optim.AdamW(list(self.model.parameters()), lr=self.config.lr, weight_decay=self.config.weight_decay)
+        self.optimizer = torch.optim.AdamW(list(self.classifier.parameters()), lr=self.config.lr, weight_decay=self.config.weight_decay)
         self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=self.config.cosine_annealing_T0, T_mult=self.config.cosine_annealing_mult)
         self.early_stopping = EarlyStopping(logger=self.logger, patience=self.config.early_stop_patience, delta=0)
         
@@ -65,28 +65,27 @@ class Trainer:
         """
 
         loss_record = AverageMeter()
-        self.model.train()
+        self.classifier.train()
 
         for batch_idx, (inputs, labels, freq, bw, snr, fps) in enumerate(tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}", leave=True)):
             
-            inputs = inputs.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
             # 构造 token 序列（检测+预处理）
-            tokens, key_padding_mask = self._batch_to_tokens(inputs, sample_fps=fps)
-            tokens = tokens.to(self.config.device)
-            key_padding_mask = key_padding_mask.to(self.config.device)
+            tokens, key_padding_mask = self._batch_to_tokens(inputs)
+            tokens = tokens.to(self.config.device, non_blocking=True)
+            key_padding_mask = key_padding_mask.to(self.config.device, non_blocking=True)
 
             self.optimizer.zero_grad(set_to_none=True)
 
             with autocast(enabled=self.config.use_amp_autocast, device_type=self.device.type):
                 try:
-                    logits = self.model(tokens, key_padding_mask=key_padding_mask)
+                    logits = self.classifier(tokens, key_padding_mask=key_padding_mask)
                 except TypeError:
                     try:
-                        logits = self.model(tokens, key_padding_mask)
+                        logits = self.classifier(tokens, key_padding_mask)
                     except TypeError:
-                        logits = self.model(tokens)
+                        logits = self.classifier(tokens)
 
                 loss = self.criterion(logits, labels)
 
@@ -110,27 +109,27 @@ class Trainer:
     def validate(self, epoch):
 
         loss_record = AverageMeter()
-        self.model.eval()
+        self.classifier.eval()
 
         total_correct, total_count = 0, 0
         all_preds, all_targets = [], []
 
         for batch_idx, (inputs, labels, freq, bw, snr, fps) in enumerate(tqdm(self.val_loader, desc=f"Validating Epoch {epoch + 1}", leave=True)):
-            inputs = inputs.to(self.device, non_blocking=True)
+
             labels = labels.to(self.device, non_blocking=True)
 
-            tokens, key_padding_mask = self._batch_to_tokens(inputs, sample_fps=fps)
-            tokens = tokens.to(self.config.device)
-            key_padding_mask = key_padding_mask.to(self.config.device)
+            tokens, key_padding_mask = self._batch_to_tokens(inputs)
+            tokens = tokens.to(self.config.device, non_blocking=True)
+            key_padding_mask = key_padding_mask.to(self.config.device, non_blocking=True)
 
             with autocast(enabled=self.config.use_amp_autocast, device_type=self.device.type):
                 try:
-                    logits = self.model(tokens, key_padding_mask=key_padding_mask)
+                    logits = self.classifier(tokens, key_padding_mask=key_padding_mask)
                 except TypeError:
                     try:
-                        logits = self.model(tokens, key_padding_mask)
+                        logits = self.classifier(tokens, key_padding_mask)
                     except TypeError:
-                        logits = self.model(tokens)
+                        logits = self.classifier(tokens)
 
                 loss = self.criterion(logits, labels)
 
@@ -142,48 +141,107 @@ class Trainer:
 
             all_preds.append(preds.detach().cpu().numpy())
             all_targets.append(labels.detach().cpu().numpy())
+        
+        local_loss_sum = loss_record.sum if hasattr(loss_record, "sum") else (loss_record.avg * max(1, loss_record.count))
+        local_loss_count = loss_record.count if hasattr(loss_record, "count") else total_count
 
-        # DDP 下做全局 acc 汇总
         if dist.is_initialized():
-            c = torch.tensor([total_correct, total_count], device=self.device, dtype=torch.long)
-            dist.all_reduce(c, op=dist.ReduceOp.SUM)
-            total_correct = int(c[0].item())
-            total_count = int(c[1].item())
+            stat_tensor = torch.tensor(
+                [total_correct, total_count, float(local_loss_sum), float(local_loss_count)],
+                device=self.device,
+                dtype=torch.float64
+            )
+            dist.all_reduce(stat_tensor, op=dist.ReduceOp.SUM)
 
-        acc = (total_correct / max(1, total_count))
+            total_correct = int(stat_tensor[0].item())
+            total_count = int(stat_tensor[1].item())
+            global_loss_sum = float(stat_tensor[2].item())
+            global_loss_count = float(stat_tensor[3].item())
+        else:
+            global_loss_sum = float(local_loss_sum)
+            global_loss_count = float(local_loss_count)
 
+        acc = total_correct / max(1, total_count)
+        global_loss_avg = global_loss_sum / max(1.0, global_loss_count)
+
+        y_pred_local = np.concatenate(all_preds) if len(all_preds) else np.array([], dtype=np.int64)
+        y_true_local = np.concatenate(all_targets) if len(all_targets) else np.array([], dtype=np.int64)
+
+        if dist.is_initialized():
+            gathered_preds = [None for _ in range(dist.get_world_size())]
+            gathered_targets = [None for _ in range(dist.get_world_size())]
+
+            dist.all_gather_object(gathered_preds, y_pred_local)
+            dist.all_gather_object(gathered_targets, y_true_local)
+
+            if dist.get_rank() == 0:
+                y_pred = np.concatenate(
+                    [x for x in gathered_preds if x is not None and len(x) > 0]
+                ) if len(gathered_preds) else np.array([], dtype=np.int64)
+
+                y_true = np.concatenate(
+                    [x for x in gathered_targets if x is not None and len(x) > 0]
+                ) if len(gathered_targets) else np.array([], dtype=np.int64)
+            else:
+                y_pred = np.array([], dtype=np.int64)
+                y_true = np.array([], dtype=np.int64)
+        else:
+            y_pred = y_pred_local
+            y_true = y_true_local
+
+        # 只在 rank0 保存日志和混淆矩阵
         if (not dist.is_initialized()) or dist.get_rank() == 0:
-            self.logger.info(f"Validate Epoch: {epoch + 1}, Loss: {loss_record.avg:.4f}, Acc: {acc:.4f}")
-            self.writer.add_scalar("Loss/Validation", loss_record.avg, epoch)
+            self.logger.info(f"Validate Epoch: {epoch + 1}, Loss: {global_loss_avg:.4f}, Acc: {acc:.4f}")
+            self.writer.add_scalar("Loss/Validation", global_loss_avg, epoch)
             self.writer.add_scalar("Acc/Validation", acc, epoch)
 
-            y_pred = np.concatenate(all_preds) if len(all_preds) else np.array([], dtype=np.int64)
-            y_true = np.concatenate(all_targets) if len(all_targets) else np.array([], dtype=np.int64)
             if y_true.size > 0:
-                cm = confusion_matrix(y_true, y_pred)
+                if hasattr(self.config, "classes") and isinstance(self.config.classes, dict):
+                    idx_to_name = {v: k for k, v in self.config.classes.items()}
+                    class_ids = sorted(idx_to_name.keys())
+                    class_names = [idx_to_name[i] for i in class_ids]
+                else:
+                    n_cls = int(max(np.max(y_true), np.max(y_pred)) + 1)
+                    class_ids = list(range(n_cls))
+                    class_names = [str(i) for i in class_ids]
 
-                # 使用 self.config.classes 来替换数字标签为真实名称
-                labels = list(self.config.classes.keys())  # 获取所有标签名称
+                cm = confusion_matrix(y_true, y_pred, labels=class_ids)
 
-                # Create a heatmap for the confusion matrix
-                plt.figure(figsize=(10, 8))
-                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
-                plt.title(f'Confusion Matrix - Epoch {epoch + 1}')
-                plt.xlabel('Predicted Label')
-                plt.ylabel('True Label')
+                fig_w = max(8, 0.9 * len(class_names) + 4)
+                fig_h = max(6, 0.8 * len(class_names) + 3)
 
-                # Rotate the axis labels to avoid overlap
-                plt.xticks(rotation=45, ha='right')  # Rotate x-axis labels by 45 degrees
-                plt.yticks(rotation=45, ha='right')  # Rotate y-axis labels by 45 degrees
+                fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+                im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-                # Save the figure as PNG
-                cm_path = os.path.join(self.config.result_dir, f"confusion_matrix_epoch_{epoch+1}.png")
-                plt.savefig(cm_path, bbox_inches='tight')  # Save the figure as .png
-                plt.close()  # Close the plot to avoid display issues
+                ax.set_title(f"Confusion Matrix - Epoch {epoch + 1}")
+                ax.set_xlabel("Predicted Label")
+                ax.set_ylabel("True Label")
 
-                self.logger.info(f"Confusion matrix saved at {cm_path}")
+                ax.set_xticks(np.arange(len(class_names)))
+                ax.set_yticks(np.arange(len(class_names)))
+                ax.set_xticklabels(class_names, rotation=45, ha="right")
+                ax.set_yticklabels(class_names)
 
-        return loss_record.avg, acc
+                thresh = cm.max() / 2.0 if cm.size > 0 else 0.0
+                for i in range(cm.shape[0]):
+                    for j in range(cm.shape[1]):
+                        ax.text(
+                            j, i, str(cm[i, j]),
+                            ha="center", va="center",
+                            color="white" if cm[i, j] > thresh else "black",
+                            fontsize=9
+                        )
+
+                fig.tight_layout()
+
+                cm_png_path = os.path.join(self.config.result_dir, f"confusion_matrix_epoch_{epoch+1}.png")
+                fig.savefig(cm_png_path, dpi=200, bbox_inches="tight")
+                plt.close(fig)
+
+                self.logger.info(f"Confusion matrix saved at {cm_png_path}")
+
+        return global_loss_avg, acc
         
     def train(self):
         
@@ -209,13 +267,13 @@ class Trainer:
             
                 if (epoch + 1) % self.config.save_interval == 0:  
                     checkpoint_path = os.path.join(self.config.model_dir, f'epoch_{epoch + 1}.pth')
-                    save_checkpoint({"model": self.model}, optimizer=None, scheduler=None, epoch=epoch, path=checkpoint_path, cfg=None, logger=self.logger)
+                    save_checkpoint({"model": self.classifier}, optimizer=None, scheduler=None, epoch=epoch, path=checkpoint_path, cfg=None, logger=self.logger)
                     self.logger.info(f"--Checkpoint saved at epoch {epoch + 1} to {checkpoint_path}")
                     
                 if global_val_main < best_val_loss:
                     best_val_loss = global_val_main 
                     best_path = os.path.join(self.config.model_dir, f'best.pth')
-                    save_checkpoint({"model": self.model}, optimizer=None, scheduler=None, epoch=epoch, path=best_path, cfg=None, logger=self.logger)
+                    save_checkpoint({"model": self.classifier}, optimizer=None, scheduler=None, epoch=epoch, path=best_path, cfg=None, logger=self.logger)
                     self.logger.info(f"--Best model saved at epoch {epoch + 1} with validation loss: {global_val_main:.4f}")
                     
                 self.early_stopping(global_val_main, self)
@@ -227,7 +285,7 @@ class Trainer:
 
         if (not dist.is_initialized()) or dist.get_rank() == 0:
             checkpoint_path = os.path.join(self.config.model_dir, f'last.pth')
-            save_checkpoint({"model": self.model}, optimizer=None, scheduler=None, epoch=epoch, path=checkpoint_path, cfg=None, logger=self.logger)
+            save_checkpoint({"model": self.classifier}, optimizer=None, scheduler=None, epoch=epoch, path=checkpoint_path, cfg=None, logger=self.logger)
             
         if dist.is_initialized():
             dist.barrier()
@@ -275,7 +333,7 @@ class Trainer:
                     valid_boxes.append([x1, y1, x2, y2])
 
                 
-                feats = self.preprocessor.process(boxes, spec)
+                feats = self.preprocessor.process(valid_boxes, spec)
 
                 if feats is None or feats.size == 0:
                     feats = np.zeros((1, self.config.feature_dim), dtype=np.float32)
