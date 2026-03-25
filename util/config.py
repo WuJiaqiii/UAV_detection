@@ -31,6 +31,7 @@ class Config:
         self.cfg_dir = f'{self.base_dir}/{log_name}'
         self.model_dir = f'{self.cfg_dir}/models'
         self.log_dir = f'{self.cfg_dir}/log'
+        self.cache_dir = f'{self.cfg_dir}/cache'
         self.result_dir = f'{self.cfg_dir}/result'
         
         # self.make_dir()
@@ -43,10 +44,10 @@ class Config:
             yaml.dump(config_dict, f)
             
     def make_dir(self):
-        
         os.makedirs(self.cfg_dir, exist_ok=True)
         os.makedirs(self.model_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.cache_dir, exist_ok=True)
         os.makedirs(self.result_dir, exist_ok=True)
         
     def freeze(self):

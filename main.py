@@ -11,8 +11,7 @@ from models.transformer import SignalTransformerClassifier
 from util.trainer import Trainer
 
 from util.preprocess import SignalPreprocessor
-from sam2lib.sam2.build_sam import build_sam2
-from sam2lib.sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+from util.detector import YoloV5Detector
 
 from util.checkpoint import load_checkpoint
 from util.utils import create_logger, set_seed
@@ -32,7 +31,45 @@ import argparse
 def get_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="STFT spectrogram -> (SAM2 detection + preprocessing) -> Transformer classification training"
+        description="STFT spectrogram -> (Yolov5 detection + preprocessing) -> Transformer classification training"
+    )
+    
+    # Spectrogram -> Physical mapping
+    g_stft = parser.add_argument_group("STFT / Physical Mapping")
+    g_stft.add_argument(
+        "--sampling_rate", type=float, default=122.88e6,
+        help="Sampling rate (Hz) used to generate STFT."
+    )
+    g_stft.add_argument(
+        "--n_fft", type=int, default=512,
+        help="FFT size used in STFT (also equals spectrogram frequency bins in your setting)."
+    )
+    g_stft.add_argument(
+        "--hop_length", type=int, default=int(122.88e6 * 0.05 / 750),
+        help="Hop length in samples. If total duration is 50ms with 750 columns, hop ≈ sr*0.05/750."
+    )
+    
+    # Preprocessor (box post-processing)
+    g_pre = parser.add_argument_group("Preprocessor (Box post-processing)")
+    g_pre.add_argument(
+        "--pre_min_area", type=int, default=20,
+        help="Minimum bbox area (pixels) used in preprocess.py filtering."
+    )
+    g_pre.add_argument(
+        "--pre_min_ratio", type=float, default=0,
+        help="Minimum width/height ratio for bboxes in preprocess.py. Larger -> prefer horizontal boxes."
+    )
+    g_pre.add_argument(
+        "--pre_freq_eps", type=int, default=5,
+        help="DBSCAN eps on frequency-center (pixels). Larger -> merge clusters more easily."
+    )
+    g_pre.add_argument(
+        "--pre_freq_min_samples", type=int, default=2,
+        help="DBSCAN min_samples. 1 means every box can form a cluster; >1 suppresses isolated boxes."
+    )
+    g_pre.add_argument(
+        "--pre_nms_iou_thresh", type=float, default=0.5,
+        help="NMS IoU threshold in preprocess.py for removing overlapped bboxes."
     )
 
     # Dataset / DataLoader
@@ -57,13 +94,48 @@ def get_parser():
         "--sample_ratio", type=float, default=1.0,
         help="The ratio of sampling in the dataset every epoch."
     )
-    g_data.add_argument(
-        "--feature_size", type=int, default=128,
-        help="(Legacy/Optional) Feature size extracted by some network. Not used in token-transformer path unless you wire it."
+    
+    # YOLOv5 Detector
+    g_yolo = parser.add_argument_group("YOLOv5 Detector")
+    g_yolo.add_argument(
+        "--yolo_weights", type=str, default="",
+        help="Path to YOLOv5 weights (.pt / .onnx / etc.)."
     )
-    g_data.add_argument(
-        "--whitelist_csv", type=str, default='/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/data/viz.csv',
-        help="CSV file with a column 'filename' listing .png/.mat (or basename) to KEEP."
+    g_yolo.add_argument(
+        "--yolo_device", type=str, default="",
+        help='Device for YOLO inference. "" for auto, "cpu" for CPU, or GPU id like "0". '
+    )
+    g_yolo.add_argument(
+        "--yolo_imgsz_h", type=int, default=640,
+        help="YOLO inference image height after letterbox resize."
+    )
+    g_yolo.add_argument(
+        "--yolo_imgsz_w", type=int, default=640,
+        help="YOLO inference image width after letterbox resize."
+    )
+    g_yolo.add_argument(
+        "--yolo_conf_thres", type=float, default=0.25,
+        help="Confidence threshold for YOLO detections."
+    )
+    g_yolo.add_argument(
+        "--yolo_iou_thres", type=float, default=0.45,
+        help="IoU threshold for YOLO NMS."
+    )
+    g_yolo.add_argument(
+        "--yolo_max_det", type=int, default=100,
+        help="Maximum number of detections per image after NMS."
+    )
+    g_yolo.add_argument(
+        "--yolo_classes", type=int, nargs="*", default=None,
+        help="Optional class filter for YOLO detections, e.g. --yolo_classes 0 or --yolo_classes 0 1"
+    )
+    g_yolo.add_argument(
+        "--yolo_half", action=argparse.BooleanOptionalAction, default=False,
+        help="Use FP16 half-precision inference for YOLO (CUDA only)."
+    )
+    g_yolo.add_argument(
+        "--yolo_warmup", action=argparse.BooleanOptionalAction, default=True,
+        help="Run model warmup once after loading YOLO."
     )
 
     # Experiment / IO
@@ -96,14 +168,6 @@ def get_parser():
         help="Early stopping patience (epochs). Stop if val metric does not improve."
     )
     g_opt.add_argument(
-        "--lr_scheduler_patience", type=int, default=10,
-        help="ReduceLROnPlateau patience (epochs). Only used if you choose plateau scheduler."
-    )
-    g_opt.add_argument(
-        "--lr_reduce_factor", type=float, default=0.1,
-        help="ReduceLROnPlateau factor: new_lr = lr * factor."
-    )
-    g_opt.add_argument(
         "--cosine_annealing_T0", type=int, default=50,
         help="CosineAnnealingWarmRestarts: T0 (initial restart period in epochs)."
     )
@@ -116,7 +180,7 @@ def get_parser():
     g_model = parser.add_argument_group("Transformer Model")
     g_model.add_argument(
         "--feature_dim", type=int, default=8,
-        help="Input token feature dimension produced by preprocess.py (typically 8)."
+        help="Feature size extracted by preprocess network."
     )
     g_model.add_argument(
         "--d_model", type=int, default=128,
@@ -139,98 +203,8 @@ def get_parser():
         help="Dropout probability used in Transformer."
     )
     g_model.add_argument(
-        "--max_tokens", type=int, default=64,
+        "--max_tokens", type=int, default=32,
         help="Max number of tokens per sample (truncate if too many boxes survive)."
-    )
-
-    # SAM2 Detector (Inference-only)
-    g_sam2 = parser.add_argument_group("SAM2 Detector (Inference-only)")
-    g_sam2.add_argument(
-        "--sam2_checkpoint", type=str, default="sam2lib/checkpoints/sam2.1_hiera_tiny.pt",
-        help="Path to SAM2 checkpoint (.pt). Used for box generation only (no training)."
-    )
-    g_sam2.add_argument(
-        "--model_cfg", type=str, default="configs/sam2.1/sam2.1_hiera_t.yaml",
-        help="Path to SAM2 model config (.yaml)."
-    )
-    g_sam2.add_argument(
-        "--sam2_points_per_side", type=int, default=32,
-        help="SAM2 mask generator sampling density. Lower -> faster & fewer masks; Higher -> more recall but slower."
-    )
-    g_sam2.add_argument(
-        "--sam2_points_per_batch", type=int, default=512,
-        help="SAM2 points processed per batch. Increase may speed up but uses more VRAM."
-    )
-    g_sam2.add_argument(
-        "--sam2_crop_n_layers", type=int, default=0,
-        help="SAM2 cropping layers. 0 = no multi-scale crops (fast). 1+ improves small-object recall but increases masks & runtime."
-    )
-    g_sam2.add_argument(
-        "--sam2_pred_iou_thresh", type=float, default=0.85,
-        help="SAM2 predicted IoU threshold for keeping masks. Higher -> fewer masks; lower -> more masks."
-    )
-    g_sam2.add_argument(
-        "--sam2_stability_score_thresh", type=float, default=0.85,
-        help="SAM2 stability score threshold. Higher -> fewer masks; lower -> more masks."
-    )
-    g_sam2.add_argument(
-        "--sam2_box_nms_thresh", type=float, default=0.6,
-        help="NMS threshold to suppress similar masks by their bbox overlap."
-    )
-    g_sam2.add_argument(
-        "--sam2_crop_nms_thresh", type=float, default=0.6,
-        help="NMS threshold between crops (only meaningful when crop_n_layers>0)."
-    )
-    g_sam2.add_argument(
-        "--sam2_min_mask_region_area", type=int, default=120,
-        help="Minimum connected mask region area (pixels). Helps remove tiny fragments."
-    )
-
-    g_sam2.add_argument(
-        "--min_rectangularity", type=float, default=0.75,
-        help="Rectangularity filter for masks: rectangularity = mask_area / bbox_area. Higher -> keep more rectangle-like masks."
-    )
-    g_sam2.add_argument(
-        "--max_bbox_area_ratio", type=float, default=0.20,
-        help="Upper bound on bbox area ratio: bbox_area / (H*W). Used to remove too-large boxes (e.g., <=0.20 means <=20%% image area)."
-    )
-
-    # Spectrogram -> Physical mapping
-    g_stft = parser.add_argument_group("STFT / Physical Mapping")
-    g_stft.add_argument(
-        "--sampling_rate", type=float, default=122.88e6,
-        help="Sampling rate (Hz) used to generate STFT."
-    )
-    g_stft.add_argument(
-        "--n_fft", type=int, default=512,
-        help="FFT size used in STFT (also equals spectrogram frequency bins in your setting)."
-    )
-    g_stft.add_argument(
-        "--hop_length", type=int, default=int(122.88e6 * 0.05 / 750),
-        help="Hop length in samples. If total duration is 50ms with 750 columns, hop ≈ sr*0.05/750."
-    )
-
-    # Preprocessor (box post-processing)
-    g_pre = parser.add_argument_group("Preprocessor (Box post-processing)")
-    g_pre.add_argument(
-        "--pre_min_area", type=int, default=20,
-        help="Minimum bbox area (pixels) used in preprocess.py filtering."
-    )
-    g_pre.add_argument(
-        "--pre_min_ratio", type=float, default=0,
-        help="Minimum width/height ratio for bboxes in preprocess.py. Larger -> prefer horizontal boxes."
-    )
-    g_pre.add_argument(
-        "--pre_freq_eps", type=int, default=5,
-        help="DBSCAN eps on frequency-center (pixels). Larger -> merge clusters more easily."
-    )
-    g_pre.add_argument(
-        "--pre_freq_min_samples", type=int, default=2,
-        help="DBSCAN min_samples. 1 means every box can form a cluster; >1 suppresses isolated boxes."
-    )
-    g_pre.add_argument(
-        "--pre_nms_iou_thresh", type=float, default=0.5,
-        help="NMS IoU threshold in preprocess.py for removing overlapped bboxes."
     )
 
     # Misc
@@ -242,45 +216,6 @@ def get_parser():
     g_misc.add_argument(
         "--use_amp_autocast", action=argparse.BooleanOptionalAction, default=False,
         help="Enable AMP autocast (CUDA only). Recommended for faster training if stable."
-    )
-    
-    # BBox cache: persist SAM2 raw + filtered detection boxes for each sample
-    g_bbox = parser.add_argument_group("BBox Cache (SAM2 detections)")
-    g_bbox.add_argument(
-        "--bbox_cache_mode", type=str, default="readwrite", choices=["off", "read", "write", "readwrite", "refresh"],
-        help="Cache mode for SAM2 detection bboxes: off/read/write/readwrite/refresh."
-    )
-    g_bbox.add_argument(
-        "--bbox_cache_dir", type=str, default="experiments/sam2_bbox_cache",
-        help="Base directory for bbox cache (per-signature subfolder will be created)."
-    )
-    g_bbox.add_argument(
-        "--bbox_cache_mem", type=int, default=256,
-        help="In-memory LRU cache size (number of samples). 0 disables memory cache."
-    )
-    g_bbox.add_argument(
-        "--bbox_viz", action=argparse.BooleanOptionalAction, default=True,
-        help="When computing new bboxes (write/readwrite/refresh), save a visualization overlay PNG."
-    )
-    g_bbox.add_argument(
-        "--bbox_viz_dir", type=str, default=None,
-        help="Override bbox visualization output directory. Default: <bbox_cache_dir>/<sig_hash>/viz"
-    )
-    g_bbox.add_argument(
-        "--bbox_viz_limit", type=int, default=0,
-        help="Maximum number of visualization images to write (rank0 only). 0 = unlimited."
-    )
-    g_bbox.add_argument(
-        "--precompute_boxes", action=argparse.BooleanOptionalAction, default=False,
-        help="Only precompute and persist SAM2 bboxes for the train and val loader, then exit."
-    )
-    g_bbox.add_argument(
-        "--render_cached_viz", action=argparse.BooleanOptionalAction, default=False,
-        help="Read cached bbox .pt and render raw/filtered/clustered overlays for the whole dataset; no SAM2."
-    )
-    g_bbox.add_argument(
-        "--render_boxes_source", type=str, default="filt", choices=["filt", "raw"],
-        help="Use filt_boxes or raw_boxes as input of select_main_boxes() when rendering."
     )
 
     args = parser.parse_args()
@@ -318,7 +253,7 @@ def main(args):
     train_loader, val_loader = get_dataloader(dataset, config)
 
     ## model
-    model = SignalTransformerClassifier(
+    classifier = SignalTransformerClassifier(
         feature_dim=config.feature_dim,
         d_model=config.d_model,
         nhead=config.nhead,
@@ -327,29 +262,24 @@ def main(args):
         dropout=config.dropout,
         pooling='attn')
 
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    trainable_params = sum(p.numel() for p in classifier.parameters() if p.requires_grad)
     logger.info(f"Num of trainable params in backbone: {trainable_params:,}")
     
     if config.checkpoint_path and os.path.isfile(config.checkpoint_path):
         checkpoint_path = config.checkpoint_path
-        load_checkpoint({"model": model}, path=checkpoint_path, device='cpu', logger=logger)
+        load_checkpoint({"model": classifier}, path=checkpoint_path, device='cpu', logger=logger)
     else:
         checkpoint_path = None
         logger.warning(f'Checkpoint "{config.checkpoint_path}" not found')
     
-    ## SAM2 矩形框检测    
-    sam2_model = build_sam2(config.model_cfg, config.sam2_checkpoint, device=config.device)
-    mask_generator = SAM2AutomaticMaskGenerator(
-        sam2_model,
-        points_per_side=config.sam2_points_per_side,
-        points_per_batch=config.sam2_points_per_batch,
-        crop_n_layers=config.sam2_crop_n_layers,
-        pred_iou_thresh=config.sam2_pred_iou_thresh,
-        stability_score_thresh=config.sam2_stability_score_thresh,
-        box_nms_thresh=config.sam2_box_nms_thresh,
-        crop_nms_thresh=config.sam2_crop_nms_thresh,
-        min_mask_region_area=config.sam2_min_mask_region_area,
-    )
+    ## yolo 矩形框检测    
+    if torch.distributed.is_initialized():
+        torch.cuda.set_device(local_rank)
+        yolo_device = str(local_rank)
+    else:
+        yolo_device = ""
+        
+    detector = YoloV5Detector(config, yolo_device)
     
     preprocessor = SignalPreprocessor(
         sampling_rate=config.sampling_rate,
@@ -362,17 +292,7 @@ def main(args):
         nms_iou_thresh=config.pre_nms_iou_thresh,
     )
     
-    trainer = Trainer(config, (train_loader, val_loader), logger, model, mask_generator, preprocessor)
-    
-    if getattr(config, "render_cached_viz", False):
-        trainer.render_cached_viz(train_loader, boxes_source=config.render_boxes_source)
-        trainer.render_cached_viz(val_loader, boxes_source=config.render_boxes_source)
-        return
-
-    if getattr(config, 'precompute_boxes', False):
-        trainer.precompute_boxes(train_loader)
-        trainer.precompute_boxes(val_loader)
-        return
+    trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier)
 
     trainer.train()
 
