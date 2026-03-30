@@ -5,5 +5,8 @@
 *.png
 *.csv
 *.mat
+*.pt
+test.py
 experiments/*
+data/dataset
 !.gitignore

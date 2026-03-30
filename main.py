@@ -100,7 +100,7 @@ def get_parser():
     # YOLOv5 Detector
     g_yolo = parser.add_argument_group("YOLOv5 Detector")
     g_yolo.add_argument(
-        "--yolo_weights", type=str, default="/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/train/exp5/weights/best.pt",
+        "--yolo_weights", type=str, default="/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/best.pt",
         help="Path to YOLOv5 weights (.pt / .onnx / etc.)."
     )
     g_yolo.add_argument(
