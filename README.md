@@ -1,18 +1,51 @@
-# 安装 SAM2 ：
-```bash
-git submodule update --init --recursive
+# UAV_detection
 
-cd sam2lib
-pip install -e .
+基于频谱图的无人机信号检测与协议分类项目。
 
-cd checkpoints && \
-./download_ckpts.sh && \
-cd ..
-```
+本项目的核心流程为：
 
-## 配置 conda 环境 (采用 environment.yaml 与 requirements.txt)
-```bash
-conda env create -f environment.yaml -n myconda
-conda activate myconda
-python -m pip install -r requirements.txt
-```
+**STFT 频谱图 `.mat` → YOLOv5 检测矩形框 → 检测框后处理与特征构建 → Transformer 分类**
+
+项目适用于二维时频图中的无人机信号块检测与协议识别任务，尤其适合利用多个矩形框之间的时间顺序与频率分布关系完成分类。
+
+---
+
+## 1. 项目简介
+
+本项目将无人机信号分析划分为两个阶段：
+
+1. **检测阶段**  
+   使用 YOLOv5 在频谱图中检测信号块，输出候选矩形框。
+
+2. **分类阶段**  
+   对检测结果进行筛选、聚类、排序和特征提取，将保留下来的矩形框转换为一组 token 序列，再输入 Transformer 编码器进行协议分类。
+
+与直接对整张频谱图做分类不同，本项目更关注：
+
+- 信号块的时序关系
+- 信号块的频率分布
+- 信号块的持续时间和带宽信息
+
+因此更适合处理由多个离散信号块组成的频谱图样本。
+
+---
+
+## 2. 整体流程
+
+```text
+.mat 频谱图
+   ↓
+UAVDataset 读取数据并解析文件名信息
+   ↓
+YOLOv5 检测候选矩形框
+   ↓
+SignalPreprocessor 后处理：
+  - 面积/宽高比过滤
+  - 基于频率中心的 DBSCAN 聚类
+  - 选取主簇
+  - NMS 去重
+  - 转换为 token 特征序列
+   ↓
+SignalTransformerClassifier
+   ↓
+训练 / 验证 / 混淆矩阵 / 检测结果可视化 / checkpoint 保存

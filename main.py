@@ -100,7 +100,7 @@ def get_parser():
     # YOLOv5 Detector
     g_yolo = parser.add_argument_group("YOLOv5 Detector")
     g_yolo.add_argument(
-        "--yolo_weights", type=str, default="/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/best.pt",
+        "--yolo_weights", type=str, default="/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/yolov5/runs/train/exp10/weights/best.pt",
         help="Path to YOLOv5 weights (.pt / .onnx / etc.)."
     )
     g_yolo.add_argument(
@@ -128,7 +128,7 @@ def get_parser():
         help="Maximum number of detections per image after NMS."
     )
     g_yolo.add_argument(
-        "--yolo_classes", type=int, nargs="*", default=None,
+        "--yolo_classes", type=int, nargs="*", default=0,
         help="Optional class filter for YOLO detections, e.g. --yolo_classes 0 or --yolo_classes 0 1"
     )
     g_yolo.add_argument(
