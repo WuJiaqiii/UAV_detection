@@ -509,6 +509,27 @@ class Trainer:
                     except Exception:
                         fp = None
 
+                # spec = inputs_bhw[i].detach().cpu().numpy().astype(np.float32)
+                # boxes = self._get_boxes_for_sample(spec, fp=fp)
+
+                # if save_detect_result:
+                #     try:
+                #         final_boxes = self.preprocessor.select_main_boxes(boxes)
+                #         if hasattr(final_boxes, "tolist"):
+                #             final_boxes = final_boxes.tolist()
+                #     except Exception:
+                #         final_boxes = []
+
+                #     self._save_detect_result_images(
+                #         spec=spec,
+                #         yolo_boxes=boxes,
+                #         final_boxes=final_boxes,
+                #         fp=fp,
+                #         sample_idx=i,
+                #     )
+                
+                # feats = self.preprocessor.process(boxes, spec)
+                
                 spec = inputs_bhw[i].detach().cpu().numpy().astype(np.float32)
                 boxes = self._get_boxes_for_sample(spec, fp=fp)
 

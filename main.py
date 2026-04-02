@@ -6,7 +6,7 @@ import torch.distributed
 
 from data.data_loader import UAVDataset, get_dataloader
 
-from models.transformer import SignalTransformerClassifier
+from model.transformer import SignalTransformerClassifier
 
 from util.trainer import Trainer
 
@@ -96,6 +96,10 @@ def get_parser():
         "--exclude_classes", type=str, nargs="*", default=[],
         help="Class names to exclude from dataset, e.g. --exclude_classes Skylink21 FPV1"
     )
+    g_data.add_argument(
+        "--input_type", type=str, default="png", choices=["mat", "png"],
+        help="Raw dataset type. Use 'png' to load spectrogram images directly."
+    )
     
     # YOLOv5 Detector
     g_yolo = parser.add_argument_group("YOLOv5 Detector")
@@ -124,11 +128,11 @@ def get_parser():
         help="IoU threshold for YOLO NMS."
     )
     g_yolo.add_argument(
-        "--yolo_max_det", type=int, default=100,
+        "--yolo_max_det", type=int, default=1000,
         help="Maximum number of detections per image after NMS."
     )
     g_yolo.add_argument(
-        "--yolo_classes", type=int, nargs="*", default=0,
+        "--yolo_classes", type=int, nargs="*", default=None,
         help="Optional class filter for YOLO detections, e.g. --yolo_classes 0 or --yolo_classes 0 1"
     )
     g_yolo.add_argument(
