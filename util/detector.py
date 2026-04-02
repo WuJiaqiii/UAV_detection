@@ -45,10 +45,39 @@ def register_yolov5_legacy_module_aliases():
     sys.modules.setdefault("utils.plots", y5_utils_plots)
     sys.modules.setdefault("utils.loss", y5_utils_loss)
 
+# def _to_uint8_gray(spec: np.ndarray) -> np.ndarray:
+#     """
+#     Robustly convert spectrogram array to uint8 grayscale image.
+#     spec: (H,W) float/uint16/uint8
+#     """
+#     if spec.ndim != 2:
+#         raise ValueError(f"Expected 2D grayscale spec (H,W), got shape={spec.shape}")
+
+#     if spec.dtype == np.uint8:
+#         return spec
+
+#     x = spec.astype(np.float32, copy=False)
+
+#     # robust percentile scaling to avoid outliers
+#     lo = np.percentile(x, 1.0)
+#     hi = np.percentile(x, 99.0)
+#     if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+#         # fallback: min-max
+#         lo = float(np.min(x))
+#         hi = float(np.max(x))
+#         if hi <= lo:
+#             return np.zeros_like(x, dtype=np.uint8)
+
+#     x = np.clip((x - lo) / (hi - lo + 1e-12), 0.0, 1.0)
+#     return (x * 255.0).astype(np.uint8)
+
 def _to_uint8_gray(spec: np.ndarray) -> np.ndarray:
     """
-    Robustly convert spectrogram array to uint8 grayscale image.
-    spec: (H,W) float/uint16/uint8
+    Match the old .mat -> .png generation logic:
+        uint8(matrix / max(matrix) * 255)
+
+    Assumption:
+        spectrogram values are non-negative.
     """
     if spec.ndim != 2:
         raise ValueError(f"Expected 2D grayscale spec (H,W), got shape={spec.shape}")
@@ -58,18 +87,13 @@ def _to_uint8_gray(spec: np.ndarray) -> np.ndarray:
 
     x = spec.astype(np.float32, copy=False)
 
-    # robust percentile scaling to avoid outliers
-    lo = np.percentile(x, 1.0)
-    hi = np.percentile(x, 99.0)
-    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-        # fallback: min-max
-        lo = float(np.min(x))
-        hi = float(np.max(x))
-        if hi <= lo:
-            return np.zeros_like(x, dtype=np.uint8)
+    maxv = float(np.max(x))
+    if (not np.isfinite(maxv)) or maxv <= 0:
+        return np.zeros_like(x, dtype=np.uint8)
 
-    x = np.clip((x - lo) / (hi - lo + 1e-12), 0.0, 1.0)
-    return (x * 255.0).astype(np.uint8)
+    x = x / maxv * 255.0
+    x = np.clip(x, 0.0, 255.0)
+    return x.astype(np.uint8)
 
 
 def _letterbox(
@@ -167,7 +191,7 @@ class YoloV5Detector:
             im0,
             new_shape=(int(self.imgsz[0]), int(self.imgsz[1])),
             stride=self.stride,
-            auto=True,
+            auto=False,
             scaleup=True,
         )
 
