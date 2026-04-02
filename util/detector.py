@@ -147,7 +147,7 @@ class YoloV5Detector:
         H0, W0 = spec_np.shape
 
         # 2) Convert mat matrix to the exact same uint8 grayscale style as old PNG generation
-        gray_u8 = _to_uint8_gray_png_style(spec_np)
+        # gray_u8 = _to_uint8_gray_png_style(spec_np)
 
         # 3) Make it RGB HWC uint8, same kind of input as plot.py
         # image_rgb = np.stack([gray_u8, gray_u8, gray_u8], axis=-1)

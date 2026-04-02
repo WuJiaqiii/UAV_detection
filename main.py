@@ -159,7 +159,7 @@ def get_parser():
         help="Optional path to resume training or load pretrained transformer weights."
     )
     g_exp.add_argument(
-        "----bbox_cache_mode", type=str, default='readwrite',
+        "--bbox_cache_mode", type=str, default='readwrite',
         help="off / read / write / readwrite / refresh"
     )
     g_exp.add_argument(

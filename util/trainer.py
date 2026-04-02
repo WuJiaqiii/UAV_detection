@@ -694,11 +694,11 @@ class Trainer:
 
             area = (x2 - x1) * (y2 - y1)
 
-            if min_area > 0 and area < min_area:
-                continue
+            # if min_area > 0 and area < min_area:
+            #     continue
 
-            if max_bbox_area_ratio > 0 and area > max_bbox_area_ratio * img_area:
-                continue
+            # if max_bbox_area_ratio > 0 and area > max_bbox_area_ratio * img_area:
+            #     continue
 
             out.append([x1, y1, x2, y2])
 
