@@ -250,6 +250,10 @@ class Trainer:
         self.bbox_cache = BBoxCache.from_config(self.config, logger=self.logger)
         self._bbox_stats = {"hit": 0, "miss": 0, "write": 0}
         
+        self.save_detect_vis_once = getattr(self.config, "save_detect_vis_once", True)
+        self._detect_vis_saved = False
+        self.detect_vis_num_samples = getattr(self.config, "detect_vis_num_samples", 10000)
+        
     def train_one_epoch(self, epoch):
         """
         - inputs: (B, 512, 750) 原始矩阵 torch.Tensor
@@ -310,7 +314,12 @@ class Trainer:
 
             labels = labels.to(self.device, non_blocking=True)
 
-            tokens, key_padding_mask = self._batch_to_tokens(inputs, sample_fps=fps, save_detect_result=True)
+            # tokens, key_padding_mask = self._batch_to_tokens(inputs, sample_fps=fps, save_detect_result=True)
+            need_save_detect_result = (not self._detect_vis_saved)
+            tokens, key_padding_mask = self._batch_to_tokens(inputs, sample_fps=fps, save_detect_result=need_save_detect_result, max_save_images=self.detect_vis_num_samples)
+            if need_save_detect_result:
+                self._detect_vis_saved = True
+            
             tokens = tokens.to(self.config.device, non_blocking=True)
             key_padding_mask = key_padding_mask.to(self.config.device, non_blocking=True)
 
@@ -486,7 +495,7 @@ class Trainer:
             dist.barrier()
         return best_path if (not dist.is_initialized() or dist.get_rank()==0) else None
 
-    def _batch_to_tokens(self, inputs_bhw: torch.Tensor, sample_fps=None, save_detect_result=False):
+    def _batch_to_tokens(self, inputs_bhw: torch.Tensor, sample_fps=None, save_detect_result=False, max_save_images=1):
         """
         inputs_bhw: (B, H, W) torch.Tensor
         sample_fps: Optional[list[str]]
@@ -499,6 +508,7 @@ class Trainer:
 
         feats_list = []
         lengths = []
+        saved_count = 0
 
         with torch.inference_mode():
             for i in range(B):
@@ -533,9 +543,25 @@ class Trainer:
                 spec = inputs_bhw[i].detach().cpu().numpy().astype(np.float32)
                 boxes = self._get_boxes_for_sample(spec, fp=fp)
 
-                if save_detect_result:
+                # if save_detect_result:
+                #     try:
+                #         final_boxes = self.preprocessor.select_main_boxes(boxes, spectrogram=spec)
+                #         if hasattr(final_boxes, "tolist"):
+                #             final_boxes = final_boxes.tolist()
+                #     except Exception:
+                #         final_boxes = []
+
+                #     self._save_detect_result_images(
+                #         spec=spec,
+                #         yolo_boxes=boxes,
+                #         final_boxes=final_boxes,
+                #         fp=fp,
+                #         sample_idx=i,
+                #     )
+                    
+                if save_detect_result and saved_count < max_save_images:
                     try:
-                        final_boxes = self.preprocessor.select_main_boxes(boxes)
+                        final_boxes = self.preprocessor.select_main_boxes(boxes, spectrogram=spec)
                         if hasattr(final_boxes, "tolist"):
                             final_boxes = final_boxes.tolist()
                     except Exception:
@@ -548,6 +574,7 @@ class Trainer:
                         fp=fp,
                         sample_idx=i,
                     )
+                    saved_count += 1
                 
                 feats = self.preprocessor.process(boxes, spec)
 
