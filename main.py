@@ -6,7 +6,7 @@ import torch.distributed
 
 from data.data_loader import UAVDataset, get_dataloader
 
-from model.transformer import SignalTransformerClassifier
+from model.resnet import MaskImageClassifier
 
 from util.trainer import Trainer
 
@@ -195,36 +195,23 @@ def get_parser():
     )
 
     # Transformer Model
-    g_model = parser.add_argument_group("Transformer Model")
-    g_model.add_argument(
-        "--feature_dim", type=int, default=4,
-        help="Feature size extracted by preprocess network."
-    )
-    g_model.add_argument(
-        "--d_model", type=int, default=64,
-        help="Transformer hidden size (token embedding dimension)."
-    )
-    g_model.add_argument(
-        "--nhead", type=int, default=4,
-        help="Number of attention heads."
-    )
-    g_model.add_argument(
-        "--num_layers", type=int, default=4,
-        help="Number of Transformer encoder layers."
-    )
-    g_model.add_argument(
-        "--num_classes", type=int, default=8,
-        help="Number of protocol classes (multi-class classification)."
-    )
-    g_model.add_argument(
-        "--dropout", type=float, default=0.1,
-        help="Dropout probability used in Transformer."
-    )
-    g_model.add_argument(
-        "--max_tokens", type=int, default=32,
-        help="Max number of tokens per sample (truncate if too many boxes survive)."
-    )
+    g_model = parser.add_argument_group("ResNet Model")
+    g_model = parser.add_argument_group("Mask + CNN Model")
+    g_model.add_argument("--backbone", type=str, default="resnet18",
+                        choices=["resnet18", "resnet34", "mobilenet_v3_small"])
+    g_model.add_argument("--mask_img_size", type=int, default=224)
+    g_model.add_argument("--mask_source", type=str, default="final",
+                        choices=["raw", "final"])
+    g_model.add_argument("--mask_fill_value", type=int, default=255)
+    g_model.add_argument("--mask_in_chans", type=int, default=1)
+    g_model.add_argument("--mask_pretrained", action=argparse.BooleanOptionalAction, default=True)
+    g_model.add_argument("--freeze_backbone", action=argparse.BooleanOptionalAction, default=False)
+    g_model.add_argument("--cnn_dropout", type=float, default=0.0)
 
+    g_vis = parser.add_argument_group("Visualization")
+    g_vis.add_argument("--save_detect_vis_once", action=argparse.BooleanOptionalAction, default=True)
+    g_vis.add_argument("--detect_vis_num_samples", type=int, default=10000)
+    
     # Misc
     g_misc = parser.add_argument_group("Miscellaneous")
     g_misc.add_argument(
@@ -279,14 +266,14 @@ def main(args):
     train_loader, val_loader = get_dataloader(dataset, config)
 
     ## model
-    classifier = SignalTransformerClassifier(
-        feature_dim=config.feature_dim,
-        d_model=config.d_model,
-        nhead=config.nhead,
-        num_layers=config.num_layers,
+    classifier = MaskImageClassifier(
+        backbone=config.backbone,
         num_classes=config.num_classes,
-        dropout=config.dropout,
-        pooling='attn')
+        in_chans=config.mask_in_chans,
+        pretrained=config.mask_pretrained,
+        dropout=config.cnn_dropout,
+        freeze_backbone=config.freeze_backbone,
+    )
 
     trainable_params = sum(p.numel() for p in classifier.parameters() if p.requires_grad)
     logger.info(f"Num of trainable params in backbone: {trainable_params:,}")

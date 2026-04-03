@@ -1,22 +1,15 @@
 import os
 import json
-import hashlib
 from collections import OrderedDict
-import numpy as np
-from PIL import Image, ImageDraw
 
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import torch.distributed as dist
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.amp import autocast, GradScaler
-from tqdm import tqdm
-
 from torch.utils.tensorboard import SummaryWriter
-
-from util.utils import EarlyStopping, AverageMeter
-from util.checkpoint import load_checkpoint, save_checkpoint
-from util.utils import _reduce_scalar, _set_epoch_for_loaders
+from tqdm import tqdm
 
 import matplotlib
 matplotlib.use("Agg")
@@ -24,22 +17,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
 
+from util.utils import EarlyStopping, AverageMeter
+from util.checkpoint import save_checkpoint
+from util.utils import _reduce_scalar, _set_epoch_for_loaders
+from util.boxmask import boxes_to_white_mask, mask_to_tensor
+
 
 class BBoxCache:
-    """
-    Simplified bbox cache for YOLO detections.
-
-    Cache format (.pt per sample):
-      {
-        "source": {"rel":..., "size":..., "mtime":...},
-        "boxes": IntTensor [N,4],   # xyxy in original image coordinates
-      }
-
-    File naming:
-      <mat_basename>.pt
-      e.g. FPV1-...-Figure-1.mat -> FPV1-...-Figure-1.pt
-    """
-
     def __init__(
         self,
         base_dir: str,
@@ -52,14 +36,9 @@ class BBoxCache:
         self.mem_max = int(mem_max) if mem_max else 0
         self.logger = logger
         self.dataset_root = dataset_root
-
         self.cache_dir = base_dir
         os.makedirs(self.cache_dir, exist_ok=True)
-
-        self._mem = OrderedDict()   # key -> boxes
-        self.hits = 0
-        self.misses = 0
-        self.disk_writes = 0
+        self._mem = OrderedDict()
 
     @staticmethod
     def _safe_relpath(fp: str, root: str | None) -> str:
@@ -72,10 +51,8 @@ class BBoxCache:
 
     def _key_and_meta(self, fp: str):
         rel = self._safe_relpath(fp, self.dataset_root)
-
         base = os.path.splitext(os.path.basename(fp))[0]
         key = base
-
         try:
             st = os.stat(fp)
             meta = {
@@ -89,47 +66,30 @@ class BBoxCache:
                 "size": None,
                 "mtime": None,
             }
-
         return key, meta
 
     def _path_for_key(self, key: str) -> str:
         return os.path.join(self.cache_dir, f"{key}.pt")
 
     def get(self, fp: str):
-        """
-        Return:
-            boxes: CPU IntTensor [N,4]
-            or None if cache miss
-        """
         if self.mode in ("off", "write", "refresh"):
             return None
 
         key, _ = self._key_and_meta(fp)
-
-        # memory cache
         if key in self._mem:
             boxes = self._mem.pop(key)
             self._mem[key] = boxes
-            self.hits += 1
             return boxes
 
         path = self._path_for_key(key)
         if not os.path.isfile(path):
-            self.misses += 1
             return None
 
         try:
             obj = torch.load(path, map_location="cpu")
-            if not isinstance(obj, dict):
-                self.misses += 1
-                return None
-
-            boxes = obj.get("boxes", None)
-            if boxes is None:
-                boxes = torch.zeros((0, 4), dtype=torch.int32)
-            elif not isinstance(boxes, torch.Tensor):
+            boxes = obj.get("boxes", torch.zeros((0, 4), dtype=torch.int32))
+            if not isinstance(boxes, torch.Tensor):
                 boxes = torch.as_tensor(boxes, dtype=torch.int32)
-
             boxes = boxes.to(dtype=torch.int32, device="cpu").reshape(-1, 4)
 
             if self.mem_max > 0:
@@ -137,719 +97,412 @@ class BBoxCache:
                 while len(self._mem) > self.mem_max:
                     self._mem.popitem(last=False)
 
-            self.hits += 1
             return boxes
-
         except Exception as e:
-            self.misses += 1
             if self.logger:
-                self.logger.warning(f"[BBoxCache] failed to read cache for {os.path.basename(fp)}: {e}")
+                self.logger.warning(f"[BBoxCache] failed reading {fp}: {e}")
             return None
 
     def put(self, fp: str, boxes: torch.Tensor):
-        """
-        Persist boxes to disk.
-
-        Args:
-            boxes: Tensor [N,4] on any device / dtype
-        """
         if self.mode in ("off", "read"):
-            return False
+            return
 
         key, meta = self._key_and_meta(fp)
         path = self._path_for_key(key)
-
-        # write/readwrite 模式下，如果已存在就不重写
-        if self.mode in ("write", "readwrite") and os.path.isfile(path):
-            return False
-
+        obj = {
+            "source": meta,
+            "boxes": boxes.to(dtype=torch.int32, device="cpu"),
+        }
         try:
-            if boxes is None:
-                boxes_t = torch.zeros((0, 4), dtype=torch.int32)
-            else:
-                boxes_t = torch.as_tensor(boxes, dtype=torch.int32, device="cpu").reshape(-1, 4)
-
-            obj = {
-                "source": meta,
-                "boxes": boxes_t,
-            }
-
-            tmp = path + f".tmp.{os.getpid()}"
-            torch.save(obj, tmp)
-            os.replace(tmp, path)
-
-            self.disk_writes += 1
-
+            torch.save(obj, path)
             if self.mem_max > 0:
-                self._mem[key] = boxes_t
+                self._mem[key] = obj["boxes"]
                 while len(self._mem) > self.mem_max:
                     self._mem.popitem(last=False)
-
-            return True
-
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"[BBoxCache] failed to write cache for {os.path.basename(fp)}: {e}")
-            return False
+                self.logger.warning(f"[BBoxCache] failed writing {fp}: {e}")
 
-    @classmethod
-    def from_config(cls, config, logger=None):
-        mode = str(getattr(config, "bbox_cache_mode", "off")).lower()
-        if mode == "off":
-            return None
 
-        dataset_root = getattr(config, "dataset_path", None)
-        
-        if config.bbox_cache_path is not None and os.path.exists(config.bbox_cache_path):
-            base_dir = config.bbox_cache_path
-        else:
-            base_dir = config.cache_dir
+class Trainer:
+    def __init__(self, config, data_loaders, logger, detector, preprocessor, classifier):
+        self.config = config
+        self.logger = logger
+        self.detector = detector
+        self.preprocessor = preprocessor
+        self.classifier = classifier
 
-        return cls(
-            base_dir=base_dir,
-            dataset_root=dataset_root,
-            mode=mode,
+        self.train_loader, self.val_loader = data_loaders
+        self.device = torch.device(config.device)
+
+        self.classifier.to(self.device)
+
+        if torch.distributed.is_initialized():
+            self.classifier = torch.nn.parallel.DistributedDataParallel(
+                self.classifier,
+                device_ids=[self.device.index] if self.device.type == "cuda" else None,
+                output_device=self.device.index if self.device.type == "cuda" else None,
+                find_unused_parameters=False,
+            )
+        elif getattr(config, "use_data_parallel", False) and torch.cuda.device_count() > 1:
+            self.classifier = torch.nn.DataParallel(self.classifier)
+
+        self.criterion = nn.CrossEntropyLoss()
+        self.optimizer = torch.optim.AdamW(
+            [p for p in self.classifier.parameters() if p.requires_grad],
+            lr=float(config.lr),
+            weight_decay=float(config.weight_decay),
+        )
+        self.scheduler = CosineAnnealingWarmRestarts(
+            self.optimizer,
+            T_0=int(config.cosine_annealing_T0),
+            T_mult=int(config.cosine_annealing_mult),
+        )
+        self.scaler = GradScaler(enabled=bool(config.use_amp_autocast))
+
+        self.mask_img_size = int(getattr(config, "mask_img_size", 224))
+        self.mask_source = str(getattr(config, "mask_source", "final")).lower()
+        self.mask_fill_value = int(getattr(config, "mask_fill_value", 255))
+        self.save_detect_vis_once = bool(getattr(config, "save_detect_vis_once", True))
+        self.detect_vis_num_samples = int(getattr(config, "detect_vis_num_samples", 1))
+        self._detect_vis_saved = False
+
+        cache_dir = getattr(config, "bbox_cache_path", None)
+        if not cache_dir:
+            cache_dir = os.path.join(config.result_dir, "bbox_cache")
+        self.bbox_cache = BBoxCache(
+            base_dir=cache_dir,
+            dataset_root=getattr(config, "dataset_path", None),
+            mode=str(getattr(config, "bbox_cache_mode", "readwrite")),
             mem_max=0,
             logger=logger,
         )
 
-class Trainer:
-    def __init__(self, config, data_loaders, logger, detector, preprocessor, classifier):
-        
-        self.config = config
-        self.logger = logger
-        self.device = self.config.device
-        self.train_loader, self.val_loader = data_loaders
-            
-        self.classifier = classifier.to(self.device)
-        self.detector = detector
-        self.preprocessor = preprocessor
-        
-        if dist.is_initialized():
-            if dist.get_rank() == 0:
-                self.logger.info(f"Using DistributedDataParallel on {dist.get_world_size()} processes")
-            self.classifier = nn.parallel.DistributedDataParallel(
-                module=self.classifier,
-                device_ids=[self.config.local_rank],
-                broadcast_buffers=False,
-                find_unused_parameters=False,
-                output_device=self.config.local_rank)
-        elif torch.cuda.device_count() > 1 and self.config.use_data_parallel:
-            self.logger.info(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
-            self.classifier = nn.DataParallel(self.classifier)
-            
-        self.criterion = torch.nn.CrossEntropyLoss()
-            
-        self.optimizer = torch.optim.AdamW(list(self.classifier.parameters()), lr=self.config.lr, weight_decay=self.config.weight_decay)
-        self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=self.config.cosine_annealing_T0, T_mult=self.config.cosine_annealing_mult)
-        self.early_stopping = EarlyStopping(logger=self.logger, patience=self.config.early_stop_patience, delta=0)
-        
-        self.scaler = GradScaler(enabled=(self.config.use_amp_autocast and self.device.type == "cuda"))
-        self.writer = SummaryWriter(log_dir=config.result_dir)
-        
-        self.bbox_cache = BBoxCache.from_config(self.config, logger=self.logger)
-        self._bbox_stats = {"hit": 0, "miss": 0, "write": 0}
-        
-        self.save_detect_vis_once = getattr(self.config, "save_detect_vis_once", True)
-        self._detect_vis_saved = False
-        self.detect_vis_num_samples = getattr(self.config, "detect_vis_num_samples", 10000)
-        
-    def train_one_epoch(self, epoch):
-        """
-        - inputs: (B, 512, 750) 原始矩阵 torch.Tensor
-        - labels: (B,) 类别标签 torch.Tensor 
-        """
+        self.early_stopping = EarlyStopping(
+            self.logger,
+            patience=int(config.early_stop_patience),
+            delta=0.0,
+        )
 
-        loss_record = AverageMeter()
-        self.classifier.train()
-
-        for batch_idx, (inputs, labels, freq, bw, snr, fps) in enumerate(tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}", leave=True)):
-            
-            labels = labels.to(self.device, non_blocking=True)
-
-            # 构造 token 序列（检测+预处理）
-            tokens, key_padding_mask = self._batch_to_tokens(inputs, sample_fps=fps)
-            tokens = tokens.to(self.config.device, non_blocking=True)
-            key_padding_mask = key_padding_mask.to(self.config.device, non_blocking=True)
-
-            self.optimizer.zero_grad(set_to_none=True)
-
-            with autocast(enabled=self.config.use_amp_autocast, device_type=self.device.type):
-                try:
-                    logits = self.classifier(tokens, key_padding_mask=key_padding_mask)
-                except TypeError:
-                    try:
-                        logits = self.classifier(tokens, key_padding_mask)
-                    except TypeError:
-                        logits = self.classifier(tokens)
-
-                loss = self.criterion(logits, labels)
-
-            if self.scaler.is_enabled():
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                loss.backward()
-                self.optimizer.step()
-
-            loss_record.update(loss.item(), labels.size(0))
-
+        self.writer = None
         if (not dist.is_initialized()) or dist.get_rank() == 0:
-            self.logger.info(f"Train Epoch: {epoch + 1}, Avg Loss: {loss_record.avg:.4f}")
-            self.writer.add_scalar("Loss/Train", loss_record.avg, epoch)
-
-        return loss_record.avg
-
-    @torch.no_grad()
-    def validate(self, epoch):
-
-        loss_record = AverageMeter()
-        self.classifier.eval()
-
-        total_correct, total_count = 0, 0
-        all_preds, all_targets = [], []
-
-        for batch_idx, (inputs, labels, freq, bw, snr, fps) in enumerate(tqdm(self.val_loader, desc=f"Validating Epoch {epoch + 1}", leave=True)):
-
-            labels = labels.to(self.device, non_blocking=True)
-
-            # tokens, key_padding_mask = self._batch_to_tokens(inputs, sample_fps=fps, save_detect_result=True)
-            need_save_detect_result = (not self._detect_vis_saved)
-            tokens, key_padding_mask = self._batch_to_tokens(inputs, sample_fps=fps, save_detect_result=need_save_detect_result, max_save_images=self.detect_vis_num_samples)
-            if need_save_detect_result:
-                self._detect_vis_saved = True
-            
-            tokens = tokens.to(self.config.device, non_blocking=True)
-            key_padding_mask = key_padding_mask.to(self.config.device, non_blocking=True)
-
-            with autocast(enabled=self.config.use_amp_autocast, device_type=self.device.type):
-                try:
-                    logits = self.classifier(tokens, key_padding_mask=key_padding_mask)
-                except TypeError:
-                    try:
-                        logits = self.classifier(tokens, key_padding_mask)
-                    except TypeError:
-                        logits = self.classifier(tokens)
-
-                loss = self.criterion(logits, labels)
-
-            loss_record.update(loss.item(), labels.size(0))
-
-            preds = logits.argmax(dim=1)
-            total_correct += (preds == labels).sum().item()
-            total_count += labels.numel()
-
-            all_preds.append(preds.detach().cpu().numpy())
-            all_targets.append(labels.detach().cpu().numpy())
-        
-        local_loss_sum = loss_record.sum if hasattr(loss_record, "sum") else (loss_record.avg * max(1, loss_record.count))
-        local_loss_count = loss_record.count if hasattr(loss_record, "count") else total_count
-
-        if dist.is_initialized():
-            stat_tensor = torch.tensor(
-                [total_correct, total_count, float(local_loss_sum), float(local_loss_count)],
-                device=self.device,
-                dtype=torch.float64
-            )
-            dist.all_reduce(stat_tensor, op=dist.ReduceOp.SUM)
-
-            total_correct = int(stat_tensor[0].item())
-            total_count = int(stat_tensor[1].item())
-            global_loss_sum = float(stat_tensor[2].item())
-            global_loss_count = float(stat_tensor[3].item())
-        else:
-            global_loss_sum = float(local_loss_sum)
-            global_loss_count = float(local_loss_count)
-
-        acc = total_correct / max(1, total_count)
-        global_loss_avg = global_loss_sum / max(1.0, global_loss_count)
-
-        y_pred_local = np.concatenate(all_preds) if len(all_preds) else np.array([], dtype=np.int64)
-        y_true_local = np.concatenate(all_targets) if len(all_targets) else np.array([], dtype=np.int64)
-
-        if dist.is_initialized():
-            gathered_preds = [None for _ in range(dist.get_world_size())]
-            gathered_targets = [None for _ in range(dist.get_world_size())]
-
-            dist.all_gather_object(gathered_preds, y_pred_local)
-            dist.all_gather_object(gathered_targets, y_true_local)
-
-            if dist.get_rank() == 0:
-                y_pred = np.concatenate(
-                    [x for x in gathered_preds if x is not None and len(x) > 0]
-                ) if len(gathered_preds) else np.array([], dtype=np.int64)
-
-                y_true = np.concatenate(
-                    [x for x in gathered_targets if x is not None and len(x) > 0]
-                ) if len(gathered_targets) else np.array([], dtype=np.int64)
-            else:
-                y_pred = np.array([], dtype=np.int64)
-                y_true = np.array([], dtype=np.int64)
-        else:
-            y_pred = y_pred_local
-            y_true = y_true_local
-
-        # 只在 rank0 保存日志和混淆矩阵
-        if (not dist.is_initialized()) or dist.get_rank() == 0:
-            self.logger.info(f"Validate Epoch: {epoch + 1}, Loss: {global_loss_avg:.4f}, Acc: {acc:.4f}")
-            self.writer.add_scalar("Loss/Validation", global_loss_avg, epoch)
-            self.writer.add_scalar("Acc/Validation", acc, epoch)
-
-            if y_true.size > 0:
-                if hasattr(self.config, "classes") and isinstance(self.config.classes, dict):
-                    idx_to_name = {v: k for k, v in self.config.classes.items()}
-                    class_ids = sorted(idx_to_name.keys())
-                    class_names = [idx_to_name[i] for i in class_ids]
-                else:
-                    n_cls = int(max(np.max(y_true), np.max(y_pred)) + 1)
-                    class_ids = list(range(n_cls))
-                    class_names = [str(i) for i in class_ids]
-
-                cm = confusion_matrix(y_true, y_pred, labels=class_ids)
-
-                fig_w = max(8, 0.9 * len(class_names) + 4)
-                fig_h = max(6, 0.8 * len(class_names) + 3)
-
-                fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-                im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
-                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-                ax.set_title(f"Confusion Matrix - Epoch {epoch + 1}")
-                ax.set_xlabel("Predicted Label")
-                ax.set_ylabel("True Label")
-
-                ax.set_xticks(np.arange(len(class_names)))
-                ax.set_yticks(np.arange(len(class_names)))
-                ax.set_xticklabels(class_names, rotation=45, ha="right")
-                ax.set_yticklabels(class_names)
-
-                thresh = cm.max() / 2.0 if cm.size > 0 else 0.0
-                for i in range(cm.shape[0]):
-                    for j in range(cm.shape[1]):
-                        ax.text(
-                            j, i, str(cm[i, j]),
-                            ha="center", va="center",
-                            color="white" if cm[i, j] > thresh else "black",
-                            fontsize=9
-                        )
-
-                fig.tight_layout()
-                
-                save_path = os.path.join(self.config.result_dir, 'confusion_matrix')
-                os.makedirs(save_path, exist_ok=True)
-
-                cm_png_path = os.path.join(save_path, f"confusion_matrix_epoch_{epoch+1}.png")
-                fig.savefig(cm_png_path, dpi=200, bbox_inches="tight")
-                plt.close(fig)
-
-                self.logger.info(f"Confusion matrix saved at {cm_png_path}")
-
-        return global_loss_avg, acc
-        
-    def train(self):
-        
-        best_path = None
-        best_val_loss = np.inf
-        for epoch in range(self.config.epochs):
-            
-            _set_epoch_for_loaders(epoch, self.train_loader, self.val_loader)
-            
-            train_loss = self.train_one_epoch(epoch)
-            if (not dist.is_initialized()) or dist.get_rank() == 0:
-                self.logger.info('*' * 25 + f' Train Epoch [{epoch + 1}/{self.config.epochs}]' + '*' * 25)
-                self.logger.info(f"Train Loss: {train_loss:.4f}")
-            
-            val_loss, val_acc = self.validate(epoch)
-            global_val_main = _reduce_scalar(torch.tensor(val_loss, device=self.device), self.device)
-            self.scheduler.step()
-                
-            early_stop_flag = torch.zeros(1, device=self.device)
-            
-            if (not dist.is_initialized()) or dist.get_rank() == 0:
-                self.logger.info(f"--Current learning rate: {self.scheduler.get_last_lr()}")
-            
-                if (epoch + 1) % self.config.save_interval == 0:  
-                    checkpoint_path = os.path.join(self.config.model_dir, f'epoch_{epoch + 1}.pth')
-                    save_checkpoint({"model": self.classifier}, optimizer=None, scheduler=None, epoch=epoch, path=checkpoint_path, cfg=None, logger=self.logger)
-                    self.logger.info(f"--Checkpoint saved at epoch {epoch + 1} to {checkpoint_path}")
-                    
-                if global_val_main < best_val_loss:
-                    best_val_loss = global_val_main 
-                    best_path = os.path.join(self.config.model_dir, f'best.pth')
-                    save_checkpoint({"model": self.classifier}, optimizer=None, scheduler=None, epoch=epoch, path=best_path, cfg=None, logger=self.logger)
-                    self.logger.info(f"--Best model saved at epoch {epoch + 1} with validation loss: {global_val_main:.4f}")
-                    
-                self.early_stopping(global_val_main, self)
-                if self.early_stopping.early_stop:
-                    early_stop_flag.fill_(1)
-                    
-            if dist.is_initialized():
-                dist.broadcast(early_stop_flag, src=0)
-
-        if (not dist.is_initialized()) or dist.get_rank() == 0:
-            checkpoint_path = os.path.join(self.config.model_dir, f'last.pth')
-            save_checkpoint({"model": self.classifier}, optimizer=None, scheduler=None, epoch=epoch, path=checkpoint_path, cfg=None, logger=self.logger)
-            
-        if dist.is_initialized():
-            dist.barrier()
-        return best_path if (not dist.is_initialized() or dist.get_rank()==0) else None
-
-    def _batch_to_tokens(self, inputs_bhw: torch.Tensor, sample_fps=None, save_detect_result=False, max_save_images=1):
-        """
-        inputs_bhw: (B, H, W) torch.Tensor
-        sample_fps: Optional[list[str]]
-
-        return:
-        tokens: (B, Smax, F) float32 on CPU
-        key_padding_mask: (B, Smax) bool on CPU; True=padding
-        """
-        B, H, W = inputs_bhw.shape
-
-        feats_list = []
-        lengths = []
-        saved_count = 0
-
-        with torch.inference_mode():
-            for i in range(B):
-                fp = None
-                if sample_fps is not None:
-                    try:
-                        fp = sample_fps[i]
-                    except Exception:
-                        fp = None
-
-                # spec = inputs_bhw[i].detach().cpu().numpy().astype(np.float32)
-                # boxes = self._get_boxes_for_sample(spec, fp=fp)
-
-                # if save_detect_result:
-                #     try:
-                #         final_boxes = self.preprocessor.select_main_boxes(boxes)
-                #         if hasattr(final_boxes, "tolist"):
-                #             final_boxes = final_boxes.tolist()
-                #     except Exception:
-                #         final_boxes = []
-
-                #     self._save_detect_result_images(
-                #         spec=spec,
-                #         yolo_boxes=boxes,
-                #         final_boxes=final_boxes,
-                #         fp=fp,
-                #         sample_idx=i,
-                #     )
-                
-                # feats = self.preprocessor.process(boxes, spec)
-                
-                spec = inputs_bhw[i].detach().cpu().numpy().astype(np.float32)
-                boxes = self._get_boxes_for_sample(spec, fp=fp)
-
-                # if save_detect_result:
-                #     try:
-                #         final_boxes = self.preprocessor.select_main_boxes(boxes, spectrogram=spec)
-                #         if hasattr(final_boxes, "tolist"):
-                #             final_boxes = final_boxes.tolist()
-                #     except Exception:
-                #         final_boxes = []
-
-                #     self._save_detect_result_images(
-                #         spec=spec,
-                #         yolo_boxes=boxes,
-                #         final_boxes=final_boxes,
-                #         fp=fp,
-                #         sample_idx=i,
-                #     )
-                    
-                if save_detect_result and saved_count < max_save_images:
-                    try:
-                        final_boxes = self.preprocessor.select_main_boxes(boxes, spectrogram=spec)
-                        if hasattr(final_boxes, "tolist"):
-                            final_boxes = final_boxes.tolist()
-                    except Exception:
-                        final_boxes = []
-
-                    self._save_detect_result_images(
-                        spec=spec,
-                        yolo_boxes=boxes,
-                        final_boxes=final_boxes,
-                        fp=fp,
-                        sample_idx=i,
-                    )
-                    saved_count += 1
-                
-                feats = self.preprocessor.process(boxes, spec)
-
-
-                if feats is None or feats.size == 0:
-                    feats = np.zeros((1, self.config.feature_dim), dtype=np.float32)
-
-                if feats.shape[0] > self.config.max_tokens:
-                    feats = feats[: self.config.max_tokens]
-
-                feats_t = torch.from_numpy(feats).to(dtype=torch.float32).contiguous()
-
-                if feats_t.ndim != 2:
-                    feats_t = feats_t.reshape(1, -1)
-
-                feats_list.append(feats_t)
-                lengths.append(int(feats_t.shape[0]))
-
-        Smax = int(max(lengths))
-        F = int(feats_list[0].shape[1])
-
-        tokens = torch.zeros((B, Smax, F), dtype=torch.float32)
-        key_padding_mask = torch.ones((B, Smax), dtype=torch.bool)  # True=padding
-
-        for i, ft in enumerate(feats_list):
-            si = int(ft.shape[0])
-            tokens[i, :si] = ft
-            key_padding_mask[i, :si] = False
-
-        return tokens, key_padding_mask
-    
-    # @torch.no_grad()
-    # def precompute_boxes(self, loader=None):
-    #     """
-    #     Precompute & cache YOLO bboxes only.
-    #     """
-    #     if self.bbox_cache is None:
-    #         self.logger.info("BBox cache disabled; skip precompute_boxes().")
-    #         return
-
-    #     if self.bbox_cache.mode == "read":
-    #         self.logger.info("BBox cache is read-only; skip precompute_boxes().")
-    #         return
-
-    #     dl = loader if loader is not None else self.train_loader
-    #     if dl is None:
-    #         raise ValueError("train_loader is None; pass loader to precompute_boxes(loader=...).")
-
-    #     self._bbox_stats = {"hit": 0, "miss": 0, "write": 0}
-
-    #     total = len(dl.dataset) if hasattr(dl, "dataset") else None
-    #     pbar = tqdm(total=total, desc="Precomputing YOLO bboxes", unit="img")
-
-    #     for batch in dl:
-    #         if not isinstance(batch, (list, tuple)):
-    #             raise ValueError("Expected batch to be tuple/list")
-
-    #         if len(batch) == 6:
-    #             inputs, labels, freqs, bws, snrs, fps = batch
-    #         elif len(batch) == 5:
-    #             inputs, labels, freqs, bws, snrs = batch
-    #             fps = None
-    #         else:
-    #             raise ValueError(f"Unexpected batch size: {len(batch)}")
-
-    #         B, H, W = inputs.shape
-
-    #         for i in range(B):
-    #             fp = fps[i] if fps is not None else None
-
-    #             # 没有文件路径时无法持久化缓存
-    #             if fp is None:
-    #                 pbar.update(1)
-    #                 continue
-
-    #             # 先查缓存
-    #             got = self.bbox_cache.get(fp)
-    #             if got is not None:
-    #                 self._bbox_stats["hit"] += 1
-    #                 pbar.update(1)
-    #                 continue
-
-    #             self._bbox_stats["miss"] += 1
-
-    #             # 取单张谱图（保持在 CPU）
-    #             spec = inputs[i].detach().cpu().numpy().astype(np.float32)
-
-    #             # YOLO 检测
-    #             try:
-    #                 boxes = self.detector.detect(spec)   # List[[x1,y1,x2,y2], ...]
-    #             except Exception as e:
-    #                 if self.logger:
-    #                     self.logger.warning(f"[YOLO detect] failed during precompute for {os.path.basename(fp)}: {e}")
-    #                 boxes = []
-
-    #             # 合法性过滤
-    #             boxes = self._sanitize_boxes(boxes, H, W)
-
-    #             boxes_t = (
-    #                 torch.as_tensor(boxes, dtype=torch.int32).reshape(-1, 4)
-    #                 if len(boxes) > 0 else
-    #                 torch.zeros((0, 4), dtype=torch.int32)
-    #             )
-
-    #             wrote = self.bbox_cache.put(fp, boxes_t)
-    #             if wrote:
-    #                 self._bbox_stats["write"] += 1
-
-    #             pbar.update(1)
-
-    #     pbar.close()
-
-    #     st = self._bbox_stats
-    #     self.logger.info(
-    #         f"YOLO bbox precompute done. hit={st['hit']} miss={st['miss']} write={st['write']} | mode={self.bbox_cache.mode}"
-    #     )
+            self.writer = SummaryWriter(log_dir=config.log_dir)
 
     def _sanitize_boxes(self, boxes, H, W):
-        """
-        boxes: List[[x1,y1,x2,y2], ...]
-
-        Return:
-            sanitized List[[x1,y1,x2,y2], ...]
-        """
+        if boxes is None:
+            return []
+        arr = np.asarray(boxes, dtype=np.int32).reshape(-1, 4) if len(boxes) > 0 else np.zeros((0, 4), dtype=np.int32)
         out = []
-
-        min_area = int(getattr(self.config, "pre_min_area", 0) or 0)
-        max_bbox_area_ratio = float(getattr(self.config, "max_bbox_area_ratio", 0.0) or 0.0)
         img_area = float(H * W)
+        min_area = int(getattr(self.config, "pre_min_area", 0))
+        max_bbox_area_ratio = float(getattr(self.config, "max_bbox_area_ratio", 0.0))
 
-        for box in boxes:
-            if box is None or len(box) != 4:
-                continue
-
-            x1, y1, x2, y2 = map(int, box)
-
+        for b in arr:
+            x1, y1, x2, y2 = [int(v) for v in b]
             x1 = max(0, min(x1, W - 1))
-            x2 = max(0, min(x2, W - 1))
+            x2 = max(0, min(x2, W))
             y1 = max(0, min(y1, H - 1))
-            y2 = max(0, min(y2, H - 1))
-
+            y2 = max(0, min(y2, H))
             if x2 <= x1 or y2 <= y1:
                 continue
-
             area = (x2 - x1) * (y2 - y1)
-
-            # if min_area > 0 and area < min_area:
-            #     continue
-
-            # if max_bbox_area_ratio > 0 and area > max_bbox_area_ratio * img_area:
-            #     continue
-
+            if min_area > 0 and area < min_area:
+                continue
+            if max_bbox_area_ratio > 0 and area > max_bbox_area_ratio * img_area:
+                continue
             out.append([x1, y1, x2, y2])
 
         return out
-    
-    def _get_boxes_for_sample(self, spec: np.ndarray, fp=None):
-        """
-        Return:
-            boxes: List[[x1,y1,x2,y2], ...]
-        """
-        H, W = spec.shape
 
-        # 1) 尝试读缓存
-        if fp is not None and self.bbox_cache is not None:
+    def _get_boxes_for_sample(self, spec, fp=None):
+        H, W = spec.shape[:2]
+        if fp is not None:
             got = self.bbox_cache.get(fp)
             if got is not None:
-                self._bbox_stats["hit"] += 1
                 return got.cpu().numpy().tolist()
-
-        # 2) cache miss -> YOLO detect
-        self._bbox_stats["miss"] += 1
 
         try:
             boxes = self.detector.detect(spec)
+            boxes = self._sanitize_boxes(boxes, H, W)
         except Exception as e:
             if self.logger:
-                name = os.path.basename(fp) if fp is not None else "<memory_sample>"
-                self.logger.warning(f"[YOLO detect] failed on {name}: {e}")
+                self.logger.warning(f"[DetectorError] {os.path.basename(fp) if fp else 'unknown'}: {e}")
             boxes = []
 
-        boxes = self._sanitize_boxes(boxes, H, W)
-
-        # 3) 写缓存
-        if fp is not None and self.bbox_cache is not None:
-            boxes_t = (
-                torch.as_tensor(boxes, dtype=torch.int32).reshape(-1, 4)
-                if len(boxes) > 0 else
-                torch.zeros((0, 4), dtype=torch.int32)
-            )
-            wrote = self.bbox_cache.put(fp, boxes_t)
-            if wrote:
-                self._bbox_stats["write"] += 1
+        if fp is not None:
+            self.bbox_cache.put(fp, torch.as_tensor(boxes, dtype=torch.int32))
 
         return boxes
-    
-    def _draw_boxes_on_rgb(self, rgb_u8, boxes, color=(255, 0, 0), width=2):
-        """
-        rgb_u8: np.ndarray, shape (H, W, 3), dtype uint8
-        boxes: List[[x1,y1,x2,y2], ...] or np.ndarray [N,4]
-        """
-        if boxes is None:
-            boxes = []
 
-        if hasattr(boxes, "tolist"):
-            boxes = boxes.tolist()
+    def _build_mask_from_boxes(self, spec, boxes):
+        mask = boxes_to_white_mask(
+            image_shape=spec.shape,
+            boxes=boxes,
+            fill_value=self.mask_fill_value,
+            mode="fill",
+        )
+        x = mask_to_tensor(mask, out_size=self.mask_img_size)   # (1,H,W)
+        return torch.from_numpy(x).float()
 
-        img = Image.fromarray(rgb_u8.copy())
-        draw = ImageDraw.Draw(img)
-
-        for box in boxes:
-            if box is None or len(box) != 4:
-                continue
-            x1, y1, x2, y2 = map(int, box)
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=width)
-
-        return np.array(img)
-
-
-    def _save_detect_result_images(self, spec, yolo_boxes, final_boxes, fp=None, sample_idx=None):
-        """
-        Save two images:
-        - YOLO raw detection boxes
-        - final selected boxes
-
-        Saved to:
-        <result_dir>/detect_result/<basename>_yolo.png
-        <result_dir>/detect_result/<basename>_final.png
-        """
-        if dist.is_initialized() and dist.get_rank() != 0:
-            return
-
+    def _save_detect_result_images(self, spec, yolo_boxes, final_boxes, fp, sample_idx=0):
         save_dir = os.path.join(self.config.result_dir, "detect_result")
         os.makedirs(save_dir, exist_ok=True)
 
-        # base filename
-        if fp is not None:
-            base = os.path.splitext(os.path.basename(fp))[0]
+        base = os.path.splitext(os.path.basename(fp))[0] if fp else f"sample_{sample_idx}"
+
+        spec_u8 = np.asarray(spec)
+        if spec_u8.dtype != np.uint8:
+            s = spec_u8.astype(np.float32)
+            s_min, s_max = float(s.min()), float(s.max())
+            if s_max > s_min:
+                s = (s - s_min) / (s_max - s_min)
+            else:
+                s = np.zeros_like(s, dtype=np.float32)
+            spec_u8 = (s * 255.0).astype(np.uint8)
+
+        from PIL import Image, ImageDraw
+
+        for name, boxes in [("yolo", yolo_boxes), ("final", final_boxes)]:
+            img = Image.fromarray(spec_u8).convert("RGB")
+            draw = ImageDraw.Draw(img)
+            color = (255, 0, 0) if name == "yolo" else (0, 255, 0)
+            for b in boxes:
+                x1, y1, x2, y2 = [int(v) for v in b]
+                draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+            img.save(os.path.join(save_dir, f"{base}_{name}.png"))
+
+    def _batch_to_mask_images(self, inputs_bhw, sample_fps=None, save_detect_result=False, max_save_images=1):
+        if isinstance(inputs_bhw, torch.Tensor):
+            batch = inputs_bhw.detach().cpu()
         else:
-            base = f"sample_{sample_idx if sample_idx is not None else 0}"
+            batch = torch.as_tensor(inputs_bhw)
 
-        gray_u8 = self._to_uint8_gray(spec)
-        rgb = np.stack([gray_u8, gray_u8, gray_u8], axis=-1)
+        if batch.ndim == 4 and batch.shape[1] == 1:
+            batch = batch[:, 0]
+        if batch.ndim != 3:
+            raise ValueError(f"Expected inputs shape [B,H,W] or [B,1,H,W], got {tuple(batch.shape)}")
 
-        yolo_img = self._draw_boxes_on_rgb(rgb, yolo_boxes, color=(255, 0, 0), width=2)
-        final_img = self._draw_boxes_on_rgb(rgb, final_boxes, color=(0, 255, 0), width=2)
+        B = batch.shape[0]
+        out = []
+        saved_count = 0
 
-        yolo_path = os.path.join(save_dir, f"{base}_yolo.png")
-        final_path = os.path.join(save_dir, f"{base}_final.png")
+        for i in range(B):
+            spec = batch[i].numpy()
+            fp = None if sample_fps is None else sample_fps[i]
 
-        Image.fromarray(yolo_img).save(yolo_path)
-        Image.fromarray(final_img).save(final_path)
-        
-    def _to_uint8_gray(self, spec: np.ndarray) -> np.ndarray:
-        """
-        spec: (H, W), float/uint16/uint8
-        return: uint8 grayscale image in [0, 255]
-        """
-        if spec.ndim != 2:
-            raise ValueError(f"Expected 2D grayscale spectrogram, got shape={spec.shape}")
+            yolo_boxes = self._get_boxes_for_sample(spec, fp=fp)
 
-        if spec.dtype == np.uint8:
-            return spec
+            if self.mask_source == "raw":
+                boxes = yolo_boxes
+                final_boxes = yolo_boxes
+            elif self.mask_source == "final":
+                final_boxes = self.preprocessor.select_main_boxes(yolo_boxes, spectrogram=spec)
+                boxes = final_boxes.tolist() if hasattr(final_boxes, "tolist") else final_boxes
+            else:
+                raise ValueError(f"Unsupported mask_source={self.mask_source}, use 'raw' or 'final'.")
 
-        x = spec.astype(np.float32, copy=False)
+            x = self._build_mask_from_boxes(spec, boxes)
+            out.append(x)
 
-        # 用分位数做稳健拉伸，避免极端值影响显示
-        lo = np.percentile(x, 1.0)
-        hi = np.percentile(x, 99.0)
+            if save_detect_result and saved_count < max_save_images:
+                try:
+                    final_boxes_vis = self.preprocessor.select_main_boxes(yolo_boxes, spectrogram=spec)
+                    final_boxes_vis = final_boxes_vis.tolist() if hasattr(final_boxes_vis, "tolist") else final_boxes_vis
+                except Exception:
+                    final_boxes_vis = []
+                self._save_detect_result_images(
+                    spec=spec,
+                    yolo_boxes=yolo_boxes,
+                    final_boxes=final_boxes_vis,
+                    fp=fp,
+                    sample_idx=i,
+                )
+                saved_count += 1
 
-        if (not np.isfinite(lo)) or (not np.isfinite(hi)) or hi <= lo:
-            lo = float(np.min(x))
-            hi = float(np.max(x))
-            if hi <= lo:
-                return np.zeros_like(x, dtype=np.uint8)
+        return torch.stack(out, dim=0)  # [B,1,H,W]
 
-        x = np.clip((x - lo) / (hi - lo + 1e-12), 0.0, 1.0)
-        return (x * 255.0).astype(np.uint8)
+    def _forward_loss(self, images, labels):
+        with autocast(enabled=bool(self.config.use_amp_autocast), device_type=self.device.type):
+            logits = self.classifier(images)
+            loss = self.criterion(logits, labels)
+        return logits, loss
+
+    def train_one_epoch(self, epoch):
+        self.classifier.train()
+        _set_epoch_for_loaders(self.train_loader, epoch)
+
+        loss_meter = AverageMeter()
+        correct = 0
+        total = 0
+
+        pbar = tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}", leave=True)
+        for batch in pbar:
+            inputs, labels, freq, bw, snr, fps = batch
+            labels = labels.to(self.device, non_blocking=True)
+
+            images = self._batch_to_mask_images(inputs, sample_fps=fps, save_detect_result=False)
+            images = images.to(self.device, non_blocking=True)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            logits, loss = self._forward_loss(images, labels)
+
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            preds = logits.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.numel()
+
+            loss_meter.update(loss.item(), labels.size(0))
+            pbar.set_postfix(loss=f"{loss_meter.avg:.4f}", acc=f"{100.0 * correct / max(total,1):.2f}%")
+
+        self.scheduler.step(epoch + 1)
+
+        train_loss = loss_meter.avg
+        train_acc = 100.0 * correct / max(total, 1)
+
+        if dist.is_initialized():
+            train_loss = _reduce_scalar(torch.tensor(train_loss, device=self.device), op="mean").item()
+            train_acc = _reduce_scalar(torch.tensor(train_acc, device=self.device), op="mean").item()
+
+        return train_loss, train_acc
+
+    @torch.no_grad()
+    def validate(self, epoch):
+        self.classifier.eval()
+
+        loss_meter = AverageMeter()
+        correct = 0
+        total = 0
+        all_preds = []
+        all_targets = []
+
+        pbar = tqdm(self.val_loader, desc=f"Validating Epoch {epoch + 1}", leave=True)
+        for batch_idx, batch in enumerate(pbar):
+            inputs, labels, freq, bw, snr, fps = batch
+            labels = labels.to(self.device, non_blocking=True)
+
+            need_save_detect_result = (
+                self.save_detect_vis_once and (not self._detect_vis_saved) and batch_idx == 0
+            )
+
+            images = self._batch_to_mask_images(
+                inputs,
+                sample_fps=fps,
+                save_detect_result=need_save_detect_result,
+                max_save_images=self.detect_vis_num_samples,
+            )
+            images = images.to(self.device, non_blocking=True)
+
+            if need_save_detect_result:
+                self._detect_vis_saved = True
+
+            logits, loss = self._forward_loss(images, labels)
+
+            preds = logits.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.numel()
+
+            loss_meter.update(loss.item(), labels.size(0))
+            all_preds.append(preds.detach().cpu().numpy())
+            all_targets.append(labels.detach().cpu().numpy())
+
+            pbar.set_postfix(loss=f"{loss_meter.avg:.4f}", acc=f"{100.0 * correct / max(total,1):.2f}%")
+
+        val_loss = loss_meter.avg
+        val_acc = 100.0 * correct / max(total, 1)
+
+        if len(all_preds) > 0:
+            all_preds = np.concatenate(all_preds, axis=0)
+            all_targets = np.concatenate(all_targets, axis=0)
+        else:
+            all_preds = np.array([], dtype=np.int64)
+            all_targets = np.array([], dtype=np.int64)
+
+        if dist.is_initialized():
+            val_loss = _reduce_scalar(torch.tensor(val_loss, device=self.device), op="mean").item()
+            val_acc = _reduce_scalar(torch.tensor(val_acc, device=self.device), op="mean").item()
+
+        if (not dist.is_initialized()) or dist.get_rank() == 0:
+            self._save_confusion_matrix(all_targets, all_preds, epoch)
+
+        return val_loss, val_acc
+
+    def _save_confusion_matrix(self, y_true, y_pred, epoch):
+        if len(y_true) == 0:
+            return
+
+        labels = list(range(self.config.num_classes))
+        cm = confusion_matrix(y_true, y_pred, labels=labels)
+
+        if isinstance(self.config.classes, dict):
+            idx_to_name = {v: k for k, v in self.config.classes.items()}
+            names = [idx_to_name.get(i, str(i)) for i in labels]
+        else:
+            names = [str(i) for i in labels]
+
+        save_dir = os.path.join(self.config.result_dir, "confusion_matrix")
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"epoch_{epoch + 1}.png")
+
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                    xticklabels=names, yticklabels=names)
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        plt.title(f"Confusion Matrix - Epoch {epoch + 1}")
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=200)
+        plt.close()
+
+    def train(self):
+        best_acc = -1.0
+
+        for epoch in range(int(self.config.epochs)):
+            train_loss, train_acc = self.train_one_epoch(epoch)
+            val_loss, val_acc = self.validate(epoch)
+
+            if (not dist.is_initialized()) or dist.get_rank() == 0:
+                self.logger.info(
+                    f"[Epoch {epoch + 1}/{self.config.epochs}] "
+                    f"train_loss={train_loss:.4f}, train_acc={train_acc:.2f}, "
+                    f"val_loss={val_loss:.4f}, val_acc={val_acc:.2f}"
+                )
+
+                if self.writer is not None:
+                    self.writer.add_scalar("train/loss", train_loss, epoch + 1)
+                    self.writer.add_scalar("train/acc", train_acc, epoch + 1)
+                    self.writer.add_scalar("val/loss", val_loss, epoch + 1)
+                    self.writer.add_scalar("val/acc", val_acc, epoch + 1)
+
+                is_best = val_acc > best_acc
+                if is_best:
+                    best_acc = val_acc
+
+                save_checkpoint(
+                    models={"model": self.classifier.module if hasattr(self.classifier, "module") else self.classifier},
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                    epoch=epoch + 1,
+                    path=os.path.join(self.config.model_dir, f"epoch_{epoch + 1}.pth"),
+                    cfg=self.config
+                )
+
+                self.early_stopping(val_loss, self.classifier)
+                stop = self.early_stopping.early_stop
+            else:
+                stop = False
+
+            if dist.is_initialized():
+                stop_tensor = torch.tensor(int(stop), device=self.device)
+                dist.broadcast(stop_tensor, src=0)
+                stop = bool(stop_tensor.item())
+
+            if stop:
+                if (not dist.is_initialized()) or dist.get_rank() == 0:
+                    self.logger.info("Early stopping triggered.")
+                break
+
+        if self.writer is not None:
+            self.writer.close()
