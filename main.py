@@ -197,11 +197,11 @@ def get_parser():
     # Transformer Model
     g_model = parser.add_argument_group("Transformer Model")
     g_model.add_argument(
-        "--feature_dim", type=int, default=4,
+        "--feature_dim", type=int, default=16,
         help="Feature size extracted by preprocess network."
     )
     g_model.add_argument(
-        "--d_model", type=int, default=64,
+        "--d_model", type=int, default=128,
         help="Transformer hidden size (token embedding dimension)."
     )
     g_model.add_argument(
@@ -217,7 +217,7 @@ def get_parser():
         help="Number of protocol classes (multi-class classification)."
     )
     g_model.add_argument(
-        "--dropout", type=float, default=0.1,
+        "--dropout", type=float, default=0.0,
         help="Dropout probability used in Transformer."
     )
     g_model.add_argument(
@@ -317,6 +317,7 @@ def main(args):
         freq_eps=config.pre_freq_eps,
         freq_min_samples=config.pre_freq_min_samples,
         nms_iou_thresh=config.pre_nms_iou_thresh,
+        expected_max_tokens=config.max_tokens,
     )
     
     trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier)

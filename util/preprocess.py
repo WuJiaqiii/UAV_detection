@@ -83,6 +83,8 @@ class SignalPreprocessor:
         patch_batch_size=64,
         patch_device=None,
         patch_pretrained=True,
+        expected_max_tokens=32,
+        geom_eps=1e-6,
     ):
         """
         Preprocessor for detection outputs to extract main signal blocks.
@@ -138,6 +140,9 @@ class SignalPreprocessor:
 
         self._patch_encoder = None
         self._patch_encoder_device = None
+        
+        self.expected_max_tokens = int(expected_max_tokens)
+        self.geom_eps = float(geom_eps)
 
     def _get_patch_device(self):
         if self.patch_device is not None:
@@ -508,58 +513,114 @@ class SignalPreprocessor:
 
     def process(self, det_boxes, spectrogram, return_boxes: bool = False):
         """
-        Convert detection boxes to a token sequence.
+        Convert detection boxes to a 16D pure-geometry token sequence.
 
-        Args:
-          det_boxes: array-like (N,4) in [x1,y1,x2,y2]
-          spectrogram: 2D array (freq_bins x time_frames)
-          return_boxes: if True, also return the final main_boxes after filtering.
-
-        Returns:
-          features_array: (K,F) float32; if no boxes -> (0,0)
-          main_boxes (optional): (K,4) int32
+        Feature order:
+        0  cx/W
+        1  cy/H
+        2  w/W
+        3  h/H
+        4  area/(H*W)
+        5  log(w/h)
+        6  dx_prev
+        7  dy_prev
+        8  dw_prev
+        9  dh_prev
+        10 dx_next
+        11 dy_next
+        12 dw_next
+        13 dh_next
+        14 rank
+        15 n_boxes_norm
         """
         main_boxes = self.select_main_boxes(det_boxes, spectrogram=spectrogram)
+
         if main_boxes.size == 0:
-            empty = np.zeros((0, 0), dtype=np.float32)
+            empty = np.zeros((0, 16), dtype=np.float32)
             return (empty, main_boxes) if return_boxes else empty
 
-        features = []
-        num_freq_bins = int(spectrogram.shape[0])
-        freq_res = (self.sr / 2.0) / (num_freq_bins - 1) if num_freq_bins > 1 else 0.0
-        time_res = self.hop_length / float(self.sr) if self.sr else 0.0
+        # select_main_boxes() 已经按时间排序过，这里再保险排一次
+        boxes = np.asarray(main_boxes, dtype=np.float32).reshape(-1, 4)
 
-        for (x1, y1, x2, y2) in main_boxes:
-            width = int(x2 - x1)
-            height = int(y2 - y1)
-            area = float(width * height)
+        H, W = spectrogram.shape[:2]
+        eps = self.geom_eps
 
-            region = spectrogram[y1:y2, x1:x2]
-            mean_val = float(np.mean(region)) if region.size else 0.0
-            max_val = float(np.max(region)) if region.size else 0.0
-            var_val = float(np.var(region)) if region.size else 0.0
+        x1 = boxes[:, 0]
+        y1 = boxes[:, 1]
+        x2 = boxes[:, 2]
+        y2 = boxes[:, 3]
 
-            time_center_idx = (x1 + x2) / 2.0
-            freq_center_idx = (y1 + y2) / 2.0
-            time_center_sec = float(time_center_idx * time_res)
-            freq_center_hz = float(freq_center_idx * freq_res)
+        w = np.clip(x2 - x1, 1.0, None)
+        h = np.clip(y2 - y1, 1.0, None)
 
-            time_duration = float(width * time_res)
-            freq_bandwidth = float(height * freq_res)
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+        area = w * h
 
-            # Keep the current 4D token format for compatibility.
-            # If you want to restore the 8D version, switch to the line below.
-            # feat = [time_center_sec, freq_center_hz, time_duration, freq_bandwidth,
-            #         area, mean_val, max_val, var_val]
-            feat = [time_center_sec, freq_center_hz, time_duration, freq_bandwidth]
-            features.append(feat)
+        # ---------- self geometry ----------
+        cx_n = cx / max(float(W), 1.0)
+        cy_n = cy / max(float(H), 1.0)
+        w_n = w / max(float(W), 1.0)
+        h_n = h / max(float(H), 1.0)
+        area_n = area / max(float(H * W), 1.0)
+        log_wh = np.log((w + eps) / (h + eps))
 
-        features_array = np.asarray(features, dtype=np.float32)
+        n = boxes.shape[0]
 
-        # patch_feats = self._extract_patch_features(spectrogram, main_boxes)
-        # if patch_feats.shape[1] > 0:
-        #     features_array = np.concatenate([features_array, patch_feats], axis=1).astype(np.float32, copy=False)
-        # else:
-        #     features_array = features_array.astype(np.float32, copy=False)
+        # ---------- neighbor relations ----------
+        dx_prev = np.zeros(n, dtype=np.float32)
+        dy_prev = np.zeros(n, dtype=np.float32)
+        dw_prev = np.zeros(n, dtype=np.float32)
+        dh_prev = np.zeros(n, dtype=np.float32)
+
+        dx_next = np.zeros(n, dtype=np.float32)
+        dy_next = np.zeros(n, dtype=np.float32)
+        dw_next = np.zeros(n, dtype=np.float32)
+        dh_next = np.zeros(n, dtype=np.float32)
+
+        if n > 1:
+            dx_prev[1:] = (cx_n[1:] - cx_n[:-1]).astype(np.float32)
+            dy_prev[1:] = (cy_n[1:] - cy_n[:-1]).astype(np.float32)
+            dw_prev[1:] = np.log((w[1:] + eps) / (w[:-1] + eps)).astype(np.float32)
+            dh_prev[1:] = np.log((h[1:] + eps) / (h[:-1] + eps)).astype(np.float32)
+
+            dx_next[:-1] = (cx_n[1:] - cx_n[:-1]).astype(np.float32)
+            dy_next[:-1] = (cy_n[1:] - cy_n[:-1]).astype(np.float32)
+            dw_next[:-1] = np.log((w[1:] + eps) / (w[:-1] + eps)).astype(np.float32)
+            dh_next[:-1] = np.log((h[1:] + eps) / (h[:-1] + eps)).astype(np.float32)
+
+        # ---------- order / global-count ----------
+        if n > 1:
+            rank = (np.arange(n, dtype=np.float32) / float(n - 1)).astype(np.float32)
+        else:
+            rank = np.zeros(1, dtype=np.float32)
+
+        n_boxes_norm = np.full(
+            (n,),
+            fill_value=min(float(n), float(self.expected_max_tokens)) / max(float(self.expected_max_tokens), 1.0),
+            dtype=np.float32,
+        )
+
+        features_array = np.stack(
+            [
+                cx_n.astype(np.float32),
+                cy_n.astype(np.float32),
+                w_n.astype(np.float32),
+                h_n.astype(np.float32),
+                area_n.astype(np.float32),
+                log_wh.astype(np.float32),
+                dx_prev,
+                dy_prev,
+                dw_prev,
+                dh_prev,
+                dx_next,
+                dy_next,
+                dw_next,
+                dh_next,
+                rank,
+                n_boxes_norm,
+            ],
+            axis=1,
+        ).astype(np.float32, copy=False)
 
         return (features_array, main_boxes) if return_boxes else features_array
