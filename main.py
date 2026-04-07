@@ -17,8 +17,6 @@ from util.checkpoint import load_checkpoint
 from util.utils import create_logger, set_seed
 from util.config import Config
 
-# torch.backends.cudnn.deterministic = True
-# torch.backends.cudnn.benchmark = False
 if (not torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0:
     torch.autograd.set_detect_anomaly(True)
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -97,7 +95,7 @@ def get_parser():
         help="Class names to exclude from dataset, e.g. --exclude_classes Skylink21 FPV1"
     )
     g_data.add_argument(
-        "--input_type", type=str, default="png", choices=["mat", "png"],
+        "--input_type", type=str, default="mat", choices=["mat", "png"],
         help="Raw dataset type. Use 'png' to load spectrogram images directly."
     )
     

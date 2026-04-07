@@ -2,54 +2,6 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-# try:
-#     from torchvision.models import resnet18, ResNet18_Weights
-#     _HAS_TORCHVISION = True
-# except Exception:
-#     _HAS_TORCHVISION = False
-
-# class TinyResNetPatchEncoder(nn.Module):
-#     """
-#     Pretrained ResNet18 truncated for tiny spectrogram patches.
-#     Input:  (N,3,H,W), H=W~12~16
-#     Output: (N,out_dim)
-#     """
-#     def __init__(self, out_dim=32, pretrained=True):
-#         super().__init__()
-#         if not _HAS_TORCHVISION:
-#             raise ImportError("torchvision is required for ResNet patch features.")
-#
-#         weights = ResNet18_Weights.DEFAULT if pretrained else None
-#         base = resnet18(weights=weights)
-#
-#         self.conv1 = base.conv1
-#         self.bn1 = base.bn1
-#         self.relu = base.relu
-#         self.maxpool = nn.Identity()
-#         self.layer1 = base.layer1
-#         self.layer2 = base.layer2
-#         self.pool = nn.AdaptiveAvgPool2d((1, 1))
-#         self.proj = nn.Linear(128, out_dim)
-#
-#         for p in self.parameters():
-#             p.requires_grad = False
-#         self.eval()
-#
-#     @torch.no_grad()
-#     def forward(self, x):
-#         x = self.conv1(x)
-#         x = self.bn1(x)
-#         x = self.relu(x)
-#         x = self.maxpool(x)
-#         x = self.layer1(x)
-#         x = self.layer2(x)
-#         x = self.pool(x).flatten(1)
-#         x = self.proj(x)
-#         return x
-
 
 class SignalPreprocessor:
     def __init__(
@@ -143,66 +95,6 @@ class SignalPreprocessor:
         if self.patch_device is not None:
             return torch.device(self.patch_device)
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # def _ensure_patch_encoder(self):
-    #     if not self.use_patch_cnn:
-    #         return None
-    #     if self._patch_encoder is None:
-    #         dev = self._get_patch_device()
-    #         enc = TinyResNetPatchEncoder(
-    #             out_dim=self.patch_feat_dim,
-    #             pretrained=self.patch_pretrained
-    #         ).to(dev)
-    #         enc.eval()
-    #         self._patch_encoder = enc
-    #         self._patch_encoder_device = dev
-    #     return self._patch_encoder
-
-    # def _region_to_resnet_tensor(self, region: np.ndarray) -> torch.Tensor:
-    #     ps = self.patch_size
-    #     if region is None or region.size == 0:
-    #         return torch.zeros((3, ps, ps), dtype=torch.float32)
-    #
-    #     x = np.asarray(region, dtype=np.float32)
-    #     p1, p99 = np.percentile(x, [1, 99]) if x.size >= 4 else (float(x.min()), float(x.max()))
-    #     if p99 <= p1:
-    #         x = np.zeros_like(x, dtype=np.float32)
-    #     else:
-    #         x = np.clip((x - p1) / (p99 - p1 + 1e-6), 0.0, 1.0)
-    #
-    #     t = torch.from_numpy(x).unsqueeze(0).unsqueeze(0)
-    #     t = F.interpolate(t, size=(ps, ps), mode="bilinear", align_corners=False)
-    #     t = t.squeeze(0)
-    #     t = t.repeat(3, 1, 1)
-    #
-    #     mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
-    #     std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
-    #     t = (t - mean) / std
-    #     return t
-
-    # @torch.no_grad()
-    # def _extract_patch_features(self, spectrogram: np.ndarray, main_boxes: np.ndarray) -> np.ndarray:
-    #     if (not self.use_patch_cnn) or main_boxes.size == 0:
-    #         return np.zeros((len(main_boxes), 0), dtype=np.float32)
-    #
-    #     enc = self._ensure_patch_encoder()
-    #     dev = self._patch_encoder_device
-    #     k = int(main_boxes.shape[0])
-    #
-    #     patch_tensors = []
-    #     for (x1, y1, x2, y2) in main_boxes:
-    #         region = spectrogram[y1:y2, x1:x2]
-    #         patch_tensors.append(self._region_to_resnet_tensor(region))
-    #
-    #     out_feats = []
-    #     bs = max(1, self.patch_batch_size)
-    #     for i in range(0, k, bs):
-    #         batch = torch.stack(patch_tensors[i:i + bs], dim=0).to(dev, non_blocking=True)
-    #         feat = enc(batch)
-    #         out_feats.append(feat.cpu())
-    #
-    #     feats = torch.cat(out_feats, dim=0).numpy().astype(np.float32, copy=False)
-    #     return feats
 
     def _iou(self, boxA, boxB):
         """Compute IoU of two boxes [x1,y1,x2,y2]."""
@@ -547,19 +439,9 @@ class SignalPreprocessor:
             time_duration = float(width * time_res)
             freq_bandwidth = float(height * freq_res)
 
-            # Keep the current 4D token format for compatibility.
-            # If you want to restore the 8D version, switch to the line below.
-            # feat = [time_center_sec, freq_center_hz, time_duration, freq_bandwidth,
-            #         area, mean_val, max_val, var_val]
             feat = [time_center_sec, freq_center_hz, time_duration, freq_bandwidth]
             features.append(feat)
 
         features_array = np.asarray(features, dtype=np.float32)
-
-        # patch_feats = self._extract_patch_features(spectrogram, main_boxes)
-        # if patch_feats.shape[1] > 0:
-        #     features_array = np.concatenate([features_array, patch_feats], axis=1).astype(np.float32, copy=False)
-        # else:
-        #     features_array = features_array.astype(np.float32, copy=False)
 
         return (features_array, main_boxes) if return_boxes else features_array

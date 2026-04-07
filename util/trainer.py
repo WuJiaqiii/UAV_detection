@@ -22,7 +22,6 @@ from util.checkpoint import save_checkpoint
 from util.utils import _reduce_scalar, _set_epoch_for_loaders
 from util.boxmask import boxes_to_white_mask, mask_to_tensor
 
-
 class BBoxCache:
     def __init__(
         self,
