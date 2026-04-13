@@ -118,11 +118,11 @@ def get_parser():
         help="YOLO inference image width after letterbox resize."
     )
     g_yolo.add_argument(
-        "--yolo_conf_thres", type=float, default=0.25,
+        "--yolo_conf_thres", type=float, default=0.85,
         help="Confidence threshold for YOLO detections."
     )
     g_yolo.add_argument(
-        "--yolo_iou_thres", type=float, default=0.45,
+        "--yolo_iou_thres", type=float, default=0.05,
         help="IoU threshold for YOLO NMS."
     )
     g_yolo.add_argument(
@@ -149,7 +149,7 @@ def get_parser():
         help="Total training epochs."
     )
     g_exp.add_argument(
-        "--save_interval", type=int, default=1,
+        "--save_interval", type=int, default=5,
         help="Save checkpoint every N epochs."
     )
     g_exp.add_argument(
@@ -205,6 +205,26 @@ def get_parser():
     g_model.add_argument("--mask_pretrained", action=argparse.BooleanOptionalAction, default=True)
     g_model.add_argument("--freeze_backbone", action=argparse.BooleanOptionalAction, default=False)
     g_model.add_argument("--cnn_dropout", type=float, default=0.0)
+
+    g_model.add_argument(
+        "--cnn_input_mode",
+        type=str,
+        default="mask",
+        choices=["mask", "raw", "raw_with_boxes", "raw_in_boxes"],
+        help="Input image fed to CNN: binary mask / raw spectrogram / raw spectrogram with YOLO boxes."
+    )
+    g_model.add_argument(
+        "--box_draw_thickness",
+        type=int,
+        default=2,
+        help="Line thickness when drawing boxes on raw image."
+    )
+    g_model.add_argument(
+        "--box_draw_value",
+        type=int,
+        default=255,
+        help="Pixel value used to draw boxes on raw grayscale image."
+    )
 
     g_vis = parser.add_argument_group("Visualization")
     g_vis.add_argument("--save_detect_vis_once", action=argparse.BooleanOptionalAction, default=True)

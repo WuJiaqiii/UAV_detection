@@ -22,6 +22,31 @@ from util.checkpoint import save_checkpoint
 from util.utils import _reduce_scalar, _set_epoch_for_loaders
 from util.boxmask import boxes_to_white_mask, mask_to_tensor
 
+import numpy as np
+
+def spec_to_uint8_vis(spec, p_low=1.0, p_high=99.5, gamma=0.6):
+    """
+    仅用于可视化保存，不建议直接用于训练输入。
+    spec: 2D numpy array
+    """
+    x = np.asarray(spec, dtype=np.float32)
+
+    lo = np.percentile(x, p_low)
+    hi = np.percentile(x, p_high)
+
+    if hi <= lo:
+        return np.zeros_like(x, dtype=np.uint8)
+
+    x = np.clip(x, lo, hi)
+    x = (x - lo) / (hi - lo)
+
+    # gamma < 1 会提亮暗部
+    x = np.power(x, gamma)
+
+    return (x * 255.0).clip(0, 255).astype(np.uint8)
+
+import cv2
+
 class BBoxCache:
     def __init__(
         self,
@@ -182,10 +207,114 @@ class Trainer:
             patience=int(config.early_stop_patience),
             delta=0.0,
         )
+        self.cnn_input_mode = str(getattr(config, "cnn_input_mode", "mask")).lower()
+        self.box_draw_thickness = int(getattr(config, "box_draw_thickness", 2))
+        self.box_draw_value = int(getattr(config, "box_draw_value", 255))
 
         self.writer = None
         if (not dist.is_initialized()) or dist.get_rank() == 0:
             self.writer = SummaryWriter(log_dir=config.log_dir)
+
+    def _spec_to_rgb_uint8(self, spec: np.ndarray) -> np.ndarray:
+        gray = self._spec_to_uint8(spec)
+        rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+        return rgb
+    
+    def _spec_to_uint8_vis_log(
+        self,
+        spec: np.ndarray,
+        p_low: float = 1.0,
+        p_high: float = 99.5,
+        log_gain: float = 9.0,
+    ) -> np.ndarray:
+        """
+        仅用于可视化保存的对数增强版本：
+        1) 先做分位数裁剪，避免极亮点压缩动态范围
+        2) 再归一化到 [0, 1]
+        3) 再做 log1p 增强，提亮暗弱信号
+        """
+        x = np.asarray(spec)
+        if x.ndim != 2:
+            raise ValueError(f"Expected 2D spectrogram, got shape={x.shape}")
+
+        if x.dtype == np.uint8:
+            x = x.astype(np.float32)
+        else:
+            x = x.astype(np.float32)
+
+        finite_mask = np.isfinite(x)
+        if not finite_mask.any():
+            return np.zeros_like(x, dtype=np.uint8)
+
+        valid = x[finite_mask]
+        lo = float(np.percentile(valid, p_low))
+        hi = float(np.percentile(valid, p_high))
+
+        if hi <= lo:
+            return np.zeros_like(x, dtype=np.uint8)
+
+        x = np.clip(x, lo, hi)
+        x = (x - lo) / (hi - lo)
+
+        # 对数增强：弱信号会明显更亮
+        x = np.log1p(log_gain * x) / np.log1p(log_gain)
+
+        return np.clip(x * 255.0, 0, 255).astype(np.uint8)
+    def _rgb_image_to_tensor(self, img_u8: np.ndarray) -> torch.Tensor:
+        if img_u8.ndim != 3 or img_u8.shape[2] != 3:
+            raise ValueError(f"Expected RGB image, got shape={img_u8.shape}")
+
+        x = img_u8.astype(np.float32) / 255.0
+        x = cv2.resize(
+            x,
+            (self.mask_img_size, self.mask_img_size),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        x = np.transpose(x, (2, 0, 1))   # [3, H, W]
+        return torch.from_numpy(x).float()
+
+    def _draw_boxes_on_raw_rgb(self, spec: np.ndarray, yolo_boxes=None, final_boxes=None) -> np.ndarray:
+        img = self._spec_to_rgb_uint8(spec)
+
+        H, W = img.shape[:2]
+
+        if yolo_boxes is not None and len(yolo_boxes) > 0:
+            arr = np.asarray(yolo_boxes, dtype=np.int32).reshape(-1, 4)
+            for box in arr:
+                x1, y1, x2, y2 = [int(v) for v in box]
+                x1 = max(0, min(x1, W - 1))
+                x2 = max(0, min(x2, W - 1))
+                y1 = max(0, min(y1, H - 1))
+                y2 = max(0, min(y2, H - 1))
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                cv2.rectangle(
+                    img,
+                    (x1, y1),
+                    (x2, y2),
+                    color=(255, 0, 0),   # 红色：YOLO框
+                    thickness=int(self.box_draw_thickness),
+                )
+
+        if final_boxes is not None and len(final_boxes) > 0:
+            arr = np.asarray(final_boxes, dtype=np.int32).reshape(-1, 4)
+            for box in arr:
+                x1, y1, x2, y2 = [int(v) for v in box]
+                x1 = max(0, min(x1, W - 1))
+                x2 = max(0, min(x2, W - 1))
+                y1 = max(0, min(y1, H - 1))
+                y2 = max(0, min(y2, H - 1))
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                cv2.rectangle(
+                    img,
+                    (x1, y1),
+                    (x2, y2),
+                    color=(0, 255, 0),   # 绿色：final框
+                    thickness=int(self.box_draw_thickness),
+                )
+
+        return img
 
     def _sanitize_boxes(self, boxes, H, W):
         if boxes is None:
@@ -243,21 +372,40 @@ class Trainer:
         x = mask_to_tensor(mask, out_size=self.mask_img_size)   # (1,H,W)
         return torch.from_numpy(x).float()
 
+    def _raw_in_boxes_gray(self, spec: np.ndarray, boxes=None) -> np.ndarray:
+        """
+        保留 boxes 内部的原始频谱图灰度值，boxes 外部全部置 0。
+        这是“仅保留信号内部纹理”的消融输入。
+        """
+        raw_img = self._spec_to_uint8(spec)
+
+        if boxes is None or len(boxes) == 0:
+            return np.zeros_like(raw_img, dtype=np.uint8)
+
+        mask = boxes_to_white_mask(
+            image_shape=spec.shape,
+            boxes=boxes,
+            fill_value=255,
+            mode="fill",
+        )
+
+        keep = (mask > 0)
+        out = np.zeros_like(raw_img, dtype=np.uint8)
+        out[keep] = raw_img[keep]
+        return out
+    
     def _save_detect_result_images(self, spec, yolo_boxes, final_boxes, fp, sample_idx=0):
         save_dir = os.path.join(self.config.result_dir, "detect_result")
         os.makedirs(save_dir, exist_ok=True)
 
         base = os.path.splitext(os.path.basename(fp))[0] if fp else f"sample_{sample_idx}"
 
-        spec_u8 = np.asarray(spec)
-        if spec_u8.dtype != np.uint8:
-            s = spec_u8.astype(np.float32)
-            s_min, s_max = float(s.min()), float(s.max())
-            if s_max > s_min:
-                s = (s - s_min) / (s_max - s_min)
-            else:
-                s = np.zeros_like(s, dtype=np.float32)
-            spec_u8 = (s * 255.0).astype(np.uint8)
+        spec_u8 = self._spec_to_uint8_vis_log(
+            spec,
+            p_low=1.0,
+            p_high=99.5,
+            log_gain=9.0,
+        )
 
         from PIL import Image, ImageDraw
 
@@ -270,7 +418,7 @@ class Trainer:
                 draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
             img.save(os.path.join(save_dir, f"{base}_{name}.png"))
 
-    def _batch_to_mask_images(self, inputs_bhw, sample_fps=None, save_detect_result=False, max_save_images=1):
+    def _batch_to_input_images(self, inputs_bhw, sample_fps=None, save_detect_result=False, max_save_images=1):
         if isinstance(inputs_bhw, torch.Tensor):
             batch = inputs_bhw.detach().cpu()
         else:
@@ -292,33 +440,174 @@ class Trainer:
             yolo_boxes = self._get_boxes_for_sample(spec, fp=fp)
 
             if self.mask_source == "raw":
-                boxes = yolo_boxes
                 final_boxes = yolo_boxes
-            elif self.mask_source == "final":
-                final_boxes = self.preprocessor.select_main_boxes(yolo_boxes, spectrogram=spec)
-                boxes = final_boxes.tolist() if hasattr(final_boxes, "tolist") else final_boxes
             else:
-                raise ValueError(f"Unsupported mask_source={self.mask_source}, use 'raw' or 'final'.")
+                final_boxes = self.preprocessor.select_main_boxes(yolo_boxes, spectrogram=spec)
+                if hasattr(final_boxes, "tolist"):
+                    final_boxes = final_boxes.tolist()
 
-            x = self._build_mask_from_boxes(spec, boxes)
+            x = self._build_input_image(spec, yolo_boxes, final_boxes)
             out.append(x)
 
             if save_detect_result and saved_count < max_save_images:
-                try:
-                    final_boxes_vis = self.preprocessor.select_main_boxes(yolo_boxes, spectrogram=spec)
-                    final_boxes_vis = final_boxes_vis.tolist() if hasattr(final_boxes_vis, "tolist") else final_boxes_vis
-                except Exception:
-                    final_boxes_vis = []
                 self._save_detect_result_images(
                     spec=spec,
                     yolo_boxes=yolo_boxes,
-                    final_boxes=final_boxes_vis,
+                    final_boxes=final_boxes,
                     fp=fp,
                     sample_idx=i,
                 )
                 saved_count += 1
 
-        return torch.stack(out, dim=0)  # [B,1,H,W]
+        return torch.stack(out, dim=0)   # [B,1,H,W]
+    
+    # def _build_input_image(self, spec, yolo_boxes, final_boxes):
+    #     mode = str(self.cnn_input_mode).lower()
+
+    #     if mode == "mask":
+    #         boxes = final_boxes if self.mask_source == "final" else yolo_boxes
+    #         mask = boxes_to_white_mask(
+    #             image_shape=spec.shape,
+    #             boxes=boxes,
+    #             fill_value=self.mask_fill_value,
+    #             mode="fill",
+    #         )
+    #         return self._gray_image_to_tensor(mask)
+
+    #     elif mode == "raw":
+    #         raw_img = self._spec_to_uint8(spec)
+    #         return self._gray_image_to_tensor(raw_img)
+
+    #     elif mode == "raw_with_boxes":
+    #         img_rgb = self._draw_boxes_on_raw_rgb(
+    #             spec,
+    #             yolo_boxes=yolo_boxes,
+    #             final_boxes=final_boxes, 
+    #         )
+    #         return self._rgb_image_to_tensor(img_rgb)
+
+    #     else:
+    #         raise ValueError(f"Unsupported cnn_input_mode={mode}")
+    def _build_input_image(self, spec, yolo_boxes, final_boxes):
+        mode = str(self.cnn_input_mode).lower()
+
+        if mode == "mask":
+            boxes = final_boxes if self.mask_source == "final" else yolo_boxes
+            mask = boxes_to_white_mask(
+                image_shape=spec.shape,
+                boxes=boxes,
+                fill_value=self.mask_fill_value,
+                mode="fill",
+            )
+            return self._gray_image_to_tensor(mask)
+
+        elif mode == "raw":
+            raw_img = self._spec_to_uint8(spec)
+            return self._gray_image_to_tensor(raw_img)
+        
+        elif mode == "raw_in_boxes":
+            boxes = final_boxes if self.mask_source == "final" else yolo_boxes
+            img = self._raw_in_boxes_gray(
+                spec,
+                boxes=boxes,
+            )
+            return self._gray_image_to_tensor(img)
+
+        elif mode == "raw_with_boxes":
+            img = self._draw_final_boxes_on_raw_gray(
+                spec,
+                final_boxes=final_boxes,
+            )
+            return self._gray_image_to_tensor(img)
+
+        else:
+            raise ValueError(f"Unsupported cnn_input_mode={mode}")
+        
+    def _draw_final_boxes_on_raw_gray(self, spec: np.ndarray, final_boxes=None) -> np.ndarray:
+        img = self._spec_to_uint8(spec)
+        H, W = img.shape[:2]
+
+        if final_boxes is None or len(final_boxes) == 0:
+            return img
+
+        arr = np.asarray(final_boxes, dtype=np.int32).reshape(-1, 4)
+        for box in arr:
+            x1, y1, x2, y2 = [int(v) for v in box]
+            x1 = max(0, min(x1, W - 1))
+            x2 = max(0, min(x2, W - 1))
+            y1 = max(0, min(y1, H - 1))
+            y2 = max(0, min(y2, H - 1))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            cv2.rectangle(
+                img,
+                (x1, y1),
+                (x2, y2),
+                color=int(self.box_draw_value),   # 例如 255
+                thickness=int(self.box_draw_thickness),
+            )
+
+        return img
+    
+    def _draw_boxes_on_raw(self, spec: np.ndarray, boxes) -> np.ndarray:
+        img_u8 = self._spec_to_uint8(spec)
+        img = img_u8.copy()
+
+        if boxes is None or len(boxes) == 0:
+            return img
+
+        H, W = img.shape[:2]
+        arr = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+
+        for box in arr:
+            x1, y1, x2, y2 = [int(v) for v in box]
+            x1 = max(0, min(x1, W - 1))
+            x2 = max(0, min(x2, W - 1))
+            y1 = max(0, min(y1, H - 1))
+            y2 = max(0, min(y2, H - 1))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            cv2.rectangle(
+                img,
+                (x1, y1),
+                (x2, y2),
+                color=int(self.box_draw_value),
+                thickness=int(self.box_draw_thickness),
+            )
+
+        return img
+
+    def _spec_to_uint8(self, spec: np.ndarray) -> np.ndarray:
+        spec = np.asarray(spec)
+        if spec.ndim != 2:
+            raise ValueError(f"Expected 2D spectrogram, got shape={spec.shape}")
+
+        if spec.dtype == np.uint8:
+            return spec.copy()
+
+        s = spec.astype(np.float32)
+        s_min, s_max = float(s.min()), float(s.max())
+        if s_max > s_min:
+            s = (s - s_min) / (s_max - s_min)
+        else:
+            s = np.zeros_like(s, dtype=np.float32)
+        return (s * 255.0).astype(np.uint8)
+
+
+    def _gray_image_to_tensor(self, img_u8: np.ndarray) -> torch.Tensor:
+        if img_u8.ndim != 2:
+            raise ValueError(f"Expected grayscale image, got shape={img_u8.shape}")
+
+        x = img_u8.astype(np.float32) / 255.0
+        x = cv2.resize(
+            x,
+            (self.mask_img_size, self.mask_img_size),
+            interpolation=cv2.INTER_NEAREST if self.cnn_input_mode == "mask" else cv2.INTER_LINEAR,
+        )
+        x = np.expand_dims(x, axis=0)   # [1, H, W]
+        return torch.from_numpy(x).float()
 
     def _forward_loss(self, images, labels):
         with autocast(enabled=bool(self.config.use_amp_autocast), device_type=self.device.type):
@@ -339,7 +628,7 @@ class Trainer:
             inputs, labels, freq, bw, snr, fps = batch
             labels = labels.to(self.device, non_blocking=True)
 
-            images = self._batch_to_mask_images(inputs, sample_fps=fps, save_detect_result=False)
+            images = self._batch_to_input_images(inputs, sample_fps=fps, save_detect_result=False)
             images = images.to(self.device, non_blocking=True)
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -386,7 +675,7 @@ class Trainer:
                 self.save_detect_vis_once and (not self._detect_vis_saved) and batch_idx == 0
             )
 
-            images = self._batch_to_mask_images(
+            images = self._batch_to_input_images(
                 inputs,
                 sample_fps=fps,
                 save_detect_result=need_save_detect_result,
