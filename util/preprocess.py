@@ -1,61 +1,78 @@
 import numpy as np
 from sklearn.cluster import DBSCAN
 
-import torch
 
 class SignalPreprocessor:
+    """
+    Multi-signal training-oriented preprocessor.
+
+    Goal:
+      - do NOT choose a single best cluster
+      - generate multiple candidate signal groups from YOLO boxes
+      - keep all groups that pass quality thresholds
+      - provide per-group frequency/statistics for trainer-side matching
+
+    Main pipeline:
+      1) basic geometry filtering
+      2) local energy filtering (with fallback to geometry-only boxes)
+      3) DBSCAN on frequency centers (pixel y center)
+      4) merge nearby clusters with similar shape/energy style
+      5) lightweight NMS inside each group
+      6) compute group statistics and quality scores
+      7) keep all groups passing absolute + relative quality thresholds
+    """
+
     def __init__(
         self,
         sampling_rate,
         n_fft,
         hop_length,
-        min_area=50,
+        # basic box filtering
+        min_area=20,
         min_ratio=0.0,
-        min_width=4,
-        min_height=10,
+        min_width=2,
+        min_height=2,
         max_width=0,
         max_height=0,
-        freq_eps=25,
-        freq_min_samples=1,
-        nms_iou_thresh=0.5,
+        exclude_bottom_ratio=0.0,
+        # local energy filtering
         ring_margin=5,
         min_contrast_z=0.6,
         min_integrated_energy=8.0,
-        min_bright_ratio=0.05,
+        min_bright_ratio=0.02,
         bright_z_thresh=1.5,
-        exclude_bottom_ratio=0.0,
-        cluster_area_weight=0.03,
-        cluster_contrast_weight=1.0,
-        cluster_bright_weight=20.0,
-        cluster_time_span_weight=0.1,
-        cluster_freq_range_weight=0.3,
-        use_patch_cnn=False,
-        patch_size=16,
-        patch_feat_dim=32,
-        patch_batch_size=64,
-        patch_device=None,
-        patch_pretrained=True,
+        # cluster / group construction
+        freq_eps=12.0,
+        freq_min_samples=1,
+        nms_iou_thresh=0.6,
+        # merge nearby clusters
+        merge_freq_thresh=10.0,          # MHz
+        merge_w_log_thresh=0.35,
+        merge_h_log_thresh=0.35,
+        merge_energy_thresh=1.0,
+        merge_bright_thresh=0.12,
+        # group quality thresholds
+        min_group_len=2,
+        min_group_time_span_ratio=0.01,
+        min_group_contrast=0.0,
+        min_group_bright=0.0,
+        max_group_w_std=0.60,
+        max_group_h_std=0.60,
+        max_group_contrast_std=2.50,
+        score_abs_thresh=0.0,
+        score_rel_thresh=0.25,
+        # score weights
+        score_n_boxes_weight=0.80,
+        score_time_span_weight=2.00,
+        score_contrast_weight=0.60,
+        score_bright_weight=1.20,
+        score_w_std_weight=0.50,
+        score_h_std_weight=0.50,
+        score_contrast_std_weight=0.25,
     ):
-        """
-        Preprocessor for detection outputs to extract main signal blocks.
-
-        Pipeline:
-          1) basic size / geometry filtering
-          2) optional local energy filtering against surrounding background
-          3) DBSCAN on frequency centers
-          4) cluster scoring that favors larger / stronger signal clusters
-          5) NMS + sort by time
-
-        Notes:
-          - min_ratio defaults to 0.0 so vertical boxes are not suppressed.
-          - energy filtering uses local contrast instead of absolute intensity,
-            which is more stable across different SNRs and normalization styles.
-          - if energy filtering removes all boxes, the code falls back to the
-            geometry-filtered boxes to avoid collapsing on weak-signal samples.
-        """
-        self.sr = sampling_rate
-        self.n_fft = n_fft
-        self.hop_length = hop_length
+        self.sr = float(sampling_rate)
+        self.n_fft = int(n_fft)
+        self.hop_length = int(hop_length)
 
         self.min_area = int(min_area)
         self.min_ratio = float(min_ratio)
@@ -63,55 +80,59 @@ class SignalPreprocessor:
         self.min_height = int(min_height)
         self.max_width = int(max_width)
         self.max_height = int(max_height)
-
-        self.freq_eps = float(freq_eps)
-        self.freq_min_samples = int(freq_min_samples)
-        self.nms_thresh = float(nms_iou_thresh)
+        self.exclude_bottom_ratio = float(exclude_bottom_ratio)
 
         self.ring_margin = int(ring_margin)
         self.min_contrast_z = float(min_contrast_z)
         self.min_integrated_energy = float(min_integrated_energy)
         self.min_bright_ratio = float(min_bright_ratio)
         self.bright_z_thresh = float(bright_z_thresh)
-        self.exclude_bottom_ratio = float(exclude_bottom_ratio)
 
-        self.cluster_area_weight = float(cluster_area_weight)
-        self.cluster_contrast_weight = float(cluster_contrast_weight)
-        self.cluster_bright_weight = float(cluster_bright_weight)
-        self.cluster_time_span_weight = float(cluster_time_span_weight)
-        self.cluster_freq_range_weight = float(cluster_freq_range_weight)
+        self.freq_eps = float(freq_eps)
+        self.freq_min_samples = int(freq_min_samples)
+        self.nms_thresh = float(nms_iou_thresh)
 
-        self.use_patch_cnn = bool(use_patch_cnn)
-        self.patch_size = int(patch_size)
-        self.patch_feat_dim = int(patch_feat_dim)
-        self.patch_batch_size = int(patch_batch_size)
-        self.patch_device = patch_device
-        self.patch_pretrained = bool(patch_pretrained)
+        self.merge_freq_thresh = float(merge_freq_thresh)
+        self.merge_w_log_thresh = float(merge_w_log_thresh)
+        self.merge_h_log_thresh = float(merge_h_log_thresh)
+        self.merge_energy_thresh = float(merge_energy_thresh)
+        self.merge_bright_thresh = float(merge_bright_thresh)
 
-        self._patch_encoder = None
-        self._patch_encoder_device = None
+        self.min_group_len = int(min_group_len)
+        self.min_group_time_span_ratio = float(min_group_time_span_ratio)
+        self.min_group_contrast = float(min_group_contrast)
+        self.min_group_bright = float(min_group_bright)
+        self.max_group_w_std = float(max_group_w_std)
+        self.max_group_h_std = float(max_group_h_std)
+        self.max_group_contrast_std = float(max_group_contrast_std)
+        self.score_abs_thresh = float(score_abs_thresh)
+        self.score_rel_thresh = float(score_rel_thresh)
 
-    def _get_patch_device(self):
-        if self.patch_device is not None:
-            return torch.device(self.patch_device)
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.score_n_boxes_weight = float(score_n_boxes_weight)
+        self.score_time_span_weight = float(score_time_span_weight)
+        self.score_contrast_weight = float(score_contrast_weight)
+        self.score_bright_weight = float(score_bright_weight)
+        self.score_w_std_weight = float(score_w_std_weight)
+        self.score_h_std_weight = float(score_h_std_weight)
+        self.score_contrast_std_weight = float(score_contrast_std_weight)
 
+    # ------------------------------------------------------------------
+    # basic helpers
+    # ------------------------------------------------------------------
     def _iou(self, boxA, boxB):
-        """Compute IoU of two boxes [x1,y1,x2,y2]."""
         x1, y1, x2, y2 = boxA
         x1b, y1b, x2b, y2b = boxB
         inter_w = max(0, min(x2, x2b) - max(x1, x1b))
         inter_h = max(0, min(y2, y2b) - max(y1, y1b))
         inter_area = inter_w * inter_h
-        if inter_area == 0:
+        if inter_area <= 0:
             return 0.0
-        areaA = max(0, (x2 - x1)) * max(0, (y2 - y1))
-        areaB = max(0, (x2b - x1b)) * max(0, (y2b - y1b))
+        areaA = max(0, x2 - x1) * max(0, y2 - y1)
+        areaB = max(0, x2b - x1b) * max(0, y2b - y1b)
         denom = float(areaA + areaB - inter_area)
         return float(inter_area / denom) if denom > 0 else 0.0
 
     def _nms(self, boxes):
-        """Simple NMS. boxes: list[[x1,y1,x2,y2]] -> kept list."""
         if not boxes:
             return []
 
@@ -122,7 +143,8 @@ class SignalPreprocessor:
             keep.append(box)
             new_list = []
             x1, y1, x2, y2 = box
-            area_box = max(0, (x2 - x1)) * max(0, (y2 - y1))
+            area_box = max(0, x2 - x1) * max(0, y2 - y1)
+
             for other in boxes_sorted:
                 x1b, y1b, x2b, y2b = other
                 inter_w = max(0, min(x2, x2b) - max(x1, x1b))
@@ -132,21 +154,18 @@ class SignalPreprocessor:
                     new_list.append(other)
                     continue
 
-                area_b = max(0, (x2b - x1b)) * max(0, (y2b - y1b))
+                area_b = max(0, x2b - x1b) * max(0, y2b - y1b)
                 denom = float(area_box + area_b - inter_area)
                 iou_val = float(inter_area / denom) if denom > 0 else 0.0
-                cover_small = (
-                    float(inter_area / float(min(area_box, area_b)))
-                    if min(area_box, area_b) > 0 else 0.0
-                )
+                cover_small = float(inter_area / float(min(area_box, area_b))) if min(area_box, area_b) > 0 else 0.0
+
                 if iou_val > self.nms_thresh or cover_small > 0.9:
                     continue
                 new_list.append(other)
             boxes_sorted = new_list
         return keep
 
-    def _basic_filter(self, boxes: np.ndarray, img_h=None, img_w=None) -> np.ndarray:
-        """Filter by size, shape, and optional bottom exclusion zone."""
+    def _basic_filter(self, boxes, img_h=None, img_w=None):
         if boxes is None or len(boxes) == 0:
             return np.zeros((0, 4), dtype=np.int32)
 
@@ -163,10 +182,8 @@ class SignalPreprocessor:
 
         if self.min_ratio > 0:
             mask &= ((widths / (heights + 1e-6)) >= self.min_ratio)
-
         if self.max_width > 0:
             mask &= (widths <= self.max_width)
-
         if self.max_height > 0:
             mask &= (heights <= self.max_height)
 
@@ -178,32 +195,23 @@ class SignalPreprocessor:
         return boxes[mask].astype(np.int32, copy=False)
 
     def _box_energy_stats(self, box, spectrogram):
-        """
-        Compute local energy / contrast statistics for one box.
-
-        Returns a dict with:
-          mean, max, area, bg_mean, bg_std,
-          contrast_z, integrated_energy, bright_ratio
-        """
         if spectrogram is None:
             return None
 
         H, W = spectrogram.shape
         x1, y1, x2, y2 = [int(v) for v in box]
-
         x1 = max(0, min(x1, W - 1))
         x2 = max(0, min(x2, W))
         y1 = max(0, min(y1, H - 1))
         y2 = max(0, min(y2, H))
-
         if x2 <= x1 or y2 <= y1:
             return None
 
         region = spectrogram[y1:y2, x1:x2]
         if region.size == 0:
             return None
-
         region = np.asarray(region, dtype=np.float32)
+
         mean_val = float(np.mean(region))
         max_val = float(np.max(region))
         area = float(region.size)
@@ -213,7 +221,6 @@ class SignalPreprocessor:
         ry1 = max(0, y1 - m)
         rx2 = min(W, x2 + m)
         ry2 = min(H, y2 + m)
-
         ring = np.asarray(spectrogram[ry1:ry2, rx1:rx2], dtype=np.float32)
         ring_mask = np.ones_like(ring, dtype=bool)
         ring_mask[(y1 - ry1):(y2 - ry1), (x1 - rx1):(x2 - rx1)] = False
@@ -242,23 +249,16 @@ class SignalPreprocessor:
             "bright_ratio": bright_ratio,
         }
 
-    def _filter_boxes_by_energy(self, boxes: np.ndarray, spectrogram):
-        """
-        Energy-based filtering using local background statistics.
-
-        Returns:
-          kept_boxes: np.ndarray [K,4]
-          kept_stats: list[dict]
-        """
+    def _filter_boxes_by_energy(self, boxes, spectrogram):
         if boxes is None or len(boxes) == 0:
             return np.zeros((0, 4), dtype=np.int32), []
-
         if spectrogram is None:
-            return np.asarray(boxes, dtype=np.int32).reshape(-1, 4), [None] * len(boxes)
+            boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+            return boxes, [None] * len(boxes)
 
         kept_boxes = []
         kept_stats = []
-        for box in np.asarray(boxes, dtype=np.int32).reshape(-1, 4):
+        for box in boxes:
             st = self._box_energy_stats(box, spectrogram)
             if st is None:
                 continue
@@ -268,180 +268,335 @@ class SignalPreprocessor:
                 continue
             if st["bright_ratio"] < self.min_bright_ratio:
                 continue
-            kept_boxes.append(box)
+            kept_boxes.append(list(map(int, box)))
             kept_stats.append(st)
 
         if len(kept_boxes) == 0:
             return np.zeros((0, 4), dtype=np.int32), []
-
         return np.asarray(kept_boxes, dtype=np.int32), kept_stats
 
-    def _score_cluster(self, cluster_boxes: np.ndarray, cluster_stats):
-        """Score one cluster. Larger, brighter, more contrasted clusters are favored."""
-        if cluster_boxes.size == 0:
-            return -float("inf")
+    # ------------------------------------------------------------------
+    # frequency mapping
+    # ------------------------------------------------------------------
+    def _pixel_y_to_freq_mhz(self, y, img_h):
+        """
+        Map row index to frequency in MHz.
+        Assumes vertically shifted spectrum with image center ≈ 0 MHz.
+        Top corresponds to +sr/2, bottom to -sr/2.
+        """
+        if img_h <= 1:
+            return 0.0
+        y = float(y)
+        frac = 1.0 - (y / float(img_h - 1))  # top -> 1, bottom -> 0
+        freq_hz = (frac - 0.5) * self.sr
+        return float(freq_hz / 1e6)
 
-        freq_vals = (cluster_boxes[:, 1] + cluster_boxes[:, 3]) / 2.0
-        freq_range = float(freq_vals.max() - freq_vals.min()) if len(freq_vals) > 0 else 0.0
+    def _pixel_bandwidth_to_mhz(self, height_px, img_h):
+        if img_h <= 1:
+            return 0.0
+        return float(abs(height_px) * (self.sr / float(img_h - 1)) / 1e6)
 
-        time_vals = (cluster_boxes[:, 0] + cluster_boxes[:, 2]) / 2.0
-        time_span = float(time_vals.max() - time_vals.min()) if len(time_vals) > 0 else 0.0
+    # ------------------------------------------------------------------
+    # cluster/group construction
+    # ------------------------------------------------------------------
+    def _cluster_boxes_by_frequency(self, boxes):
+        if boxes is None or len(boxes) == 0:
+            return []
+        boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+        if boxes.shape[0] == 1:
+            return [np.array([0], dtype=np.int32)]
 
-        widths = cluster_boxes[:, 2] - cluster_boxes[:, 0]
-        heights = cluster_boxes[:, 3] - cluster_boxes[:, 1]
-        total_area = float(np.sum(widths * heights))
+        freq_center = ((boxes[:, 1] + boxes[:, 3]) / 2.0).reshape(-1, 1)
+        labels = DBSCAN(eps=self.freq_eps, min_samples=self.freq_min_samples).fit_predict(freq_center)
 
-        total_contrast = 0.0
-        total_bright = 0.0
-        if cluster_stats is not None and len(cluster_stats) == len(cluster_boxes):
-            for st in cluster_stats:
-                if st is None:
-                    continue
-                total_contrast += float(st.get("contrast_z", 0.0))
-                total_bright += float(st.get("bright_ratio", 0.0))
+        if np.all(labels < 0):
+            return [np.arange(boxes.shape[0], dtype=np.int32)]
+
+        clusters = []
+        for lbl in sorted(set(labels.tolist())):
+            if lbl < 0:
+                continue
+            idx = np.where(labels == lbl)[0]
+            if idx.size > 0:
+                clusters.append(idx.astype(np.int32))
+
+        # keep DBSCAN noise as singleton clusters rather than dropping them
+        noise_idx = np.where(labels < 0)[0]
+        for i in noise_idx.tolist():
+            clusters.append(np.array([i], dtype=np.int32))
+
+        return clusters
+
+    def _build_group_stats(self, boxes, stats, spectrogram_shape):
+        H, W = spectrogram_shape[:2]
+        boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+        n = boxes.shape[0]
+        if n == 0:
+            return None
+
+        x1 = boxes[:, 0].astype(np.float32)
+        y1 = boxes[:, 1].astype(np.float32)
+        x2 = boxes[:, 2].astype(np.float32)
+        y2 = boxes[:, 3].astype(np.float32)
+
+        w = np.maximum(x2 - x1, 1.0)
+        h = np.maximum(y2 - y1, 1.0)
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+        area = w * h
+
+        log_w = np.log(w + 1e-6)
+        log_h = np.log(h + 1e-6)
+
+        time_span_ratio = float((cx.max() - cx.min()) / max(float(W), 1.0))
+        freq_span_ratio = float((cy.max() - cy.min()) / max(float(H), 1.0))
+
+        # frequency stats in MHz for trainer-side matching
+        freq_centers_mhz = np.array([self._pixel_y_to_freq_mhz(v, H) for v in cy], dtype=np.float32)
+        group_center_freq = float(np.mean(freq_centers_mhz))
+        group_freq_min = float(np.min(freq_centers_mhz))
+        group_freq_max = float(np.max(freq_centers_mhz))
+        group_bandwidth = 2.0 * max(abs(group_freq_max - group_center_freq), abs(group_center_freq - group_freq_min))
+        if group_bandwidth <= 0:
+            # fallback to average box height mapped to MHz
+            group_bandwidth = float(np.mean([self._pixel_bandwidth_to_mhz(v, H) for v in h]))
+
+        mean_w = float(np.mean(w))
+        mean_h = float(np.mean(h))
+        std_log_w = float(np.std(log_w))
+        std_log_h = float(np.std(log_h))
+        total_area = float(np.sum(area))
+
+        if stats is not None and len(stats) == n and stats[0] is not None:
+            contrast = np.array([float(s["contrast_z"]) for s in stats], dtype=np.float32)
+            bright = np.array([float(s["bright_ratio"]) for s in stats], dtype=np.float32)
+            integrated = np.array([float(s["integrated_energy"]) for s in stats], dtype=np.float32)
+            mean_contrast = float(np.mean(contrast))
+            std_contrast = float(np.std(contrast))
+            mean_bright = float(np.mean(bright))
+            std_bright = float(np.std(bright))
+            mean_integrated = float(np.mean(integrated))
+        else:
+            mean_contrast = 0.0
+            std_contrast = 0.0
+            mean_bright = 0.0
+            std_bright = 0.0
+            mean_integrated = 0.0
 
         score = (
-            self.cluster_area_weight * total_area
-            + self.cluster_contrast_weight * total_contrast
-            + self.cluster_bright_weight * total_bright
-            + self.cluster_time_span_weight * time_span
-            - self.cluster_freq_range_weight * freq_range
+            self.score_n_boxes_weight * float(n)
+            + self.score_time_span_weight * time_span_ratio
+            + self.score_contrast_weight * mean_contrast
+            + self.score_bright_weight * mean_bright
+            - self.score_w_std_weight * std_log_w
+            - self.score_h_std_weight * std_log_h
+            - self.score_contrast_std_weight * std_contrast
         )
-        return float(score)
 
-    def select_main_boxes(self, det_boxes, spectrogram=None):
+        return {
+            "boxes": boxes.astype(np.int32, copy=False),
+            "stats": stats,
+            "n_boxes": int(n),
+            "time_span_ratio": time_span_ratio,
+            "freq_span_ratio": freq_span_ratio,
+            "center_freq": group_center_freq,
+            "freq_min": group_freq_min,
+            "freq_max": group_freq_max,
+            "bandwidth": float(group_bandwidth),
+            "mean_w": mean_w,
+            "mean_h": mean_h,
+            "std_log_w": std_log_w,
+            "std_log_h": std_log_h,
+            "total_area": total_area,
+            "mean_contrast_z": mean_contrast,
+            "std_contrast_z": std_contrast,
+            "mean_bright_ratio": mean_bright,
+            "std_bright_ratio": std_bright,
+            "mean_integrated_energy": mean_integrated,
+            "score": float(score),
+        }
+
+    def _should_merge_groups(self, g1, g2):
+        if g1 is None or g2 is None:
+            return False
+        if abs(g1["center_freq"] - g2["center_freq"]) > self.merge_freq_thresh:
+            return False
+        if abs(np.log((g1["mean_w"] + 1e-6) / (g2["mean_w"] + 1e-6))) > self.merge_w_log_thresh:
+            return False
+        if abs(np.log((g1["mean_h"] + 1e-6) / (g2["mean_h"] + 1e-6))) > self.merge_h_log_thresh:
+            return False
+        if abs(g1["mean_contrast_z"] - g2["mean_contrast_z"]) > self.merge_energy_thresh:
+            return False
+        if abs(g1["mean_bright_ratio"] - g2["mean_bright_ratio"]) > self.merge_bright_thresh:
+            return False
+        return True
+
+    def _merge_groups(self, groups, spectrogram_shape):
+        if not groups:
+            return []
+        groups = sorted(groups, key=lambda g: g["center_freq"])
+
+        merged_any = True
+        while merged_any and len(groups) > 1:
+            merged_any = False
+            new_groups = []
+            i = 0
+            while i < len(groups):
+                if i < len(groups) - 1 and self._should_merge_groups(groups[i], groups[i + 1]):
+                    boxes = np.concatenate([groups[i]["boxes"], groups[i + 1]["boxes"]], axis=0)
+                    stats = []
+                    if groups[i]["stats"] is not None:
+                        stats.extend(groups[i]["stats"])
+                    if groups[i + 1]["stats"] is not None:
+                        stats.extend(groups[i + 1]["stats"])
+                    merged = self._build_group_stats(boxes, stats, spectrogram_shape)
+                    new_groups.append(merged)
+                    i += 2
+                    merged_any = True
+                else:
+                    new_groups.append(groups[i])
+                    i += 1
+            groups = sorted(new_groups, key=lambda g: g["center_freq"])
+        return groups
+
+    def _group_passes_thresholds(self, g, best_score):
+        if g["n_boxes"] < self.min_group_len:
+            return False
+        if g["time_span_ratio"] < self.min_group_time_span_ratio:
+            return False
+        if g["mean_contrast_z"] < self.min_group_contrast:
+            return False
+        if g["mean_bright_ratio"] < self.min_group_bright:
+            return False
+        if g["std_log_w"] > self.max_group_w_std:
+            return False
+        if g["std_log_h"] > self.max_group_h_std:
+            return False
+        if g["std_contrast_z"] > self.max_group_contrast_std:
+            return False
+        if g["score"] < self.score_abs_thresh:
+            return False
+        if best_score > 0 and g["score"] < self.score_rel_thresh * best_score:
+            return False
+        return True
+
+    def _infer_group_type(self, g):
+        # very lightweight heuristic for debugging / logging only
+        if g["freq_span_ratio"] <= 0.08 and g["std_log_w"] <= 0.35 and g["std_log_h"] <= 0.35:
+            return "static_like"
+        if g["freq_span_ratio"] > 0.08 and g["std_log_w"] <= 0.45 and g["std_log_h"] <= 0.45:
+            return "hopping_like"
+        return "unknown"
+
+    # ------------------------------------------------------------------
+    # public API
+    # ------------------------------------------------------------------
+    def select_signal_groups(self, det_boxes, spectrogram=None):
         """
-        Select main boxes after:
-          basic filter -> energy filter -> DBSCAN -> cluster scoring -> NMS.
+        Return all groups that pass quality thresholds.
 
-        Args:
-          det_boxes: array-like (N,4) in [x1,y1,x2,y2]
-          spectrogram: optional 2D array for local energy filtering.
-
-        Returns:
-          main_boxes: np.ndarray (K,4) int32, sorted by time center (x).
+        Output format:
+            [
+              {
+                "boxes": np.ndarray [N,4],
+                "score": float,
+                "center_freq": float,    # MHz
+                "bandwidth": float,      # MHz
+                "n_boxes": int,
+                "time_span_ratio": float,
+                "freq_span_ratio": float,
+                ...
+              },
+              ...
+            ]
         """
-        img_h = spectrogram.shape[0] if spectrogram is not None else None
-        img_w = spectrogram.shape[1] if spectrogram is not None else None
+        if det_boxes is None or len(det_boxes) == 0:
+            return []
 
-        boxes = self._basic_filter(det_boxes, img_h=img_h, img_w=img_w)
+        H = spectrogram.shape[0] if spectrogram is not None else None
+        W = spectrogram.shape[1] if spectrogram is not None else None
+
+        boxes = self._basic_filter(det_boxes, img_h=H, img_w=W)
         if boxes.size == 0:
-            return np.zeros((0, 4), dtype=np.int32)
+            return []
 
-        # Try energy filtering first. If it becomes too strict for very weak samples,
-        # fall back to the geometry-filtered boxes instead of returning empty.
-        energy_boxes, energy_stats = self._filter_boxes_by_energy(boxes, spectrogram)
-        if energy_boxes.size > 0:
-            boxes = energy_boxes
-            stats_list = energy_stats
-        else:
-            stats_list = []
-            if spectrogram is not None:
-                for box in boxes:
-                    stats_list.append(self._box_energy_stats(box, spectrogram))
+        if spectrogram is not None:
+            e_boxes, e_stats = self._filter_boxes_by_energy(boxes, spectrogram)
+            if e_boxes.size > 0:
+                boxes, stats = e_boxes, e_stats
             else:
-                stats_list = [None] * len(boxes)
+                # fallback to geometry-filtered boxes to avoid killing weak but real signals
+                boxes = boxes.astype(np.int32, copy=False)
+                stats = [self._box_energy_stats(b, spectrogram) for b in boxes]
+        else:
+            stats = [None] * len(boxes)
 
         if boxes.size == 0:
-            return np.zeros((0, 4), dtype=np.int32)
+            return []
 
         if boxes.shape[0] == 1:
-            return boxes.astype(np.int32, copy=False)
+            g = self._build_group_stats(boxes, stats, spectrogram.shape if spectrogram is not None else (1, 1))
+            if g is None:
+                return []
+            if g["n_boxes"] == 1 and self.min_group_len > 1:
+                return []
+            g["group_type"] = self._infer_group_type(g)
+            return [g] if self._group_passes_thresholds(g, g["score"]) else []
 
-        # DBSCAN on frequency centers (y)
-        freq_centers = ((boxes[:, 1] + boxes[:, 3]) / 2.0).reshape(-1, 1)
-        clustering = DBSCAN(eps=self.freq_eps, min_samples=self.freq_min_samples)
-        labels = clustering.fit_predict(freq_centers)
+        clusters = self._cluster_boxes_by_frequency(boxes)
+        raw_groups = []
+        for idx in clusters:
+            c_boxes = boxes[idx]
+            c_stats = [stats[int(i)] for i in idx.tolist()] if stats is not None else None
+            # sort by time first
+            time_centers = (c_boxes[:, 0] + c_boxes[:, 2]) / 2.0
+            order = np.argsort(time_centers)
+            c_boxes = c_boxes[order]
+            if c_stats is not None:
+                c_stats = [c_stats[int(i)] for i in order.tolist()]
+            g = self._build_group_stats(c_boxes, c_stats, spectrogram.shape if spectrogram is not None else (1, 1))
+            if g is not None:
+                raw_groups.append(g)
 
-        # If DBSCAN marks all as noise, treat all remaining boxes as one cluster.
-        if np.all(labels < 0):
-            labels = np.zeros((boxes.shape[0],), dtype=np.int32)
-        else:
-            valid = labels >= 0
-            boxes = boxes[valid]
-            labels = labels[valid]
-            stats_list = [stats_list[i] for i in range(len(stats_list)) if valid[i]]
+        if not raw_groups:
+            return []
 
-        if boxes.size == 0:
-            return np.zeros((0, 4), dtype=np.int32)
+        groups = self._merge_groups(raw_groups, spectrogram.shape if spectrogram is not None else (1, 1))
 
-        unique_labels = np.unique(labels)
-        best_score = -float("inf")
-        best_label = unique_labels[0]
+        # lightweight NMS inside each group, then recompute stats
+        cleaned = []
+        for g in groups:
+            boxes_list = [list(map(int, b)) for b in g["boxes"].tolist()]
+            boxes_list = self._nms(boxes_list)
+            if len(boxes_list) == 0:
+                continue
+            boxes_arr = np.asarray(boxes_list, dtype=np.int32).reshape(-1, 4)
+            time_centers = (boxes_arr[:, 0] + boxes_arr[:, 2]) / 2.0
+            order = np.argsort(time_centers)
+            boxes_arr = boxes_arr[order]
 
-        for lbl in unique_labels:
-            idx = np.where(labels == lbl)[0]
-            cluster_boxes = boxes[idx]
-            cluster_stats = [stats_list[i] for i in idx] if len(stats_list) == len(boxes) else None
-            score = self._score_cluster(cluster_boxes, cluster_stats)
-            if score > best_score:
-                best_score = score
-                best_label = lbl
+            # re-link stats to kept boxes using exact box tuples
+            stat_map = {}
+            if g["stats"] is not None:
+                for b, st in zip(g["boxes"].tolist(), g["stats"]):
+                    stat_map[tuple(map(int, b))] = st
+                stats_kept = [stat_map.get(tuple(map(int, b)), None) for b in boxes_arr.tolist()]
+            else:
+                stats_kept = None
 
-        main_boxes = boxes[labels == best_label]
-        if main_boxes.size == 0:
-            return np.zeros((0, 4), dtype=np.int32)
+            gg = self._build_group_stats(boxes_arr, stats_kept, spectrogram.shape if spectrogram is not None else (1, 1))
+            if gg is not None:
+                cleaned.append(gg)
 
-        # Sort by time before NMS to keep temporal order stable.
-        time_centers = (main_boxes[:, 0] + main_boxes[:, 2]) / 2.0
-        main_boxes = main_boxes[np.argsort(time_centers)]
+        if not cleaned:
+            return []
 
-        # NMS within main cluster
-        main_list = [list(b) for b in main_boxes]
-        main_list = self._nms(main_list)
-        main_boxes = np.asarray(main_list, dtype=np.int32).reshape(-1, 4)
+        best_score = max(g["score"] for g in cleaned)
+        final_groups = []
+        for g in cleaned:
+            if self._group_passes_thresholds(g, best_score):
+                g["group_type"] = self._infer_group_type(g)
+                final_groups.append(g)
 
-        # Sort again
-        if main_boxes.size > 0:
-            time_centers = (main_boxes[:, 0] + main_boxes[:, 2]) / 2.0
-            main_boxes = main_boxes[np.argsort(time_centers)]
-
-        return main_boxes
-
-    def process(self, det_boxes, spectrogram, return_boxes: bool = False):
-        """
-        Convert detection boxes to a token sequence.
-
-        Args:
-          det_boxes: array-like (N,4) in [x1,y1,x2,y2]
-          spectrogram: 2D array (freq_bins x time_frames)
-          return_boxes: if True, also return the final main_boxes after filtering.
-
-        Returns:
-          features_array: (K,F) float32; if no boxes -> (0,0)
-          main_boxes (optional): (K,4) int32
-        """
-        main_boxes = self.select_main_boxes(det_boxes, spectrogram=spectrogram)
-        if main_boxes.size == 0:
-            empty = np.zeros((0, 0), dtype=np.float32)
-            return (empty, main_boxes) if return_boxes else empty
-
-        features = []
-        num_freq_bins = int(spectrogram.shape[0])
-        freq_res = (self.sr / 2.0) / (num_freq_bins - 1) if num_freq_bins > 1 else 0.0
-        time_res = self.hop_length / float(self.sr) if self.sr else 0.0
-
-        for (x1, y1, x2, y2) in main_boxes:
-            width = int(x2 - x1)
-            height = int(y2 - y1)
-            area = float(width * height)
-
-            region = spectrogram[y1:y2, x1:x2]
-            mean_val = float(np.mean(region)) if region.size else 0.0
-            max_val = float(np.max(region)) if region.size else 0.0
-            var_val = float(np.var(region)) if region.size else 0.0
-
-            time_center_idx = (x1 + x2) / 2.0
-            freq_center_idx = (y1 + y2) / 2.0
-            time_center_sec = float(time_center_idx * time_res)
-            freq_center_hz = float(freq_center_idx * freq_res)
-
-            time_duration = float(width * time_res)
-            freq_bandwidth = float(height * freq_res)
-
-            feat = [time_center_sec, freq_center_hz, time_duration, freq_bandwidth]
-            features.append(feat)
-
-        features_array = np.asarray(features, dtype=np.float32)
-
-        return (features_array, main_boxes) if return_boxes else features_array
+        final_groups = sorted(final_groups, key=lambda x: x["score"], reverse=True)
+        return final_groups

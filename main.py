@@ -45,6 +45,9 @@ def get_parser():
         help="Hop length in samples. If total duration is 50ms with 750 columns, hop ≈ sr*0.05/750."
     )
     
+    parser.add_argument("--match_freq_thresh", type=float, default=10.0)
+    parser.add_argument("--skip_unmatched", action=argparse.BooleanOptionalAction, default=True)
+    
     # Preprocessor (box post-processing)
     g_pre = parser.add_argument_group("Preprocessor (Box post-processing)")
     g_pre.add_argument(
