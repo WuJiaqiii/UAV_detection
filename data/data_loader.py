@@ -1,12 +1,11 @@
 import os
 import re
 import glob
-import csv
 import numpy as np
 import torch
-import random
 import cv2
 
+from typing import List, Dict, Any, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler, DistributedSampler, Subset
 from sklearn.model_selection import train_test_split
 import torch.distributed as dist
@@ -18,75 +17,35 @@ except ImportError:
 
 
 class UAVDataset(Dataset):
+    """
+    Dataloader for multi-UAV .mat or .png signal data
 
-    _FNAME_RE = re.compile(
-        r"""^(?P<protocol>.+?)-\[(?P<bracket>[^\]]+)\](?:-SNR-(?P<snr>[-+]?\d+(?:\.\d+)?))?""",
-        re.VERBOSE,
-    )# 例：Skylink11-[0,-22.0,1000,20]-SNR-20-SNRSPACE1.046149e+01-Figure-1.mat/.png
+    Data name example:
+        FPV1-[0,-0.1,1000,17]-Ocusync21-[0,65.3,1000,18]-Ocusync41-[0,-5.5,1000,38]-SNR-6-SNRSPACE17-Figure-1.mat
+    """
+
+    _SIGNAL_RE = re.compile(r'(?P<protocol>[A-Za-z0-9_]+)-\[(?P<bracket>[^\]]+)\]')
+    _SNR_RE = re.compile(r'-SNR-(?P<snr>[-+]?\d+(?:\.\d+)?)')
 
     def __init__(self, config, logger, validate_on_init: bool = False):
+        
         self.config = config
         self.logger = logger
-        self.input_type = str(getattr(config, "input_type", "png")).lower()
+        self.input_type = str(config.input_type).lower()
 
-        dataset_dir = getattr(config, "dataset_path", None)
-        if not dataset_dir or not os.path.isdir(dataset_dir):
-            raise ValueError(f"config.dataset_path must be an existing directory, got: {dataset_dir}")
-
+        if not config.dataset_path or not os.path.isdir(config.dataset_path):
+            raise ValueError(f"config.dataset_path must be an existing directory, got: {config.dataset_path}")
         if self.input_type not in {"mat", "png"}:
             raise ValueError(f"Unsupported input_type={self.input_type}, expected 'mat' or 'png'")
 
         self.mod2label = {str(k): int(v) for k, v in getattr(config, "classes", {}).items()}
 
-        pattern = "*.png" if self.input_type == "png" else "*.mat"
-        data_files = sorted(glob.glob(os.path.join(dataset_dir, pattern)))
+        pattern = "*." + self.input_type
+        data_files = sorted(glob.glob(os.path.join(config.dataset_path, pattern)))
         if not data_files:
-            raise FileNotFoundError(f"No {pattern} files found under: {dataset_dir}")
+            raise FileNotFoundError(f"No {pattern} files found under: {config.dataset_path}")
 
-        def _load_whitelist(csv_path: str) -> set[str]:
-            keep = set()
-            with open(csv_path, "r", encoding="utf-8", newline="") as f:
-                reader = csv.DictReader(f)
-                if reader.fieldnames is None:
-                    raise ValueError(f"Invalid CSV (no header): {csv_path}")
-
-                col = "filename" if "filename" in reader.fieldnames else reader.fieldnames[0]
-
-                for row in reader:
-                    v = (row.get(col) or "").strip()
-                    if not v:
-                        continue
-                    v = os.path.basename(v).strip('"').strip("'")
-                    keep.add(v)
-            return keep
-
-        whitelist_csv = getattr(config, "whitelist_csv", None)
-        if whitelist_csv:
-            if not os.path.isfile(whitelist_csv):
-                raise FileNotFoundError(f"--whitelist_csv not found: {whitelist_csv}")
-
-            keep_names = _load_whitelist(whitelist_csv)
-
-            before = len(data_files)
-            filtered = []
-            for fp in data_files:
-                fname = os.path.basename(fp)                  # xxx.png / xxx.mat
-                base = os.path.splitext(fname)[0]             # xxx
-                png_name = base + ".png"
-                mat_name = base + ".mat"
-
-                if (fname in keep_names) or (base in keep_names) or (png_name in keep_names) or (mat_name in keep_names):
-                    filtered.append(fp)
-
-            data_files = filtered
-            logger.info(
-                f"[Whitelist] Applied whitelist_csv={whitelist_csv}: keep {len(data_files)}/{before}, drop {before-len(data_files)}"
-            )
-
-            if not data_files:
-                raise RuntimeError("Whitelist filtered out all files. Check filename mapping and CSV content.")
-
-        files, protocol_list, freq_list, bw_list, snr_list = [], [], [], [], []
+        self.samples: List[Dict[str, Any]] = []
         bad = 0
 
         def skip(reason: str, fname: str):
@@ -96,58 +55,76 @@ class UAVDataset(Dataset):
 
         for fp in data_files:
             fname = os.path.basename(fp)
-            m = self._FNAME_RE.search(fname)
-            if not m:
-                skip("filename regex not matched", fname)
-                continue
-
-            protocol = m.group("protocol").strip()
-            if protocol not in config.classes:
-                continue
-
-            parts = [p.strip() for p in m.group("bracket").split(",")]
-            if len(parts) < 4:
-                skip("bracket parse failed (need 4 fields)", fname)
-                continue
-
-            try:
-                freq = float(parts[1])
-                bw = float(parts[3])
-            except ValueError:
-                skip("freq/bw parse failed", fname)
-                continue
+            base = os.path.splitext(fname)[0]
 
             snr = float("nan")
-            snr_str = m.group("snr")
-            if snr_str is not None:
+            m_snr = self._SNR_RE.search(base)
+            if m_snr is not None:
                 try:
-                    snr = float(snr_str)
+                    snr = float(m_snr.group("snr"))
                 except ValueError:
                     snr = float("nan")
+
+            prefix = base.split("-SNR-")[0]
+
+            matches = list(self._SIGNAL_RE.finditer(prefix))
+            if not matches:
+                skip("no signal blocks parsed from filename", fname)
+                continue
+
+            targets: List[Dict[str, Any]] = []
+            parse_failed = False
+
+            for m in matches:
+                protocol = m.group("protocol").strip()
+                if protocol not in self.mod2label:
+                    logger.warning(f"[SkipTarget] protocol not in config.classes: {protocol} ({fname})")
+                    continue
+
+                parts = [p.strip() for p in m.group("bracket").split(",")]
+                if len(parts) < 4:
+                    logger.warning(f"[SkipTarget] bracket parse failed (need >=4 fields): {protocol} ({fname})")
+                    continue
+
+                try:
+                    center_freq = float(parts[1])
+                    upper_freq = float(parts[3])
+                    bandwidth = 2.0 * abs(upper_freq - center_freq)
+                except ValueError:
+                    logger.warning(f"[SkipTarget] center_freq/upper_freq parse failed: {protocol} ({fname})")
+                    continue
+
+                targets.append({
+                    "label": self.mod2label[protocol],
+                    "class_name": protocol,
+                    "center_freq": float(center_freq),
+                    "bandwidth": float(bandwidth),
+                })
+
+            if len(targets) == 0:
+                skip("all targets invalid or filtered out", fname)
+                continue
 
             if validate_on_init:
                 try:
                     _ = self._load_x(fp)
                 except Exception as e:
                     skip(f"validate_on_init failed ({e})", fname)
-                    continue
+                    parse_failed = True
 
-            files.append(fp)
-            protocol_list.append(self.mod2label[protocol])
-            freq_list.append(freq)
-            bw_list.append(bw)
-            snr_list.append(snr)
+            if parse_failed:
+                continue
 
-        if not files:
+            self.samples.append({
+                "fp": fp,
+                "targets": targets,
+                "snr": snr,
+            })
+
+        if not self.samples:
             raise RuntimeError(f"All files were skipped. bad={bad}, total={len(data_files)}")
 
-        self.files = files
-        self.protocol = torch.tensor(protocol_list, dtype=torch.int64)
-        self.freq = torch.tensor(freq_list, dtype=torch.float32)
-        self.bw = torch.tensor(bw_list, dtype=torch.float32)
-        self.snr = torch.tensor(snr_list, dtype=torch.float32)
-
-        logger.info(f"Indexed {len(self.files)} samples from {dataset_dir} (skipped {bad})")
+        logger.info(f"Indexed {len(self.samples)} samples from {config.dataset_path} (skipped {bad})")
         logger.info(f"Dataset input_type={self.input_type}, validate_on_init={validate_on_init}")
 
     def _load_x(self, fp: str) -> torch.Tensor:
@@ -155,11 +132,8 @@ class UAVDataset(Dataset):
             x = cv2.imread(fp, cv2.IMREAD_GRAYSCALE)
             if x is None:
                 raise RuntimeError(f"Failed to read png: {fp}")
-
-            # 保持 uint8，不做归一化
             x = np.ascontiguousarray(x)
-            t = torch.from_numpy(x)  # uint8, shape (H, W)
-            return t
+            return torch.from_numpy(x)  # uint8, (H, W)
 
         # mat mode
         if loadmat is None:
@@ -175,20 +149,21 @@ class UAVDataset(Dataset):
 
         x = np.asarray(x, dtype=np.float32)
         x = np.ascontiguousarray(x)
-        t = torch.from_numpy(x)
-        return t
+        return torch.from_numpy(x)  # float32, (H, W)
 
     def __len__(self):
-        return self.protocol.numel()
+        return len(self.samples)
 
     def __getitem__(self, idx: int):
-        fp = self.files[idx]
+        sample = self.samples[idx]
+        fp = sample["fp"]
+
         try:
             x = self._load_x(fp)
         except Exception as e:
             raise RuntimeError(f"Failed to load '{os.path.basename(fp)}': {e}") from e
 
-        return x, self.protocol[idx], self.freq[idx], self.bw[idx], self.snr[idx], fp
+        return x, sample["targets"], sample["snr"], fp
 
 
 class RandomSampler(Sampler):
@@ -211,24 +186,38 @@ class RandomSampler(Sampler):
 def build_ddp_sampler(dataset, shuffle: bool, sample_ratio: float, seed: int = 42):
     rank = dist.get_rank()
     world = dist.get_world_size()
+
     num_keep = int(round(len(dataset) * float(sample_ratio)))
     num_keep = max(0, min(num_keep, len(dataset)))
 
     g = torch.Generator()
     g.manual_seed(int(seed))
-
     idx = torch.randperm(len(dataset), generator=g)[:num_keep].tolist()
-    subset = Subset(dataset, idx)
 
+    subset = Subset(dataset, idx)
     sampler = DistributedSampler(
-        subset, num_replicas=world, rank=rank, shuffle=shuffle, drop_last=False
+        subset,
+        num_replicas=world,
+        rank=rank,
+        shuffle=shuffle,
+        drop_last=False
     )
     return subset, sampler
 
+def multi_signal_collate_fn(batch: List[Tuple[torch.Tensor, List[Dict[str, Any]], float, str]]):
+    xs, targets_list, snrs, fps = zip(*batch)
+    xs = torch.stack(xs, dim=0)
+    snrs = torch.as_tensor(snrs, dtype=torch.float32)
+    return xs, list(targets_list), snrs, list(fps)
 
-def create_dataloader(dataset: Dataset, config, shuffle):
+
+def create_dataloader(dataset: Dataset, config, shuffle: bool):
     if dist.is_initialized():
-        dataset, sampler = build_ddp_sampler(dataset, shuffle=shuffle, sample_ratio=config.sample_ratio)
+        dataset, sampler = build_ddp_sampler(
+            dataset,
+            shuffle=shuffle,
+            sample_ratio=config.sample_ratio
+        )
     else:
         sampler = RandomSampler(dataset, config.sample_ratio)
 
@@ -239,30 +228,20 @@ def create_dataloader(dataset: Dataset, config, shuffle):
         shuffle=(sampler is None and shuffle),
         num_workers=config.num_workers,
         pin_memory=True,
-        drop_last=False
+        drop_last=False,
+        collate_fn=multi_signal_collate_fn,
     )
 
-
 def get_dataloader(dataset, config):
-    all_labels = dataset.protocol
+    
     idxs = np.arange(len(dataset))
 
-    if torch.is_tensor(all_labels):
-        labels_np = all_labels.detach().cpu().numpy()
-    else:
-        labels_np = np.asarray(all_labels)
-
-    n_unique = len(np.unique(labels_np)) if labels_np.size > 0 else 0
-
-    if labels_np.size == 0 or n_unique <= 1:
-        train_idx, val_idx = train_test_split(
-            idxs, test_size=config.val_ratio, shuffle=True, random_state=42
-        )
-    else:
-        train_idx, val_idx = train_test_split(
-            idxs, test_size=config.val_ratio, shuffle=True, random_state=42,
-            stratify=labels_np
-        )
+    train_idx, val_idx = train_test_split(
+        idxs,
+        test_size=config.val_ratio,
+        shuffle=True,
+        random_state=42,
+    )
 
     train_dataset = Subset(dataset, train_idx.tolist())
     val_dataset = Subset(dataset, val_idx.tolist())

@@ -154,7 +154,7 @@ def get_parser():
     )
     g_exp.add_argument(
         "--checkpoint_path", type=str, default=None,
-        help="Optional path to resume training or load pretrained transformer weights."
+        help="Optional path to resume training or load pretrained model weights."
     )
     g_exp.add_argument(
         "--bbox_cache_mode", type=str, default='readwrite',
@@ -162,7 +162,7 @@ def get_parser():
     )
     g_exp.add_argument(
         "--precompute_boxes", action=argparse.BooleanOptionalAction, default=False,
-        help="Only precompute and persist SAM2 bboxes for the train and val loader, then exit."
+        help="Only precompute and persist bboxes for the train and val loader, then exit."
     )
     g_exp.add_argument(
         "--bbox_cache_path", type=str, default=None,
