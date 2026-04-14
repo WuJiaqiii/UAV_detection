@@ -407,7 +407,7 @@ class Trainer:
                 final_boxes = m["boxes"]
                 if final_boxes is None or len(final_boxes) == 0:
                     continue
-                x = self._build_input_image(spec, yolo_boxes, final_boxes)
+                x = self._make_input_tensor(spec, yolo_boxes, final_boxes)
                 image_tensors.append(x)
                 labels.append(int(m["label"]))
                 metas.append({

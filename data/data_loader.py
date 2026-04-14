@@ -32,6 +32,8 @@ class UAVDataset(Dataset):
         self.config = config
         self.logger = logger
         self.input_type = str(config.input_type).lower()
+        
+        self.exclude_set = set(getattr(config, "exclude_classes", []) or [])
 
         if not config.dataset_path or not os.path.isdir(config.dataset_path):
             raise ValueError(f"config.dataset_path must be an existing directory, got: {config.dataset_path}")
@@ -70,6 +72,12 @@ class UAVDataset(Dataset):
             matches = list(self._SIGNAL_RE.finditer(prefix))
             if not matches:
                 skip("no signal blocks parsed from filename", fname)
+                continue
+            
+            all_protocols = [m.group("protocol").strip() for m in matches]
+            if self.exclude_set and any(p in self.exclude_set for p in all_protocols):
+                logger.info(f"[Skip] contains excluded classes: {fname}")
+                bad += 1
                 continue
 
             targets: List[Dict[str, Any]] = []

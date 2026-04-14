@@ -17,9 +17,9 @@ from util.checkpoint import load_checkpoint
 from util.utils import create_logger, set_seed
 from util.config import Config
 
-if (not torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0:
-    torch.autograd.set_detect_anomaly(True)
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+# if (not torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0:
+#     torch.autograd.set_detect_anomaly(True)
+#     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=r".*find_unused_parameters=True was specified in DDP constructor.*", category=UserWarning)
@@ -30,219 +30,114 @@ def get_parser():
         description="STFT spectrogram -> (Yolov5 detection + preprocessing) -> Transformer classification training"
     )
     
+    # Runtime
+    g_run = parser.add_argument_group("Runtime")
+    g_run.add_argument("--use_data_parallel", action=argparse.BooleanOptionalAction, default=False)
+    g_run.add_argument("--use_amp_autocast", action=argparse.BooleanOptionalAction, default=False)
+    
     # Spectrogram -> Physical mapping
-    g_stft = parser.add_argument_group("STFT / Physical Mapping")
-    g_stft.add_argument(
-        "--sampling_rate", type=float, default=122.88e6,
-        help="Sampling rate (Hz) used to generate STFT."
-    )
-    g_stft.add_argument(
-        "--n_fft", type=int, default=512,
-        help="FFT size used in STFT (also equals spectrogram frequency bins in your setting)."
-    )
-    g_stft.add_argument(
-        "--hop_length", type=int, default=int(122.88e6 * 0.05 / 750),
-        help="Hop length in samples. If total duration is 50ms with 750 columns, hop ≈ sr*0.05/750."
-    )
-    
-    parser.add_argument("--match_freq_thresh", type=float, default=10.0)
-    parser.add_argument("--skip_unmatched", action=argparse.BooleanOptionalAction, default=True)
-    
-    # Preprocessor (box post-processing)
-    g_pre = parser.add_argument_group("Preprocessor (Box post-processing)")
-    g_pre.add_argument(
-        "--pre_min_area", type=int, default=20,
-        help="Minimum bbox area (pixels) used in preprocess.py filtering."
-    )
-    g_pre.add_argument(
-        "--pre_min_ratio", type=float, default=0,
-        help="Minimum width/height ratio for bboxes in preprocess.py. Larger -> prefer horizontal boxes."
-    )
-    g_pre.add_argument(
-        "--pre_freq_eps", type=int, default=5,
-        help="DBSCAN eps on frequency-center (pixels). Larger -> merge clusters more easily."
-    )
-    g_pre.add_argument(
-        "--pre_freq_min_samples", type=int, default=2,
-        help="DBSCAN min_samples. 1 means every box can form a cluster; >1 suppresses isolated boxes."
-    )
-    g_pre.add_argument(
-        "--pre_nms_iou_thresh", type=float, default=0.5,
-        help="NMS IoU threshold in preprocess.py for removing overlapped bboxes."
-    )
-
-    # Dataset / DataLoader
-    g_data = parser.add_argument_group("Dataset & DataLoader")
-    g_data.add_argument(
-        "--dataset_path", type=str, required=True,
-        help="Path to dataset file. You should modify this to your own dataset index/annotation file."
-    )
-    g_data.add_argument(
-        "--val_ratio", type=float, default=0.2,
-        help="Validation split ratio (0~1). Used when you split train/val from one dataset."
-    )
-    g_data.add_argument(
-        "--num_workers", type=int, default=4,
-        help="Number of DataLoader workers."
-    )
-    g_data.add_argument(
-        "--batch_size", type=int, default=256,
-        help="Batch size for training/validation."
-    )
-    g_data.add_argument(
-        "--sample_ratio", type=float, default=1.0,
-        help="The ratio of sampling in the dataset every epoch."
-    )
-    g_data.add_argument(
-        "--exclude_classes", type=str, nargs="*", default=[],
-        help="Class names to exclude from dataset, e.g. --exclude_classes Skylink21 FPV1"
-    )
-    g_data.add_argument(
-        "--input_type", type=str, default="mat", choices=["mat", "png"],
-        help="Raw dataset type. Use 'png' to load spectrogram images directly."
-    )
+    g_stft = parser.add_argument_group("STFT / Frequency Mapping")
+    g_stft.add_argument("--sampling_rate", type=float, default=122.88e6)
+    g_stft.add_argument("--n_fft", type=int, default=512)
+    g_stft.add_argument("--hop_length", type=int, default=int(122.88e6 * 0.05 / 750))
     
     # YOLOv5 Detector
-    g_yolo = parser.add_argument_group("YOLOv5 Detector")
-    g_yolo.add_argument(
-        "--yolo_weights", type=str, default="/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/yolov5/runs/train/exp10/weights/best.pt",
-        help="Path to YOLOv5 weights (.pt / .onnx / etc.)."
-    )
-    g_yolo.add_argument(
-        "--yolo_device", type=str, default="",
-        help='Device for YOLO inference. "" for auto, "cpu" for CPU, or GPU id like "0". '
-    )
-    g_yolo.add_argument(
-        "--yolo_imgsz_h", type=int, default=640,
-        help="YOLO inference image height after letterbox resize."
-    )
-    g_yolo.add_argument(
-        "--yolo_imgsz_w", type=int, default=640,
-        help="YOLO inference image width after letterbox resize."
-    )
-    g_yolo.add_argument(
-        "--yolo_conf_thres", type=float, default=0.85,
-        help="Confidence threshold for YOLO detections."
-    )
-    g_yolo.add_argument(
-        "--yolo_iou_thres", type=float, default=0.05,
-        help="IoU threshold for YOLO NMS."
-    )
-    g_yolo.add_argument(
-        "--yolo_max_det", type=int, default=1000,
-        help="Maximum number of detections per image after NMS."
-    )
-    g_yolo.add_argument(
-        "--yolo_classes", type=int, nargs="*", default=None,
-        help="Optional class filter for YOLO detections, e.g. --yolo_classes 0 or --yolo_classes 0 1"
-    )
-    g_yolo.add_argument(
-        "--yolo_half", action=argparse.BooleanOptionalAction, default=False,
-        help="Use FP16 half-precision inference for YOLO (CUDA only)."
-    )
-    g_yolo.add_argument(
-        "--yolo_warmup", action=argparse.BooleanOptionalAction, default=True,
-        help="Run model warmup once after loading YOLO."
-    )
+    g_yolo = parser.add_argument_group("YOLO Detector")
+    g_yolo.add_argument("--yolo_weights", type=str, required=True)
+    g_yolo.add_argument("--yolo_device", type=str, default="")
+    g_yolo.add_argument("--yolo_imgsz_h", type=int, default=640)
+    g_yolo.add_argument("--yolo_imgsz_w", type=int, default=640)
+    g_yolo.add_argument("--yolo_conf_thres", type=float, default=0.85)
+    g_yolo.add_argument("--yolo_iou_thres", type=float, default=0.05)
+    g_yolo.add_argument("--yolo_max_det", type=int, default=1000)
+    g_yolo.add_argument("--yolo_classes", type=int, nargs="*", default=None)
+    g_yolo.add_argument("--yolo_half", action=argparse.BooleanOptionalAction, default=False)
+    g_yolo.add_argument("--yolo_warmup", action=argparse.BooleanOptionalAction, default=True)
+    
+    # Preprocessor (box post-processing)
+    g_pre = parser.add_argument_group("Multi-signal Preprocess")
 
-    # Experiment / IO
-    g_exp = parser.add_argument_group("Experiment & Checkpoints")
-    g_exp.add_argument(
-        "--epochs", type=int, default=50,
-        help="Total training epochs."
-    )
-    g_exp.add_argument(
-        "--save_interval", type=int, default=5,
-        help="Save checkpoint every N epochs."
-    )
-    g_exp.add_argument(
-        "--checkpoint_path", type=str, default=None,
-        help="Optional path to resume training or load pretrained model weights."
-    )
-    g_exp.add_argument(
-        "--bbox_cache_mode", type=str, default='readwrite',
-        help="off / read / write / readwrite / refresh"
-    )
-    g_exp.add_argument(
-        "--precompute_boxes", action=argparse.BooleanOptionalAction, default=False,
-        help="Only precompute and persist bboxes for the train and val loader, then exit."
-    )
-    g_exp.add_argument(
-        "--bbox_cache_path", type=str, default=None,
-        help="Bbox cache save path."
-    )
+    # basic filter
+    g_pre.add_argument("--pre_min_area", type=int, default=20)
+    g_pre.add_argument("--pre_min_ratio", type=float, default=0.0)
+    g_pre.add_argument("--pre_min_width", type=int, default=2)
+    g_pre.add_argument("--pre_min_height", type=int, default=2)
+    g_pre.add_argument("--pre_exclude_bottom_ratio", type=float, default=0.0)
+    # energy filter
+    g_pre.add_argument("--pre_ring_margin", type=int, default=5)
+    g_pre.add_argument("--pre_min_contrast_z", type=float, default=0.6)
+    g_pre.add_argument("--pre_min_integrated_energy", type=float, default=8.0)
+    g_pre.add_argument("--pre_min_bright_ratio", type=float, default=0.02)
+    g_pre.add_argument("--pre_bright_z_thresh", type=float, default=1.5)
+    # dbscan
+    g_pre.add_argument("--pre_freq_eps", type=float, default=12.0)
+    g_pre.add_argument("--pre_freq_min_samples", type=int, default=1)
+    # merge
+    g_pre.add_argument("--pre_merge_freq_thresh", type=float, default=10.0)
+    g_pre.add_argument("--pre_merge_w_log_thresh", type=float, default=0.35)
+    g_pre.add_argument("--pre_merge_h_log_thresh", type=float, default=0.35)
+    g_pre.add_argument("--pre_merge_energy_thresh", type=float, default=1.0)
+    g_pre.add_argument("--pre_merge_bright_thresh", type=float, default=0.12)
+    # group filter
+    g_pre.add_argument("--pre_min_group_len", type=int, default=2)
+    g_pre.add_argument("--pre_min_group_time_span_ratio", type=float, default=0.01)
+    g_pre.add_argument("--pre_min_group_contrast", type=float, default=0.0)
+    g_pre.add_argument("--pre_min_group_bright", type=float, default=0.0)
+    g_pre.add_argument("--pre_score_abs_thresh", type=float, default=0.0)
+    g_pre.add_argument("--pre_score_rel_thresh", type=float, default=0.30)
+    # nms
+    g_pre.add_argument("--pre_nms_iou_thresh", type=float, default=0.5)
+    
+    g_match = parser.add_argument_group("Target Matching")
+    g_match.add_argument("--match_freq_thresh", type=float, default=10.0)
+    g_match.add_argument("--skip_unmatched", action=argparse.BooleanOptionalAction, default=True)
+    g_match.add_argument("--match_use_bandwidth", action=argparse.BooleanOptionalAction, default=False)
+    g_match.add_argument("--match_bandwidth_weight", type=float, default=0.2)
 
-    # Optimizer / Scheduler
-    g_opt = parser.add_argument_group("Optimizer & LR Scheduler")
-    g_opt.add_argument(
-        "--lr", type=float, default=1e-4,
-        help="Base learning rate (e.g., 1e-4~1e-6 depending on your setup)."
-    )
-    g_opt.add_argument(
-        "--weight_decay", type=float, default=1e-2,
-        help="Weight decay for AdamW."
-    )
-    g_opt.add_argument(
-        "--early_stop_patience", type=int, default=20,
-        help="Early stopping patience (epochs). Stop if val metric does not improve."
-    )
-    g_opt.add_argument(
-        "--cosine_annealing_T0", type=int, default=50,
-        help="CosineAnnealingWarmRestarts: T0 (initial restart period in epochs)."
-    )
-    g_opt.add_argument(
-        "--cosine_annealing_mult", type=int, default=2,
-        help="CosineAnnealingWarmRestarts: T_mult (period multiplier at each restart)."
-    )
-
-    # Transformer Model
-    g_model = parser.add_argument_group("ResNet Model")
-    g_model = parser.add_argument_group("Mask + CNN Model")
+    # Dataset / DataLoader
+    g_data = parser.add_argument_group("Data")
+    g_data.add_argument("--dataset_path", type=str, required=True)
+    g_data.add_argument("--input_type", type=str, default="mat", choices=["mat", "png"])
+    g_data.add_argument("--val_ratio", type=float, default=0.2)
+    g_data.add_argument("--batch_size", type=int, default=32)
+    g_data.add_argument("--num_workers", type=int, default=4)
+    g_data.add_argument("--sample_ratio", type=float, default=1.0)
+    g_data.add_argument("--exclude_classes", type=str, nargs="*", default=[])
+    
+    # Classifier Model
+    g_model = parser.add_argument_group("CNN Classifier")
     g_model.add_argument("--backbone", type=str, default="resnet18",
                         choices=["resnet18", "resnet34", "mobilenet_v3_small"])
     g_model.add_argument("--mask_img_size", type=int, default=224)
-    g_model.add_argument("--mask_source", type=str, default="final",
-                        choices=["raw", "final"])
-    g_model.add_argument("--mask_fill_value", type=int, default=255)
     g_model.add_argument("--mask_in_chans", type=int, default=1)
     g_model.add_argument("--mask_pretrained", action=argparse.BooleanOptionalAction, default=True)
     g_model.add_argument("--freeze_backbone", action=argparse.BooleanOptionalAction, default=False)
     g_model.add_argument("--cnn_dropout", type=float, default=0.0)
 
-    g_model.add_argument(
-        "--cnn_input_mode",
-        type=str,
-        default="mask",
-        choices=["mask", "raw", "raw_with_boxes", "raw_in_boxes"],
-        help="Input image fed to CNN: binary mask / raw spectrogram / raw spectrogram with YOLO boxes."
-    )
-    g_model.add_argument(
-        "--box_draw_thickness",
-        type=int,
-        default=2,
-        help="Line thickness when drawing boxes on raw image."
-    )
-    g_model.add_argument(
-        "--box_draw_value",
-        type=int,
-        default=255,
-        help="Pixel value used to draw boxes on raw grayscale image."
-    )
+    g_model.add_argument("--cnn_input_mode", type=str, default="mask",
+                        choices=["mask", "raw", "raw_with_boxes", "raw_in_boxes"])
+    g_model.add_argument("--box_draw_thickness", type=int, default=2)
+    g_model.add_argument("--box_draw_value", type=int, default=255)
 
-    g_vis = parser.add_argument_group("Visualization")
-    g_vis.add_argument("--save_detect_vis_once", action=argparse.BooleanOptionalAction, default=True)
-    g_vis.add_argument("--detect_vis_num_samples", type=int, default=10000)
+    # Experiment
+    g_train = parser.add_argument_group("Training")
+    g_train.add_argument("--epochs", type=int, default=50)
+    g_train.add_argument("--lr", type=float, default=1e-4)
+    g_train.add_argument("--weight_decay", type=float, default=1e-2)
+    g_train.add_argument("--early_stop_patience", type=int, default=20)
+    g_train.add_argument("--cosine_annealing_T0", type=int, default=50)
+    g_train.add_argument("--cosine_annealing_mult", type=int, default=2)
     
-    # Misc
-    g_misc = parser.add_argument_group("Miscellaneous")
-    g_misc.add_argument(
-        "--use_data_parallel", action=argparse.BooleanOptionalAction, default=False,
-        help="Use DataParallel for multi-GPU training (simpler but not as efficient as DDP)."
-    )
-    g_misc.add_argument(
-        "--use_amp_autocast", action=argparse.BooleanOptionalAction, default=False,
-        help="Enable AMP autocast (CUDA only). Recommended for faster training if stable."
-    )
+    g_io = parser.add_argument_group("Checkpoint / Cache")
+    g_io.add_argument("--checkpoint_path", type=str, default=None)
+    g_io.add_argument("--save_interval", type=int, default=5)
+    g_io.add_argument("--bbox_cache_mode", type=str, default="readwrite")
+    g_io.add_argument("--bbox_cache_path", type=str, default=None)
+    g_io.add_argument("--precompute_boxes", action=argparse.BooleanOptionalAction, default=False)
+    
+    g_vis = parser.add_argument_group("Visualization")
+    g_vis.add_argument("--save_detect_vis_once", action=argparse.BooleanOptionalAction, default=False)
+    g_vis.add_argument("--detect_vis_num_samples", type=int, default=1)
 
     args = parser.parse_args()
     return args
