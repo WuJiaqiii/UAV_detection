@@ -8,30 +8,6 @@ import numpy as np
 import torch
 import cv2
 
-
-# def _to_uint8_gray_png_style(spec: np.ndarray) -> np.ndarray:
-#     """
-#     Match the old .mat -> .png generation logic exactly:
-#         uint8(matrix / max(matrix) * 255)
-#     """
-#     if spec.ndim != 2:
-#         raise ValueError(f"Expected 2D grayscale spec (H, W), got shape={spec.shape}")
-
-#     if spec.dtype == np.uint8:
-#         return spec
-
-#     x = spec.astype(np.float32, copy=False)
-
-#     maxv = float(np.max(x))
-#     if (not np.isfinite(maxv)) or maxv <= 0:
-#         return np.zeros_like(x, dtype=np.uint8)
-
-#     x = x / maxv * 255.0
-#     x = np.clip(x, 0.0, 255.0)
-#     return x.astype(np.uint8)
-
-
-
 def spec_float32_to_uint8_gray(spec: np.ndarray) -> np.ndarray:
     """
     spec: float32/float64 2D matrix, shape (H, W)
