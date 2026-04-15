@@ -76,7 +76,7 @@ class UAVDataset(Dataset):
             
             all_protocols = [m.group("protocol").strip() for m in matches]
             if self.exclude_set and any(p in self.exclude_set for p in all_protocols):
-                logger.info(f"[Skip] contains excluded classes: {fname}")
+                # logger.info(f"[Skip] contains excluded classes: {fname}")
                 bad += 1
                 continue
 

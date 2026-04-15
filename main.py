@@ -58,38 +58,38 @@ def get_parser():
     g_pre = parser.add_argument_group("Multi-signal Preprocess")
 
     # basic filter
-    g_pre.add_argument("--pre_min_area", type=int, default=20)
-    g_pre.add_argument("--pre_min_ratio", type=float, default=0.0)
-    g_pre.add_argument("--pre_min_width", type=int, default=2)
-    g_pre.add_argument("--pre_min_height", type=int, default=2)
-    g_pre.add_argument("--pre_exclude_bottom_ratio", type=float, default=0.0)
+    g_pre.add_argument("--min_area", type=int, default=20)
+    g_pre.add_argument("--min_ratio", type=float, default=0.0)
+    g_pre.add_argument("--min_width", type=int, default=2)
+    g_pre.add_argument("--min_height", type=int, default=2)
+    g_pre.add_argument("--max_width", type=int, default=0)
+    g_pre.add_argument("--max_height", type=int, default=0)
     # energy filter
-    g_pre.add_argument("--pre_ring_margin", type=int, default=5)
-    g_pre.add_argument("--pre_min_contrast_z", type=float, default=0.6)
-    g_pre.add_argument("--pre_min_integrated_energy", type=float, default=8.0)
-    g_pre.add_argument("--pre_min_bright_ratio", type=float, default=0.02)
-    g_pre.add_argument("--pre_bright_z_thresh", type=float, default=1.5)
+    g_pre.add_argument("--ring_margin", type=int, default=5)
+    g_pre.add_argument("--min_contrast_z", type=float, default=0.5)
     # dbscan
-    g_pre.add_argument("--pre_freq_eps", type=float, default=12.0)
-    g_pre.add_argument("--pre_freq_min_samples", type=int, default=1)
+    g_pre.add_argument("--freq_eps", type=float, default=20.0)
+    g_pre.add_argument("--freq_min_samples", type=int, default=1)
     # merge
-    g_pre.add_argument("--pre_merge_freq_thresh", type=float, default=10.0)
-    g_pre.add_argument("--pre_merge_w_log_thresh", type=float, default=0.35)
-    g_pre.add_argument("--pre_merge_h_log_thresh", type=float, default=0.35)
-    g_pre.add_argument("--pre_merge_energy_thresh", type=float, default=1.0)
-    g_pre.add_argument("--pre_merge_bright_thresh", type=float, default=0.12)
+    g_pre.add_argument("--merge_freq_thresh", type=float, default=10.0)
+    g_pre.add_argument("--merge_w_log_thresh", type=float, default=0.35)
+    g_pre.add_argument("--merge_h_log_thresh", type=float, default=0.35)
+    g_pre.add_argument("--merge_energy_thresh", type=float, default=1.0)
     # group filter
-    g_pre.add_argument("--pre_min_group_len", type=int, default=2)
-    g_pre.add_argument("--pre_min_group_time_span_ratio", type=float, default=0.01)
-    g_pre.add_argument("--pre_min_group_contrast", type=float, default=0.0)
-    g_pre.add_argument("--pre_min_group_bright", type=float, default=0.0)
-    g_pre.add_argument("--pre_score_abs_thresh", type=float, default=0.0)
-    g_pre.add_argument("--pre_score_rel_thresh", type=float, default=0.30)
+    g_pre.add_argument("--min_group_len", type=int, default=2)
+    g_pre.add_argument("--min_group_time_span_ratio", type=float, default=0.10)
+
+    g_pre.add_argument("--score_n_boxes_weight", type=float, default=0.80)
+    g_pre.add_argument("--score_time_span_weight", type=float, default=2.00)
+    g_pre.add_argument("--score_contrast_weight", type=float, default=0.60)
+    g_pre.add_argument("--score_w_std_weight", type=float, default=0.10)
+    g_pre.add_argument("--score_h_std_weight", type=float, default=0.50)
+    g_pre.add_argument("--score_contrast_std_weight", type=float, default=0.25)
     # nms
-    g_pre.add_argument("--pre_nms_iou_thresh", type=float, default=0.5)
+    g_pre.add_argument("--nms_thresh", type=float, default=0.2)
     
     g_match = parser.add_argument_group("Target Matching")
-    g_match.add_argument("--match_freq_thresh", type=float, default=10.0)
+    g_match.add_argument("--match_freq_thresh", type=float, default=15.0)
     g_match.add_argument("--skip_unmatched", action=argparse.BooleanOptionalAction, default=True)
     g_match.add_argument("--match_use_bandwidth", action=argparse.BooleanOptionalAction, default=False)
     g_match.add_argument("--match_bandwidth_weight", type=float, default=0.2)
@@ -136,8 +136,8 @@ def get_parser():
     g_io.add_argument("--precompute_boxes", action=argparse.BooleanOptionalAction, default=False)
     
     g_vis = parser.add_argument_group("Visualization")
-    g_vis.add_argument("--save_detect_vis_once", action=argparse.BooleanOptionalAction, default=False)
-    g_vis.add_argument("--detect_vis_num_samples", type=int, default=1)
+    g_vis.add_argument("--save_detect_vis_once", action=argparse.BooleanOptionalAction, default=True)
+    g_vis.add_argument("--detect_vis_num_samples", type=int, default=1000)
 
     args = parser.parse_args()
     return args
@@ -221,6 +221,7 @@ def main(args):
         freq_min_samples=config.pre_freq_min_samples,
         nms_iou_thresh=config.pre_nms_iou_thresh,
     )
+    preprocessor = SignalPreprocessor(config)
     
     trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier)
     

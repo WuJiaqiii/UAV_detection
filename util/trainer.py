@@ -140,7 +140,7 @@ class Trainer:
 
     def _make_input_tensor(self, spec, yolo_boxes, final_boxes):
         mode = self.cnn_input_mode
-        boxes = final_boxes if self.mask_source == "final" else yolo_boxes
+        boxes = final_boxes
 
         if mode == "mask":
             img = boxes_to_white_mask(
@@ -351,20 +351,80 @@ class Trainer:
         unmatched_groups = [i for i in range(len(groups)) if i not in used_g]
         return matched, unmatched_targets, unmatched_groups
 
-    def _save_detect_result_images(self, spec, yolo_boxes, matched_boxes, fp, sample_idx=0):
+    def _save_detect_result_images(self, spec, yolo_boxes, groups, matched_boxes, fp, sample_idx=0):
         save_dir = os.path.join(self.config.result_dir, "detect_result")
         os.makedirs(save_dir, exist_ok=True)
+
         base = os.path.splitext(os.path.basename(fp))[0] if fp else f"sample_{sample_idx}"
         spec_u8 = self._spec_to_uint8_vis_log(spec, p_low=1.0, p_high=99.5, log_gain=9.0)
+
         from PIL import Image, ImageDraw
-        for name, boxes in [("yolo", yolo_boxes), ("matched", matched_boxes)]:
-            img = Image.fromarray(spec_u8).convert("RGB")
-            draw = ImageDraw.Draw(img)
-            color = (255, 0, 0) if name == "yolo" else (0, 255, 0)
+
+        # 1) 保存 yolo 图
+        img = Image.fromarray(spec_u8).convert("RGB")
+        draw = ImageDraw.Draw(img)
+        for b in yolo_boxes:
+            x1, y1, x2, y2 = [int(v) for v in b]
+            draw.rectangle([x1, y1, x2, y2], outline=(255, 0, 0), width=2)
+        img.save(os.path.join(save_dir, f"{base}_yolo.png"))
+
+        # 2) 保存 groups 图
+        self._save_groups_image(
+            spec_u8=spec_u8,
+            groups=groups,
+            save_path=os.path.join(save_dir, f"{base}_groups.png"),
+        )
+
+        # 3) 保存 matched 图
+        img = Image.fromarray(spec_u8).convert("RGB")
+        draw = ImageDraw.Draw(img)
+        for b in matched_boxes:
+            x1, y1, x2, y2 = [int(v) for v in b]
+            draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)
+        img.save(os.path.join(save_dir, f"{base}_matched.png"))
+    
+    def _save_groups_image(self, spec_u8, groups, save_path):
+        from PIL import Image, ImageDraw
+
+        img = Image.fromarray(spec_u8).convert("RGB")
+        draw = ImageDraw.Draw(img)
+
+        colors = [
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+            (255, 0, 255),
+            (0, 255, 255),
+            (255, 128, 0),
+            (128, 255, 0),
+        ]
+
+        for gi, g in enumerate(groups):
+            boxes = np.asarray(g.get("boxes", []), dtype=np.int32).reshape(-1, 4)
+            if len(boxes) == 0:
+                continue
+
+            color = colors[gi % len(colors)]
+
             for b in boxes:
                 x1, y1, x2, y2 = [int(v) for v in b]
                 draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-            img.save(os.path.join(save_dir, f"{base}_{name}.png"))
+
+            # 在该组第一个框附近写标签
+            x1, y1, x2, y2 = [int(v) for v in boxes[0]]
+            label = f"G{gi}"
+            if "score" in g:
+                label += f" s={float(g['score']):.2f}"
+            if "center_freq" in g:
+                label += f" f={float(g['center_freq']):.1f}"
+            if "group_type" in g:
+                label += f" {g['group_type']}"
+
+            text_y = max(0, y1 - 12)
+            draw.text((x1, text_y), label, fill=color)
+
+        img.save(save_path)
 
     def _build_matched_instances(self, inputs_bhw, targets_list, sample_fps=None, save_detect_result=False, max_save_images=1):
         if isinstance(inputs_bhw, torch.Tensor):
@@ -395,12 +455,20 @@ class Trainer:
             groups = self._extract_groups(yolo_boxes, spec)
             matched, unmatched_targets, unmatched_groups = self._match_groups_to_targets(groups, targets, spec.shape)
             match_total += len(matched)
-
+                
             if save_detect_result and saved_count < max_save_images:
                 matched_boxes = []
                 for m in matched:
                     matched_boxes.extend(np.asarray(m["boxes"], dtype=np.int32).reshape(-1, 4).tolist())
-                self._save_detect_result_images(spec, yolo_boxes, matched_boxes, fp, sample_idx=i)
+
+                self._save_detect_result_images(
+                    spec=spec,
+                    yolo_boxes=yolo_boxes,
+                    groups=groups,
+                    matched_boxes=matched_boxes,
+                    fp=fp,
+                    sample_idx=i,
+                )
                 saved_count += 1
 
             for m in matched:
