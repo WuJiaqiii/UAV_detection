@@ -278,59 +278,159 @@ class Trainer:
     def _match_groups_to_targets(self, groups, targets, spec_shape):
         """
         targets: list[dict] with keys: label, center_freq, class_name, bandwidth(optional)
-        returns list of dicts: {group_idx, target_idx, label, center_freq, group_freq_center, boxes}
+        returns:
+            matched: list[dict]
+            unmatched_targets: list[int]
+            unmatched_groups: list[int]
         """
         if groups is None:
             groups = []
         if targets is None:
             targets = []
+
         if len(groups) == 0 or len(targets) == 0:
             return [], list(range(len(targets))), list(range(len(groups)))
 
-        group_freqs = np.array([self._group_center_freq_mhz(g, spec_shape) for g in groups], dtype=np.float32)
-        target_freqs = np.array([float(t["center_freq"]) for t in targets], dtype=np.float32)
+        # ---------- configurable weights / thresholds ----------
+        match_freq_thresh = float(getattr(self, "match_freq_thresh", 10.0))
+        match_bw_weight = float(getattr(self.config, "match_bw_weight", 0.2))
+        match_bw_thresh = float(getattr(self.config, "match_bw_thresh", 0.0))   # 0 means disabled
+        match_size_penalty = float(getattr(self.config, "match_size_penalty", 1.0))
+
+        # ---------- group attributes ----------
+        group_freqs = np.array(
+            [self._group_center_freq_mhz(g, spec_shape) for g in groups],
+            dtype=np.float32
+        )
+        group_bws = np.array(
+            [float(g.get("bandwidth", np.nan)) for g in groups],
+            dtype=np.float32
+        )
+        group_sizes = np.array(
+            [max(int(g.get("n_boxes", len(g.get("boxes", [])))), 1) for g in groups],
+            dtype=np.float32
+        )
+
+        # ---------- target attributes ----------
+        target_freqs = np.array(
+            [float(t["center_freq"]) for t in targets],
+            dtype=np.float32
+        )
+        target_bws = np.array(
+            [float(t.get("bandwidth", np.nan)) for t in targets],
+            dtype=np.float32
+        )
 
         valid_group_mask = np.isfinite(group_freqs)
         if not valid_group_mask.any():
             return [], list(range(len(targets))), list(range(len(groups)))
 
-        cost = np.abs(target_freqs[:, None] - group_freqs[None, :])
+        T = len(targets)
+        G = len(groups)
+
+        # cost initialized as +inf => invalid pair by default
+        cost = np.full((T, G), np.inf, dtype=np.float32)
+        freq_err_mat = np.full((T, G), np.inf, dtype=np.float32)
+        bw_err_mat = np.full((T, G), np.nan, dtype=np.float32)
+
+        for ti in range(T):
+            for gi in range(G):
+                if not valid_group_mask[gi]:
+                    continue
+
+                freq_err = abs(float(target_freqs[ti]) - float(group_freqs[gi]))
+                freq_err_mat[ti, gi] = freq_err
+
+                # hard frequency gate
+                if freq_err > match_freq_thresh:
+                    continue
+
+                # optional bandwidth term
+                bw_err = 0.0
+                has_target_bw = np.isfinite(target_bws[ti])
+                has_group_bw = np.isfinite(group_bws[gi])
+
+                if has_target_bw and has_group_bw:
+                    bw_err = abs(float(target_bws[ti]) - float(group_bws[gi]))
+                    bw_err_mat[ti, gi] = bw_err
+
+                    # optional hard bandwidth gate
+                    if match_bw_thresh > 0.0 and bw_err > match_bw_thresh:
+                        continue
+
+                # small penalty for very tiny groups
+                size_penalty = match_size_penalty / float(group_sizes[gi])
+
+                # final cost
+                cost[ti, gi] = freq_err + match_bw_weight * bw_err + size_penalty
 
         matched = []
         used_t = set()
         used_g = set()
 
+        finite_mask = np.isfinite(cost)
+
+        # 没有任何可行匹配
+        if not finite_mask.any():
+            unmatched_targets = list(range(T))
+            unmatched_groups = list(range(G))
+            return matched, unmatched_targets, unmatched_groups
+
         if linear_sum_assignment is not None:
-            row_ind, col_ind = linear_sum_assignment(cost)
-            for ti, gi in zip(row_ind.tolist(), col_ind.tolist()):
-                if not np.isfinite(cost[ti, gi]):
-                    continue
-                if cost[ti, gi] > self.match_freq_thresh:
-                    continue
-                matched.append({
-                    "target_idx": ti,
-                    "group_idx": gi,
-                    "label": int(targets[ti]["label"]),
-                    "class_name": str(targets[ti].get("class_name", "")),
-                    "target_center_freq": float(targets[ti]["center_freq"]),
-                    "group_center_freq": float(group_freqs[gi]),
-                    "freq_error": float(cost[ti, gi]),
-                    "boxes": groups[gi].get("boxes", []),
-                    "group": groups[gi],
-                })
-                used_t.add(ti)
-                used_g.add(gi)
+            valid_target_idx = np.where(finite_mask.any(axis=1))[0]
+            valid_group_idx = np.where(finite_mask.any(axis=0))[0]
+
+            if len(valid_target_idx) > 0 and len(valid_group_idx) > 0:
+                sub_cost = cost[np.ix_(valid_target_idx, valid_group_idx)]
+
+                # 再保险：确保子矩阵每行每列至少有一个有限值
+                row_ok = np.isfinite(sub_cost).any(axis=1)
+                col_ok = np.isfinite(sub_cost).any(axis=0)
+
+                valid_target_idx = valid_target_idx[row_ok]
+                valid_group_idx = valid_group_idx[col_ok]
+
+                if len(valid_target_idx) > 0 and len(valid_group_idx) > 0:
+                    sub_cost = cost[np.ix_(valid_target_idx, valid_group_idx)].copy()
+
+                    BIG = 1e9
+                    sub_cost[~np.isfinite(sub_cost)] = BIG
+
+                    row_ind, col_ind = linear_sum_assignment(sub_cost)
+
+                    for r, c in zip(row_ind.tolist(), col_ind.tolist()):
+                        ti = int(valid_target_idx[r])
+                        gi = int(valid_group_idx[c])
+
+                        if not np.isfinite(cost[ti, gi]):
+                            continue
+
+                        matched.append({
+                            "target_idx": ti,
+                            "group_idx": gi,
+                            "label": int(targets[ti]["label"]),
+                            "class_name": str(targets[ti].get("class_name", "")),
+                            "target_center_freq": float(target_freqs[ti]),
+                            "group_center_freq": float(group_freqs[gi]),
+                            "target_bandwidth": float(target_bws[ti]) if np.isfinite(target_bws[ti]) else None,
+                            "group_bandwidth": float(group_bws[gi]) if np.isfinite(group_bws[gi]) else None,
+                            "freq_error": float(freq_err_mat[ti, gi]),
+                            "bw_error": float(bw_err_mat[ti, gi]) if np.isfinite(bw_err_mat[ti, gi]) else None,
+                            "match_cost": float(cost[ti, gi]),
+                            "boxes": groups[gi].get("boxes", []),
+                            "group": groups[gi],
+                        })
+                        used_t.add(ti)
+                        used_g.add(gi)
         else:
-            # greedy fallback
             pairs = []
-            for ti in range(len(targets)):
-                for gi in range(len(groups)):
+            for ti in range(T):
+                for gi in range(G):
                     if np.isfinite(cost[ti, gi]):
                         pairs.append((float(cost[ti, gi]), ti, gi))
             pairs.sort(key=lambda x: x[0])
+
             for c, ti, gi in pairs:
-                if c > self.match_freq_thresh:
-                    continue
                 if ti in used_t or gi in used_g:
                     continue
                 matched.append({
@@ -338,17 +438,21 @@ class Trainer:
                     "group_idx": gi,
                     "label": int(targets[ti]["label"]),
                     "class_name": str(targets[ti].get("class_name", "")),
-                    "target_center_freq": float(targets[ti]["center_freq"]),
+                    "target_center_freq": float(target_freqs[ti]),
                     "group_center_freq": float(group_freqs[gi]),
-                    "freq_error": float(c),
+                    "target_bandwidth": float(target_bws[ti]) if np.isfinite(target_bws[ti]) else None,
+                    "group_bandwidth": float(group_bws[gi]) if np.isfinite(group_bws[gi]) else None,
+                    "freq_error": float(freq_err_mat[ti, gi]),
+                    "bw_error": float(bw_err_mat[ti, gi]) if np.isfinite(bw_err_mat[ti, gi]) else None,
+                    "match_cost": float(c),
                     "boxes": groups[gi].get("boxes", []),
                     "group": groups[gi],
                 })
                 used_t.add(ti)
                 used_g.add(gi)
 
-        unmatched_targets = [i for i in range(len(targets)) if i not in used_t]
-        unmatched_groups = [i for i in range(len(groups)) if i not in used_g]
+        unmatched_targets = [i for i in range(T) if i not in used_t]
+        unmatched_groups = [i for i in range(G) if i not in used_g]
         return matched, unmatched_targets, unmatched_groups
 
     def _save_detect_result_images(self, spec, yolo_boxes, groups, matched_boxes, fp, sample_idx=0):
@@ -437,6 +541,7 @@ class Trainer:
         if batch.ndim != 3:
             raise ValueError(f"Expected inputs shape [B,H,W] or [B,1,H,W], got {tuple(batch.shape)}")
 
+        image_infos = []
         image_tensors = []
         labels = []
         metas = []
@@ -455,6 +560,14 @@ class Trainer:
             groups = self._extract_groups(yolo_boxes, spec)
             matched, unmatched_targets, unmatched_groups = self._match_groups_to_targets(groups, targets, spec.shape)
             match_total += len(matched)
+            
+            image_infos.append({
+                "image_idx": i,
+                "num_targets": len(targets),
+                "matched_count": len(matched),
+                "unmatched_targets": len(unmatched_targets),
+                "unmatched_groups": len(unmatched_groups),
+            })
                 
             if save_detect_result and saved_count < max_save_images:
                 matched_boxes = []
@@ -480,6 +593,7 @@ class Trainer:
                 labels.append(int(m["label"]))
                 metas.append({
                     "fp": fp,
+                    "image_idx": i,
                     "target_idx": m["target_idx"],
                     "group_idx": m["group_idx"],
                     "freq_error": m["freq_error"],
@@ -487,11 +601,59 @@ class Trainer:
                 })
 
         if len(image_tensors) == 0:
-            return None, None, metas, match_total, target_total
+            return None, None, metas, match_total, target_total, image_infos
 
         images = torch.stack(image_tensors, dim=0)
         labels = torch.as_tensor(labels, dtype=torch.long)
-        return images, labels, metas, match_total, target_total
+        return images, labels, metas, match_total, target_total, image_infos
+    
+    def _compute_image_exact_acc(self, metas, labels, preds, image_infos):
+        """
+        image_exact_acc:
+        一张图只有在
+        1) 所有 targets 都匹配到了
+        2) 所有 matched instances 分类都正确
+        时才算正确
+        """
+        if image_infos is None or len(image_infos) == 0:
+            return 0, 0
+
+        # 每张图 matched 了多少个、其中分类对了多少个
+        matched_total_per_image = {info["image_idx"]: 0 for info in image_infos}
+        matched_correct_per_image = {info["image_idx"]: 0 for info in image_infos}
+
+        if preds is not None and labels is not None and metas is not None:
+            preds_np = preds.detach().cpu().numpy()
+            labels_np = labels.detach().cpu().numpy()
+
+            for meta, p, y in zip(metas, preds_np, labels_np):
+                img_idx = int(meta["image_idx"])
+                matched_total_per_image[img_idx] += 1
+                if int(p) == int(y):
+                    matched_correct_per_image[img_idx] += 1
+
+        image_correct = 0
+        image_total = len(image_infos)
+
+        for info in image_infos:
+            img_idx = int(info["image_idx"])
+            num_targets = int(info["num_targets"])
+            matched_count = int(info["matched_count"])
+            unmatched_targets = int(info["unmatched_targets"])
+
+            # 条件1：所有目标都匹配到了
+            all_targets_matched = (unmatched_targets == 0 and matched_count == num_targets)
+
+            # 条件2：所有 matched instance 都分类正确
+            all_matched_correct = (
+                matched_total_per_image[img_idx] == matched_count
+                and matched_correct_per_image[img_idx] == matched_count
+            )
+
+            if all_targets_matched and all_matched_correct:
+                image_correct += 1
+
+        return image_correct, image_total
 
     # ------------------------- loss / loops -------------------------
     def _forward_loss(self, images, labels):
@@ -510,12 +672,14 @@ class Trainer:
         matched_total = 0
         target_total = 0
         skipped_batches = 0
+        image_correct_total = 0
+        image_total = 0
 
         pbar = tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}", leave=True)
         for batch in pbar:
             inputs, targets_list, snrs, fps = batch
 
-            images, labels, metas, batch_matched, batch_targets = self._build_matched_instances(
+            images, labels, metas, batch_matched, batch_targets, image_infos = self._build_matched_instances(
                 inputs,
                 targets_list,
                 sample_fps=fps,
@@ -542,23 +706,41 @@ class Trainer:
             preds = logits.argmax(dim=1)
             correct += (preds == labels).sum().item()
             total += labels.numel()
+            
+            batch_image_correct, batch_image_total = self._compute_image_exact_acc(
+                metas=metas,
+                labels=labels,
+                preds=preds,
+                image_infos=image_infos,
+            )
+            image_correct_total += batch_image_correct
+            image_total += batch_image_total
 
             loss_meter.update(loss.item(), labels.size(0))
             match_recall = float(matched_total) / max(float(target_total), 1.0)
-            pbar.set_postfix(loss=f"{loss_meter.avg:.4f}", acc=f"{100.0 * correct / max(total,1):.2f}%", match=f"{match_recall:.3f}")
+            image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
+
+            pbar.set_postfix(
+                loss=f"{loss_meter.avg:.4f}",
+                acc=f"{100.0 * correct / max(total,1):.2f}%",
+                match=f"{match_recall:.3f}",
+                img_exact=f"{image_exact_acc:.2f}%"
+            )
 
         self.scheduler.step(epoch + 1)
 
         train_loss = loss_meter.avg if total > 0 else 0.0
         train_acc = 100.0 * correct / max(total, 1)
         train_match_recall = float(matched_total) / max(float(target_total), 1.0)
+        train_image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
 
         if dist.is_initialized():
             train_loss = _reduce_scalar(torch.tensor(train_loss, device=self.device), op="mean").item()
             train_acc = _reduce_scalar(torch.tensor(train_acc, device=self.device), op="mean").item()
             train_match_recall = _reduce_scalar(torch.tensor(train_match_recall, device=self.device), op="mean").item()
+            train_image_exact_acc = _reduce_scalar(torch.tensor(train_image_exact_acc, device=self.device), op="mean").item()
 
-        return train_loss, train_acc, train_match_recall
+        return train_loss, train_acc, train_match_recall, train_image_exact_acc
 
     @torch.no_grad()
     def validate(self, epoch):
@@ -571,6 +753,8 @@ class Trainer:
         target_total = 0
         all_preds = []
         all_targets = []
+        image_correct_total = 0
+        image_total = 0 
 
         pbar = tqdm(self.val_loader, desc=f"Validating Epoch {epoch + 1}", leave=True)
         for batch_idx, batch in enumerate(pbar):
@@ -578,7 +762,7 @@ class Trainer:
 
             need_save_detect_result = self.save_detect_vis_once and (not self._detect_vis_saved) and batch_idx == 0
 
-            images, labels, metas, batch_matched, batch_targets = self._build_matched_instances(
+            images, labels, metas, batch_matched, batch_targets, image_infos = self._build_matched_instances(
                 inputs,
                 targets_list,
                 sample_fps=fps,
@@ -602,17 +786,29 @@ class Trainer:
             preds = logits.argmax(dim=1)
             correct += (preds == labels).sum().item()
             total += labels.numel()
+            
+            batch_image_correct, batch_image_total = self._compute_image_exact_acc(
+                metas=metas,
+                labels=labels,
+                preds=preds,
+                image_infos=image_infos,
+            )
+            image_correct_total += batch_image_correct
+            image_total += batch_image_total
 
             loss_meter.update(loss.item(), labels.size(0))
             all_preds.append(preds.detach().cpu().numpy())
             all_targets.append(labels.detach().cpu().numpy())
 
             match_recall = float(matched_total) / max(float(target_total), 1.0)
-            pbar.set_postfix(loss=f"{loss_meter.avg:.4f}", acc=f"{100.0 * correct / max(total,1):.2f}%", match=f"{match_recall:.3f}")
+            image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
 
-        val_loss = loss_meter.avg if total > 0 else 0.0
-        val_acc = 100.0 * correct / max(total, 1)
-        val_match_recall = float(matched_total) / max(float(target_total), 1.0)
+            pbar.set_postfix(
+                loss=f"{loss_meter.avg:.4f}",
+                acc=f"{100.0 * correct / max(total,1):.2f}%",
+                match=f"{match_recall:.3f}",
+                img_exact=f"{image_exact_acc:.2f}%"
+            )
 
         if len(all_preds) > 0:
             all_preds = np.concatenate(all_preds, axis=0)
@@ -621,15 +817,21 @@ class Trainer:
             all_preds = np.array([], dtype=np.int64)
             all_targets = np.array([], dtype=np.int64)
 
+        val_loss = loss_meter.avg if total > 0 else 0.0
+        val_acc = 100.0 * correct / max(total, 1)
+        val_match_recall = float(matched_total) / max(float(target_total), 1.0)
+        val_image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
+
         if dist.is_initialized():
             val_loss = _reduce_scalar(torch.tensor(val_loss, device=self.device), op="mean").item()
             val_acc = _reduce_scalar(torch.tensor(val_acc, device=self.device), op="mean").item()
             val_match_recall = _reduce_scalar(torch.tensor(val_match_recall, device=self.device), op="mean").item()
+            val_image_exact_acc = _reduce_scalar(torch.tensor(val_image_exact_acc, device=self.device), op="mean").item()
 
         if (not dist.is_initialized()) or dist.get_rank() == 0:
             self._save_confusion_matrix(all_targets, all_preds, epoch)
 
-        return val_loss, val_acc, val_match_recall
+        return val_loss, val_acc, val_match_recall, val_image_exact_acc
 
     def _save_confusion_matrix(self, y_true, y_pred, epoch):
         if len(y_true) == 0:
@@ -656,14 +858,15 @@ class Trainer:
     def train(self):
         best_acc = -1.0
         for epoch in range(int(self.config.epochs)):
-            train_loss, train_acc, train_match_recall = self.train_one_epoch(epoch)
-            val_loss, val_acc, val_match_recall = self.validate(epoch)
+
+            train_loss, train_acc, train_match_recall, train_image_exact_acc = self.train_one_epoch(epoch)
+            val_loss, val_acc, val_match_recall, val_image_exact_acc = self.validate(epoch)
 
             if (not dist.is_initialized()) or dist.get_rank() == 0:
                 self.logger.info(
                     f"[Epoch {epoch + 1}/{self.config.epochs}] "
-                    f"train_loss={train_loss:.4f}, train_acc={train_acc:.2f}, train_match={train_match_recall:.3f}, "
-                    f"val_loss={val_loss:.4f}, val_acc={val_acc:.2f}, val_match={val_match_recall:.3f}"
+                    f"train_loss={train_loss:.4f}, train_acc={train_acc:.2f}, train_match={train_match_recall:.3f}, train_img_exact={train_image_exact_acc:.2f}, "
+                    f"val_loss={val_loss:.4f}, val_acc={val_acc:.2f}, val_match={val_match_recall:.3f}, val_img_exact={val_image_exact_acc:.2f}"
                 )
 
                 if self.writer is not None:
@@ -673,6 +876,8 @@ class Trainer:
                     self.writer.add_scalar("val/loss", val_loss, epoch + 1)
                     self.writer.add_scalar("val/acc", val_acc, epoch + 1)
                     self.writer.add_scalar("val/match_recall", val_match_recall, epoch + 1)
+                    self.writer.add_scalar("train/image_exact_acc", train_image_exact_acc, epoch + 1)
+                    self.writer.add_scalar("val/image_exact_acc", val_image_exact_acc, epoch + 1)
 
                 is_best = val_acc > best_acc
                 if is_best:

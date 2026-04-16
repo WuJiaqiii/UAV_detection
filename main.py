@@ -5,29 +5,18 @@ import logging
 import torch.distributed
 
 from data.data_loader import UAVDataset, get_dataloader
-
 from model.resnet import MaskImageClassifier
-
 from util.trainer import Trainer
-
 from util.preprocess import SignalPreprocessor
 from util.detector import YoloV5Detector
-
 from util.checkpoint import load_checkpoint
 from util.utils import create_logger, set_seed
 from util.config import Config
 
-# if (not torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0:
-#     torch.autograd.set_detect_anomaly(True)
-#     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", message=r".*find_unused_parameters=True was specified in DDP constructor.*", category=UserWarning)
-
 def get_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="STFT spectrogram -> (Yolov5 detection + preprocessing) -> Transformer classification training"
+        description="Multi-signal training: STFT spectrogram -> YOLO detection -> preprocess groups -> matched-group CNN classification"
     )
     
     # Runtime
@@ -68,7 +57,7 @@ def get_parser():
     g_pre.add_argument("--ring_margin", type=int, default=5)
     g_pre.add_argument("--min_contrast_z", type=float, default=0.5)
     # dbscan
-    g_pre.add_argument("--freq_eps", type=float, default=20.0)
+    g_pre.add_argument("--freq_eps", type=float, default=5.0)
     g_pre.add_argument("--freq_min_samples", type=int, default=1)
     # merge
     g_pre.add_argument("--merge_freq_thresh", type=float, default=10.0)
@@ -77,22 +66,25 @@ def get_parser():
     g_pre.add_argument("--merge_energy_thresh", type=float, default=1.0)
     # group filter
     g_pre.add_argument("--min_group_len", type=int, default=2)
-    g_pre.add_argument("--min_group_time_span_ratio", type=float, default=0.10)
+    g_pre.add_argument("--min_group_time_span_ratio", type=float, default=0.50)
 
-    g_pre.add_argument("--score_n_boxes_weight", type=float, default=0.80)
+    g_pre.add_argument("--score_n_boxes_weight", type=float, default=0.10)
     g_pre.add_argument("--score_time_span_weight", type=float, default=2.00)
-    g_pre.add_argument("--score_contrast_weight", type=float, default=0.60)
-    g_pre.add_argument("--score_w_std_weight", type=float, default=0.10)
-    g_pre.add_argument("--score_h_std_weight", type=float, default=0.50)
-    g_pre.add_argument("--score_contrast_std_weight", type=float, default=0.25)
+    g_pre.add_argument("--score_contrast_weight", type=float, default=1.0)
+    g_pre.add_argument("--score_w_std_weight", type=float, default=1.0)
+    g_pre.add_argument("--score_h_std_weight", type=float, default=10.0)
+    g_pre.add_argument("--score_contrast_std_weight", type=float, default=3.0)
+    
     # nms
     g_pre.add_argument("--nms_thresh", type=float, default=0.2)
     
     g_match = parser.add_argument_group("Target Matching")
-    g_match.add_argument("--match_freq_thresh", type=float, default=15.0)
+    g_match.add_argument("--match_freq_thresh", type=float, default=30.0)
+    g_match.add_argument("--match_bw_thresh", type=float, default=20.0)
+    g_match.add_argument("--match_bw_weight", type=float, default=1.0)
+    g_match.add_argument("--match_size_penalty", type=float, default=1.0)
     g_match.add_argument("--skip_unmatched", action=argparse.BooleanOptionalAction, default=True)
     g_match.add_argument("--match_use_bandwidth", action=argparse.BooleanOptionalAction, default=False)
-    g_match.add_argument("--match_bandwidth_weight", type=float, default=0.2)
 
     # Dataset / DataLoader
     g_data = parser.add_argument_group("Data")
@@ -133,7 +125,6 @@ def get_parser():
     g_io.add_argument("--save_interval", type=int, default=5)
     g_io.add_argument("--bbox_cache_mode", type=str, default="readwrite")
     g_io.add_argument("--bbox_cache_path", type=str, default=None)
-    g_io.add_argument("--precompute_boxes", action=argparse.BooleanOptionalAction, default=False)
     
     g_vis = parser.add_argument_group("Visualization")
     g_vis.add_argument("--save_detect_vis_once", action=argparse.BooleanOptionalAction, default=True)
@@ -210,25 +201,8 @@ def main(args):
         yolo_device = ""
         
     detector = YoloV5Detector(config, yolo_device)
-    
-    preprocessor = SignalPreprocessor(
-        sampling_rate=config.sampling_rate,
-        n_fft=config.n_fft,
-        hop_length=config.hop_length,
-        min_area=config.pre_min_area,
-        min_ratio=config.pre_min_ratio,
-        freq_eps=config.pre_freq_eps,
-        freq_min_samples=config.pre_freq_min_samples,
-        nms_iou_thresh=config.pre_nms_iou_thresh,
-    )
-    preprocessor = SignalPreprocessor(config)
-    
+    preprocessor = SignalPreprocessor(config, logger)   
     trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier)
-    
-    if config.precompute_boxes:
-        trainer.precompute_boxes(train_loader)
-        trainer.precompute_boxes(val_loader)
-        return
 
     trainer.train()
 

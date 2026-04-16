@@ -189,7 +189,7 @@ class SignalPreprocessor:
     # ------------------------------------------------------------------
     # cluster/group construction
     # ------------------------------------------------------------------
-    def _cluster_boxes_by_frequency(self, boxes):
+    def _cluster_boxes_by_frequency(self, boxes, img_h):
         
         if boxes is None or len(boxes) == 0:
             return []
@@ -197,11 +197,11 @@ class SignalPreprocessor:
         if boxes.shape[0] == 1:
             return [np.array([0], dtype=np.int32)]
 
-        freq_center = ((boxes[:, 1] + boxes[:, 3]) / 2.0).reshape(-1, 1)
-        labels = DBSCAN(eps=float(self.config.freq_eps), min_samples=int(self.config.freq_min_samples)).fit_predict(freq_center)
+        freq_centers = np.array([self._pixel_y_to_freq_mhz((b[1] + b[3]) / 2.0, img_h) for b in boxes], dtype=np.float32).reshape(-1, 1)
+        labels = DBSCAN(eps=float(self.config.freq_eps), min_samples=int(self.config.freq_min_samples)).fit_predict(freq_centers)
 
         if np.all(labels < 0):
-            return [np.arange(boxes.shape[0], dtype=np.int32)]
+            return [np.array([i], dtype=np.int32) for i in range(boxes.shape[0])]
 
         clusters = []
         for lbl in sorted(set(labels.tolist())):
@@ -277,7 +277,7 @@ class SignalPreprocessor:
         
         self.logger.debug(f"num of boxes:{float(n)}, time_span_ratio: {time_span_ratio}, mean_contrast: {mean_contrast},"
                           f"std_contrast: {std_contrast}, std_log_w: {std_log_w}, std_log_h: {std_log_h}")
-
+        
         return {
             "boxes": boxes.astype(np.int32, copy=False),
             "stats": stats,
@@ -366,6 +366,9 @@ class SignalPreprocessor:
               ...
             ]
         """
+        
+        H, W = spectrogram.shape
+        
         if det_boxes is None or len(det_boxes) == 0:
             return []
         
@@ -396,7 +399,7 @@ class SignalPreprocessor:
             return [g] if self._group_passes_thresholds(g) else []
 
         # cluster by frequency
-        clusters = self._cluster_boxes_by_frequency(boxes)
+        clusters = self._cluster_boxes_by_frequency(boxes, H)
         raw_groups = []
         for idx in clusters:
             c_boxes = boxes[idx]
