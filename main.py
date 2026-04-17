@@ -16,6 +16,9 @@ from util.detector import YoloV5Detector
 from util.checkpoint import load_checkpoint
 from util.utils import create_logger, set_seed
 from util.config import Config
+from copy import deepcopy
+from torch.utils.data import DataLoader
+from data.data_loader import UAVDataset
 
 if (not torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0:
     torch.autograd.set_detect_anomaly(True)
@@ -157,7 +160,7 @@ def get_parser():
         help="Optional path to resume training or load pretrained transformer weights."
     )
     g_exp.add_argument(
-        "--bbox_cache_mode", type=str, default='readwrite',
+        "--bbox_cache_mode", type=str, default='refresh',
         help="off / read / write / readwrite / refresh"
     )
     g_exp.add_argument(
@@ -206,6 +209,9 @@ def get_parser():
     g_model.add_argument("--freeze_backbone", action=argparse.BooleanOptionalAction, default=False)
     g_model.add_argument("--cnn_dropout", type=float, default=0.0)
 
+    parser.add_argument("--extra_val_mat_path", type=str, default=None,
+                    help="额外验证集的 mat 文件目录；每个 epoch 结束后单独评估")
+
     g_model.add_argument(
         "--cnn_input_mode",
         type=str,
@@ -227,7 +233,7 @@ def get_parser():
     )
 
     g_vis = parser.add_argument_group("Visualization")
-    g_vis.add_argument("--save_detect_vis_once", action=argparse.BooleanOptionalAction, default=True)
+    g_vis.add_argument("--save_detect_vis_once", action=argparse.BooleanOptionalAction, default=False)
     g_vis.add_argument("--detect_vis_num_samples", type=int, default=10000)
     
     # Misc
@@ -269,7 +275,7 @@ def main(args):
     config.num_classes = len(config.classes)
 
     if rank == 0:
-        config.freeze()
+        # config.freeze()
         config.make_dir()
         config.save_config()
         logger = create_logger(os.path.join(config.log_dir, "train_log.log"))
@@ -282,6 +288,21 @@ def main(args):
     ## dataset 
     dataset = UAVDataset(config, logger)
     train_loader, val_loader = get_dataloader(dataset, config)
+
+    extra_val_loader = None
+    if args.extra_val_mat_path is not None:
+        extra_cfg = deepcopy(config)
+        extra_cfg.dataset_path = args.extra_val_mat_path
+        extra_dataset = UAVDataset(extra_cfg, logger)
+
+    extra_val_loader = DataLoader(
+        extra_dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
 
     ## model
     classifier = MaskImageClassifier(
@@ -324,7 +345,7 @@ def main(args):
         nms_iou_thresh=config.pre_nms_iou_thresh,
     )
     
-    trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier)
+    trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier, extra_val_loader=extra_val_loader)
     
     if config.precompute_boxes:
         trainer.precompute_boxes(train_loader)
