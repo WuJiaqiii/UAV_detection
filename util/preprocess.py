@@ -190,15 +190,33 @@ class SignalPreprocessor:
     # cluster/group construction
     # ------------------------------------------------------------------
     def _cluster_boxes_by_frequency(self, boxes, img_h):
-        
         if boxes is None or len(boxes) == 0:
             return []
+
         boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
         if boxes.shape[0] == 1:
             return [np.array([0], dtype=np.int32)]
 
-        freq_centers = np.array([self._pixel_y_to_freq_mhz((b[1] + b[3]) / 2.0, img_h) for b in boxes], dtype=np.float32).reshape(-1, 1)
-        labels = DBSCAN(eps=float(self.config.freq_eps), min_samples=int(self.config.freq_min_samples)).fit_predict(freq_centers)
+        freq_centers = np.array(
+            [self._pixel_y_to_freq_mhz((b[1] + b[3]) / 2.0, img_h) for b in boxes],
+            dtype=np.float32
+        )
+        bandwidths = np.array(
+            [self._pixel_bandwidth_to_mhz((b[3] - b[1]), img_h) for b in boxes],
+            dtype=np.float32
+        )
+
+        bw_weight = float(getattr(self.config, "freq_bw_weight", 1.0))
+
+        features = np.stack(
+            [freq_centers, bandwidths * bw_weight],
+            axis=1
+        )
+
+        labels = DBSCAN(
+            eps=float(self.config.freq_eps),
+            min_samples=int(self.config.freq_min_samples)
+        ).fit_predict(features)
 
         if np.all(labels < 0):
             return [np.array([i], dtype=np.int32) for i in range(boxes.shape[0])]
@@ -275,8 +293,8 @@ class SignalPreprocessor:
             - float(self.config.score_h_std_weight) * std_log_h
         )
         
-        self.logger.debug(f"num of boxes:{float(n)}, time_span_ratio: {time_span_ratio}, mean_contrast: {mean_contrast},"
-                          f"std_contrast: {std_contrast}, std_log_w: {std_log_w}, std_log_h: {std_log_h}")
+        # self.logger.debug(f"num of boxes:{float(n)}, time_span_ratio: {time_span_ratio}, mean_contrast: {mean_contrast},"
+        #                   f"std_contrast: {std_contrast}, std_log_w: {std_log_w}, std_log_h: {std_log_h}")
         
         return {
             "boxes": boxes.astype(np.int32, copy=False),
@@ -302,8 +320,8 @@ class SignalPreprocessor:
             return False
         if abs(g1["center_freq"] - g2["center_freq"]) > float(self.config.merge_freq_thresh):
             return False
-        if abs(np.log((g1["mean_w"] + 1e-6) / (g2["mean_w"] + 1e-6))) > float(self.config.merge_w_log_thresh):
-            return False
+        # if abs(np.log((g1["mean_w"] + 1e-6) / (g2["mean_w"] + 1e-6))) > float(self.config.merge_w_log_thresh):
+        #     return False
         if abs(np.log((g1["mean_h"] + 1e-6) / (g2["mean_h"] + 1e-6))) > float(self.config.merge_h_log_thresh):
             return False
         if abs(g1["mean_contrast_z"] - g2["mean_contrast_z"]) > float(self.config.merge_energy_thresh):

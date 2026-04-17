@@ -7,7 +7,7 @@ class BBoxCache:
         self,
         base_dir: str,
         dataset_root: str | None = None,
-        mode: str = "readwrite",
+        mode: str = "refresh",
         mem_max: int = 0,
         logger=None,
     ):

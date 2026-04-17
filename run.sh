@@ -1,8 +1,8 @@
 #!/bin/bash
 python main.py \
-  --dataset_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/generate_mix/generate_mix_awgn_space/train/3 \
+  --dataset_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/signals_no_overlap/signals_no_overlap_awgn_space/train/3 \
   --epochs 300 \
-  --batch_size 512 \
+  --batch_size 256 \
   --lr 1e-4 \
   --yolo_weights /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/best.pt \
   --bbox_cache_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/cache \

@@ -341,9 +341,9 @@ class Trainer:
                 freq_err = abs(float(target_freqs[ti]) - float(group_freqs[gi]))
                 freq_err_mat[ti, gi] = freq_err
 
-                # hard frequency gate
-                if freq_err > match_freq_thresh:
-                    continue
+                # # hard frequency gate
+                # if freq_err > match_freq_thresh:
+                #     continue
 
                 # optional bandwidth term
                 bw_err = 0.0
@@ -354,9 +354,9 @@ class Trainer:
                     bw_err = abs(float(target_bws[ti]) - float(group_bws[gi]))
                     bw_err_mat[ti, gi] = bw_err
 
-                    # optional hard bandwidth gate
-                    if match_bw_thresh > 0.0 and bw_err > match_bw_thresh:
-                        continue
+                    # # optional hard bandwidth gate
+                    # if match_bw_thresh > 0.0 and bw_err > match_bw_thresh:
+                    #     continue
 
                 # small penalty for very tiny groups
                 size_penalty = match_size_penalty / float(group_sizes[gi])
