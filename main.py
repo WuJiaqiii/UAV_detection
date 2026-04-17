@@ -23,6 +23,7 @@ def get_parser():
     g_run = parser.add_argument_group("Runtime")
     g_run.add_argument("--use_data_parallel", action=argparse.BooleanOptionalAction, default=False)
     g_run.add_argument("--use_amp_autocast", action=argparse.BooleanOptionalAction, default=False)
+    g_run.add_argument("--run_mode", type=str, default="train", choices=["train", "infer"])
     
     # Spectrogram -> Physical mapping
     g_stft = parser.add_argument_group("STFT / Frequency Mapping")
@@ -171,6 +172,12 @@ def main(args):
     ## dataset 
     dataset = UAVDataset(config, logger)
     train_loader, val_loader = get_dataloader(dataset, config)
+    
+    if config.run_mode == "train":
+        train_loader, val_loader = get_dataloader(dataset, config, mode="train")
+    else:
+        infer_loader = get_dataloader(dataset, config, mode="infer")
+        train_loader, val_loader = None, None
 
     ## model
     classifier = MaskImageClassifier(
@@ -204,7 +211,10 @@ def main(args):
     preprocessor = SignalPreprocessor(config, logger)   
     trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier)
 
-    trainer.train()
+    if config.run_mode == "train":
+        trainer.train()
+    else:
+        trainer.infer(infer_loader)
 
 
 if __name__ == "__main__":

@@ -240,10 +240,12 @@ def create_dataloader(dataset: Dataset, config, shuffle: bool):
         collate_fn=multi_signal_collate_fn,
     )
 
-def get_dataloader(dataset, config):
-    
-    idxs = np.arange(len(dataset))
+def get_dataloader(dataset, config, mode="train"):
+    if mode == "infer":
+        infer_loader = create_dataloader(dataset, config, shuffle=False)
+        return infer_loader
 
+    idxs = np.arange(len(dataset))
     train_idx, val_idx = train_test_split(
         idxs,
         test_size=config.val_ratio,
