@@ -18,34 +18,46 @@ except ImportError:
 
 class UAVDataset(Dataset):
     """
-    Dataloader for multi-UAV .mat or .png signal data
+    Unified dataloader for single-signal training and multi-signal inference.
 
-    Data name example:
-        FPV1-[0,-0.1,1000,17]-Ocusync21-[0,65.3,1000,18]-Ocusync41-[0,-5.5,1000,38]-SNR-6-SNRSPACE17-Figure-1.mat
+    Returns unified sample format:
+        x, targets, snr, fp
+
+    where targets is always a list[dict].
     """
 
     _SIGNAL_RE = re.compile(r'(?P<protocol>[A-Za-z0-9_]+)-\[(?P<bracket>[^\]]+)\]')
     _SNR_RE = re.compile(r'-SNR-(?P<snr>[-+]?\d+(?:\.\d+)?)')
 
     def __init__(self, config, logger, validate_on_init: bool = False):
-        
         self.config = config
         self.logger = logger
         self.input_type = str(config.input_type).lower()
-        
         self.exclude_set = set(getattr(config, "exclude_classes", []) or [])
+        self.run_mode = str(getattr(config, "run_mode", "train")).lower()
+        self.train_signal_mode = str(getattr(config, "train_signal_mode", "single")).lower()
 
-        if not config.dataset_path or not os.path.isdir(config.dataset_path):
-            raise ValueError(f"config.dataset_path must be an existing directory, got: {config.dataset_path}")
+        if not getattr(config, "dataset_path", None):
+            raise ValueError("config.dataset_path must not be empty")
         if self.input_type not in {"mat", "png"}:
             raise ValueError(f"Unsupported input_type={self.input_type}, expected 'mat' or 'png'")
 
         self.mod2label = {str(k): int(v) for k, v in getattr(config, "classes", {}).items()}
 
-        pattern = "*." + self.input_type
-        data_files = sorted(glob.glob(os.path.join(config.dataset_path, pattern)))
+        dataset_path = str(config.dataset_path)
+        if os.path.isfile(dataset_path):
+            ext = os.path.splitext(dataset_path)[1].lower().lstrip('.')
+            if ext != self.input_type:
+                raise ValueError(f"dataset_path file type {ext} does not match input_type={self.input_type}")
+            data_files = [dataset_path]
+        elif os.path.isdir(dataset_path):
+            pattern = "*." + self.input_type
+            data_files = sorted(glob.glob(os.path.join(dataset_path, pattern)))
+        else:
+            raise ValueError(f"config.dataset_path must be an existing file or directory, got: {dataset_path}")
+
         if not data_files:
-            raise FileNotFoundError(f"No {pattern} files found under: {config.dataset_path}")
+            raise FileNotFoundError(f"No *.{self.input_type} files found under: {dataset_path}")
 
         self.samples: List[Dict[str, Any]] = []
         bad = 0
@@ -68,15 +80,13 @@ class UAVDataset(Dataset):
                     snr = float("nan")
 
             prefix = base.split("-SNR-")[0]
-
             matches = list(self._SIGNAL_RE.finditer(prefix))
             if not matches:
                 skip("no signal blocks parsed from filename", fname)
                 continue
-            
+
             all_protocols = [m.group("protocol").strip() for m in matches]
             if self.exclude_set and any(p in self.exclude_set for p in all_protocols):
-                # logger.info(f"[Skip] contains excluded classes: {fname}")
                 bad += 1
                 continue
 
@@ -113,6 +123,13 @@ class UAVDataset(Dataset):
                 skip("all targets invalid or filtered out", fname)
                 continue
 
+            # Minimal-change single-signal training policy:
+            # keep unified dataloader format, but skip samples with multi-target annotations.
+            if self.run_mode == "train" and self.train_signal_mode == "single":
+                if len(targets) != 1:
+                    skip(f"single-signal train requires exactly 1 target, got {len(targets)}", fname)
+                    continue
+
             if validate_on_init:
                 try:
                     _ = self._load_x(fp)
@@ -132,8 +149,8 @@ class UAVDataset(Dataset):
         if not self.samples:
             raise RuntimeError(f"All files were skipped. bad={bad}, total={len(data_files)}")
 
-        logger.info(f"Indexed {len(self.samples)} samples from {config.dataset_path} (skipped {bad})")
-        logger.info(f"Dataset input_type={self.input_type}, validate_on_init={validate_on_init}")
+        logger.info(f"Indexed {len(self.samples)} samples from {dataset_path} (skipped {bad})")
+        logger.info(f"Dataset input_type={self.input_type}, validate_on_init={validate_on_init}, run_mode={self.run_mode}, train_signal_mode={self.train_signal_mode}")
 
     def _load_x(self, fp: str) -> torch.Tensor:
         if self.input_type == "png":
@@ -141,23 +158,23 @@ class UAVDataset(Dataset):
             if x is None:
                 raise RuntimeError(f"Failed to read png: {fp}")
             x = np.ascontiguousarray(x)
-            return torch.from_numpy(x)  # uint8, (H, W)
+            return torch.from_numpy(x)
 
-        # mat mode
         if loadmat is None:
             raise ImportError("scipy is required for mat mode. Please install scipy.")
 
-        mat = loadmat(fp, variable_names=[self.config.mat_key])
-        if self.config.mat_key not in mat:
-            raise KeyError(f"key '{self.config.mat_key}' not found in mat")
+        mat_key = getattr(self.config, "mat_key", "summed_submatrices")
+        mat = loadmat(fp, variable_names=[mat_key])
+        if mat_key not in mat:
+            raise KeyError(f"key '{mat_key}' not found in mat")
 
-        x = np.asarray(mat[self.config.mat_key])
+        x = np.asarray(mat[mat_key])
         if x.ndim != 2:
             raise ValueError(f"data dim != 2, got shape {x.shape}")
 
         x = np.asarray(x, dtype=np.float32)
         x = np.ascontiguousarray(x)
-        return torch.from_numpy(x)  # float32, (H, W)
+        return torch.from_numpy(x)
 
     def __len__(self):
         return len(self.samples)
@@ -212,6 +229,7 @@ def build_ddp_sampler(dataset, shuffle: bool, sample_ratio: float, seed: int = 4
     )
     return subset, sampler
 
+
 def multi_signal_collate_fn(batch: List[Tuple[torch.Tensor, List[Dict[str, Any]], float, str]]):
     xs, targets_list, snrs, fps = zip(*batch)
     xs = torch.stack(xs, dim=0)
@@ -240,10 +258,34 @@ def create_dataloader(dataset: Dataset, config, shuffle: bool):
         collate_fn=multi_signal_collate_fn,
     )
 
+
+def create_infer_dataloader(dataset: Dataset, config):
+    sampler = None
+    if dist.is_initialized():
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=False,
+            drop_last=False,
+        )
+
+    return DataLoader(
+        dataset,
+        batch_size=config.batch_size,
+        sampler=sampler,
+        shuffle=False,
+        num_workers=config.num_workers,
+        pin_memory=True,
+        drop_last=False,
+        collate_fn=multi_signal_collate_fn,
+    )
+
+
 def get_dataloader(dataset, config, mode="train"):
+    mode = str(mode).lower()
     if mode == "infer":
-        infer_loader = create_dataloader(dataset, config, shuffle=False)
-        return infer_loader
+        return create_infer_dataloader(dataset, config)
 
     idxs = np.arange(len(dataset))
     train_idx, val_idx = train_test_split(
@@ -258,5 +300,4 @@ def get_dataloader(dataset, config, mode="train"):
 
     train_loader = create_dataloader(train_dataset, config, shuffle=True)
     val_loader = create_dataloader(val_dataset, config, shuffle=False)
-
     return train_loader, val_loader
