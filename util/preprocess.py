@@ -14,8 +14,8 @@ class SignalPreprocessor:
 
     Main pipeline:
       1) basic geometry filtering
-      2) local energy filtering (with fallback to geometry-only boxes)
-      3) DBSCAN on frequency centers (pixel y center)
+      2) pooled-ring energy filtering (with fallback to geometry-only boxes)
+      3) DBSCAN on frequency center + bandwidth
       4) merge nearby clusters with similar shape/energy style
       5) lightweight NMS inside each group
       6) compute group statistics and quality scores
@@ -99,7 +99,99 @@ class SignalPreprocessor:
 
         return boxes[mask].astype(np.int32, copy=False)
 
-    def _box_energy_stats(self, box, spectrogram):
+    # ------------------------------------------------------------------
+    # pooled-ring background / energy filtering
+    # ------------------------------------------------------------------
+    def _build_all_boxes_mask(self, boxes, shape):
+        H, W = shape
+        mask = np.zeros((H, W), dtype=bool)
+        if boxes is None or len(boxes) == 0:
+            return mask
+
+        boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+        for box in boxes:
+            x1, y1, x2, y2 = [int(v) for v in box]
+            x1 = max(0, min(x1, W - 1))
+            x2 = max(0, min(x2, W))
+            y1 = max(0, min(y1, H - 1))
+            y2 = max(0, min(y2, H))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            mask[y1:y2, x1:x2] = True
+        return mask
+
+    def _collect_pooled_ring_background(self, boxes, spectrogram):
+        """
+        Build one pooled background from ALL box ring regions.
+
+        Important:
+          - use ring region around each box
+          - exclude the current box interior
+          - exclude ALL detected box interiors from the pooled ring
+        """
+        if spectrogram is None or boxes is None or len(boxes) == 0:
+            return None
+
+        H, W = spectrogram.shape
+        boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+        all_boxes_mask = self._build_all_boxes_mask(boxes, (H, W))
+
+        m = int(self.config.ring_margin)
+        pooled_vals = []
+
+        for box in boxes:
+            x1, y1, x2, y2 = [int(v) for v in box]
+            x1 = max(0, min(x1, W - 1))
+            x2 = max(0, min(x2, W))
+            y1 = max(0, min(y1, H - 1))
+            y2 = max(0, min(y2, H))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            rx1 = max(0, x1 - m)
+            ry1 = max(0, y1 - m)
+            rx2 = min(W, x2 + m)
+            ry2 = min(H, y2 + m)
+
+            ring = np.asarray(spectrogram[ry1:ry2, rx1:rx2], dtype=np.float32)
+            if ring.size == 0:
+                continue
+
+            ring_mask = np.ones_like(ring, dtype=bool)
+
+            # exclude current box interior
+            ring_mask[(y1 - ry1):(y2 - ry1), (x1 - rx1):(x2 - rx1)] = False
+
+            # exclude ALL box interiors
+            ring_mask &= (~all_boxes_mask[ry1:ry2, rx1:rx2])
+
+            vals = ring[ring_mask]
+            if vals.size > 0:
+                pooled_vals.append(vals.reshape(-1))
+
+        if len(pooled_vals) == 0:
+            return None
+
+        pooled_bg = np.concatenate(pooled_vals, axis=0).astype(np.float32, copy=False)
+        if pooled_bg.size == 0:
+            return None
+
+        bg_mean = float(np.mean(pooled_bg))
+        bg_std = float(np.std(pooled_bg)) + 1e-6
+
+        return {
+            "bg_values": pooled_bg,
+            "bg_mean": bg_mean,
+            "bg_std": bg_std,
+        }
+
+    def _box_energy_stats(self, box, spectrogram, pooled_bg=None):
+        """
+        Updated energy stats:
+          - region mean/max/area still from the box itself
+          - background is NO LONGER taken from local ring
+          - background is taken from pooled ring statistics over ALL boxes
+        """
         if spectrogram is None:
             return None
 
@@ -121,22 +213,14 @@ class SignalPreprocessor:
         max_val = float(np.max(region))
         area = float(region.size)
 
-        m = int(self.config.ring_margin)
-        rx1 = max(0, x1 - m)
-        ry1 = max(0, y1 - m)
-        rx2 = min(W, x2 + m)
-        ry2 = min(H, y2 + m)
-        ring = np.asarray(spectrogram[ry1:ry2, rx1:rx2], dtype=np.float32)
-        ring_mask = np.ones_like(ring, dtype=bool)
-        ring_mask[(y1 - ry1):(y2 - ry1), (x1 - rx1):(x2 - rx1)] = False
-        bg = ring[ring_mask]
-
-        if bg.size == 0:
-            bg_mean = 0.0
-            bg_std = 1.0
+        if pooled_bg is None:
+            # conservative fallback: use robust full-image stats
+            whole = np.asarray(spectrogram, dtype=np.float32)
+            bg_mean = float(np.mean(whole))
+            bg_std = float(np.std(whole)) + 1e-6
         else:
-            bg_mean = float(np.mean(bg))
-            bg_std = float(np.std(bg)) + 1e-6
+            bg_mean = float(pooled_bg["bg_mean"])
+            bg_std = float(pooled_bg["bg_std"])
 
         contrast_z = (mean_val - bg_mean) / bg_std
 
@@ -150,17 +234,22 @@ class SignalPreprocessor:
         }
 
     def _filter_boxes_by_energy(self, boxes, spectrogram):
-        
         if boxes is None or len(boxes) == 0:
             return np.zeros((0, 4), dtype=np.int32), []
         if spectrogram is None:
             boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
             return boxes, [None] * len(boxes)
 
+        boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+
+        pooled_bg = self._collect_pooled_ring_background(boxes, spectrogram)
+        if pooled_bg is None:
+            self.logger.warning("[Preprocess] pooled ring background is empty, fallback to full-image background stats.")
+
         kept_boxes = []
         kept_stats = []
         for box in boxes:
-            st = self._box_energy_stats(box, spectrogram)
+            st = self._box_energy_stats(box, spectrogram, pooled_bg=pooled_bg)
             if st is None:
                 continue
             if st["contrast_z"] < float(self.config.min_contrast_z):
@@ -237,7 +326,6 @@ class SignalPreprocessor:
         return clusters
 
     def _build_group_stats(self, boxes, stats, spectrogram_shape):
-        
         H, W = spectrogram_shape[:2]
         boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
         n = boxes.shape[0]
@@ -292,10 +380,7 @@ class SignalPreprocessor:
             - float(self.config.score_w_std_weight) * std_log_w
             - float(self.config.score_h_std_weight) * std_log_h
         )
-        
-        # self.logger.debug(f"num of boxes:{float(n)}, time_span_ratio: {time_span_ratio}, mean_contrast: {mean_contrast},"
-        #                   f"std_contrast: {std_contrast}, std_log_w: {std_log_w}, std_log_h: {std_log_h}")
-        
+
         return {
             "boxes": boxes.astype(np.int32, copy=False),
             "stats": stats,
@@ -320,14 +405,13 @@ class SignalPreprocessor:
             return False
         if abs(g1["center_freq"] - g2["center_freq"]) > float(self.config.merge_freq_thresh):
             return False
-        # if abs(np.log((g1["mean_w"] + 1e-6) / (g2["mean_w"] + 1e-6))) > float(self.config.merge_w_log_thresh):
-        #     return False
+        # width consistency deliberately relaxed
         if abs(np.log((g1["mean_h"] + 1e-6) / (g2["mean_h"] + 1e-6))) > float(self.config.merge_h_log_thresh):
             return False
         if abs(g1["mean_contrast_z"] - g2["mean_contrast_z"]) > float(self.config.merge_energy_thresh):
             return False
         return True
-    
+
     def _merge_groups(self, groups, spectrogram_shape):
         if not groups:
             return []
@@ -362,7 +446,7 @@ class SignalPreprocessor:
         if g["time_span_ratio"] < float(self.config.min_group_time_span_ratio):
             return False
         return True
-    
+
     # ------------------------------------------------------------------
     # public API
     # ------------------------------------------------------------------
@@ -384,18 +468,17 @@ class SignalPreprocessor:
               ...
             ]
         """
-        
         H, W = spectrogram.shape
-        
+
         if det_boxes is None or len(det_boxes) == 0:
             return []
-        
+
         # basic shape filter
         boxes = self._basic_filter(det_boxes)
         if boxes.size == 0:
             return []
 
-        # energy filter if have spectrogram
+        # pooled-ring energy filter
         if spectrogram is not None:
             e_boxes, e_stats = self._filter_boxes_by_energy(boxes, spectrogram)
             if e_boxes.size > 0:
@@ -403,7 +486,8 @@ class SignalPreprocessor:
             else:
                 # fallback to geometry-filtered boxes to avoid killing weak but real signals
                 boxes = boxes.astype(np.int32, copy=False)
-                stats = [self._box_energy_stats(b, spectrogram) for b in boxes]
+                pooled_bg = self._collect_pooled_ring_background(boxes, spectrogram)
+                stats = [self._box_energy_stats(b, spectrogram, pooled_bg=pooled_bg) for b in boxes]
         else:
             stats = [None] * len(boxes)
 
@@ -416,7 +500,7 @@ class SignalPreprocessor:
                 return []
             return [g] if self._group_passes_thresholds(g) else []
 
-        # cluster by frequency
+        # cluster by frequency + bandwidth
         clusters = self._cluster_boxes_by_frequency(boxes, H)
         raw_groups = []
         for idx in clusters:
@@ -465,11 +549,9 @@ class SignalPreprocessor:
         if not cleaned:
             return []
 
-        best_score = max(g["score"] for g in cleaned)
         final_groups = []
         for g in cleaned:
             if self._group_passes_thresholds(g):
-                # g["group_type"] = self._infer_group_type(g)
                 final_groups.append(g)
 
         final_groups = sorted(final_groups, key=lambda x: x["score"], reverse=True)
