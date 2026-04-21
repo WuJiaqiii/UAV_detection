@@ -1,116 +1,133 @@
 import os
 import csv
 import json
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.distributed as dist
-import numpy as np
-from tqdm import tqdm
-from pathlib import Path
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
-from torch.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
-
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import confusion_matrix
+from tqdm import tqdm
 
 try:
     from scipy.optimize import linear_sum_assignment
 except Exception:
     linear_sum_assignment = None
 
-from util.utils import EarlyStopping, AverageMeter
-from util.checkpoint import save_checkpoint
-from util.utils import _reduce_scalar, _set_epoch_for_loaders
-from util.boxmask import boxes_to_white_mask
-from util.bboxcache import BBoxCache
+try:
+    from sklearn.metrics import confusion_matrix
+except Exception:
+    confusion_matrix = None
 
-import cv2
+import matplotlib.pyplot as plt
+
+
+class AverageMeter:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.sum = 0.0
+        self.count = 0
+        self.avg = 0.0
+
+    def update(self, val: float, n: int = 1):
+        self.sum += float(val) * int(n)
+        self.count += int(n)
+        self.avg = self.sum / max(self.count, 1)
 
 
 class Trainer:
-    def __init__(self, config, data_loaders, logger, detector, preprocessor, classifier):
+    def __init__(self, config, dataloaders, logger, detector, preprocessor, classifier, extra_val_loader=None):
         self.config = config
         self.logger = logger
         self.detector = detector
         self.preprocessor = preprocessor
         self.classifier = classifier
+        self.extra_val_loader = extra_val_loader
 
-        if isinstance(data_loaders, (tuple, list)) and len(data_loaders) == 2:
-            self.train_loader, self.val_loader = data_loaders
+        if isinstance(dataloaders, (tuple, list)) and len(dataloaders) == 2:
+            self.train_loader, self.val_loader = dataloaders
         else:
             self.train_loader, self.val_loader = None, None
 
-        self.device = torch.device(config.device)
-        self.classifier.to(self.device)
-
-        if torch.distributed.is_initialized():
-            self.classifier = torch.nn.parallel.DistributedDataParallel(
-                self.classifier,
-                device_ids=[self.device.index] if self.device.type == "cuda" else None,
-                output_device=self.device.index if self.device.type == "cuda" else None,
-                find_unused_parameters=False,
-            )
-        elif getattr(config, "use_data_parallel", False) and torch.cuda.device_count() > 1:
-            self.classifier = torch.nn.DataParallel(self.classifier)
-
+        self.device = next(self.classifier.parameters()).device
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = torch.optim.AdamW(
-            [p for p in self.classifier.parameters() if p.requires_grad],
-            lr=float(config.lr),
-            weight_decay=float(config.weight_decay),
+
+        self.optimizer = AdamW(
+            self.classifier.parameters(),
+            lr=float(getattr(config, "lr", 1e-4)),
+            weight_decay=float(getattr(config, "weight_decay", 1e-2)),
         )
         self.scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
-            T_0=int(config.cosine_annealing_T0),
-            T_mult=int(config.cosine_annealing_mult),
+            T_0=int(getattr(config, "cosine_annealing_T0", 50)),
+            T_mult=int(getattr(config, "cosine_annealing_mult", 2)),
         )
-        self.scaler = GradScaler(enabled=bool(config.use_amp_autocast))
+
+        self.epochs = int(getattr(config, "epochs", 50))
+        self.save_interval = int(getattr(config, "save_interval", 5))
+        self.early_stop_patience = int(getattr(config, "early_stop_patience", 20))
+
+        self.result_dir = Path(getattr(config, "result_dir", "./results"))
+        self.model_dir = Path(getattr(config, "model_dir", "./models"))
+        self.log_dir = Path(getattr(config, "log_dir", "./log"))
+        self.result_dir.mkdir(parents=True, exist_ok=True)
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        self.writer = SummaryWriter(str(self.log_dir))
 
         self.mask_img_size = int(getattr(config, "mask_img_size", 224))
-        self.save_detect_vis_once = bool(getattr(config, "save_detect_vis_once", True))
-        self.detect_vis_num_samples = int(getattr(config, "detect_vis_num_samples", 1))
-        self._detect_vis_saved = False
-
         self.cnn_input_mode = str(getattr(config, "cnn_input_mode", "mask")).lower()
         self.box_draw_thickness = int(getattr(config, "box_draw_thickness", 2))
         self.box_draw_value = int(getattr(config, "box_draw_value", 255))
 
+        self.save_detect_vis_once = bool(getattr(config, "save_detect_vis_once", False))
+        self.detect_vis_num_samples = int(getattr(config, "detect_vis_num_samples", 8))
+        self._detect_vis_saved = False
+
         self.match_freq_thresh = float(getattr(config, "match_freq_thresh", 10.0))
+        self.match_bandwidth_weight = float(getattr(config, "match_bandwidth_weight", 0.2))
         self.skip_unmatched = bool(getattr(config, "skip_unmatched", True))
 
-        cache_dir = getattr(config, "bbox_cache_path", None)
-        if not cache_dir:
-            cache_dir = os.path.join(config.result_dir, "bbox_cache")
-        self.bbox_cache = BBoxCache(
-            base_dir=cache_dir,
-            dataset_root=getattr(config, "dataset_path", None),
-            mode=str(getattr(config, "bbox_cache_mode", "readwrite")),
-            mem_max=0,
-            logger=logger,
-        )
+        self.run_mode = str(getattr(config, "run_mode", "train")).lower()
+        self.train_signal_mode = str(getattr(config, "train_signal_mode", "single")).lower()
 
-        self.early_stopping = EarlyStopping(
-            self.logger,
-            patience=int(config.early_stop_patience),
-            delta=0.0,
-        )
+        self.best_val_acc = -1.0
+        self.no_improve_epochs = 0
 
-        self.writer = None
-        if (not dist.is_initialized()) or dist.get_rank() == 0:
-            self.writer = SummaryWriter(log_dir=config.log_dir)
+        self.inv_class_map = self._build_inv_class_map()
+        self.eval_exclude_classes = set(getattr(config, "eval_exclude_classes", []) or [])
+        self.eval_exclude_label_ids = {
+            int(v) for k, v in getattr(self.config, "classes", {}).items()
+            if str(k) in self.eval_exclude_classes
+        }
 
-    # ------------------------- image helpers -------------------------
+    def _build_inv_class_map(self) -> Dict[int, str]:
+        classes = getattr(self.config, "classes", {})
+        if isinstance(classes, dict) and len(classes) > 0:
+            return {int(v): str(k) for k, v in classes.items()}
+        return {}
+
+    def _label_name(self, idx: int) -> str:
+        return self.inv_class_map.get(int(idx), str(idx))
+
+    def _should_skip_eval_label(self, label_idx: int) -> bool:
+        if not self.eval_exclude_label_ids:
+            return False
+        return int(label_idx) in self.eval_exclude_label_ids
+
     def _spec_to_uint8(self, spec: np.ndarray) -> np.ndarray:
         spec = np.asarray(spec)
         if spec.ndim != 2:
             raise ValueError(f"Expected 2D spectrogram, got shape={spec.shape}")
         if spec.dtype == np.uint8:
             return spec.copy()
-
         x = spec.astype(np.float32)
         x_min, x_max = float(x.min()), float(x.max())
         if x_max > x_min:
@@ -124,277 +141,70 @@ class Trainer:
         finite_mask = np.isfinite(x)
         if not finite_mask.any():
             return np.zeros_like(x, dtype=np.uint8)
-
         valid = x[finite_mask]
         lo = float(np.percentile(valid, p_low))
         hi = float(np.percentile(valid, p_high))
         if hi <= lo:
             return np.zeros_like(x, dtype=np.uint8)
-
         x = np.clip(x, lo, hi)
         x = (x - lo) / (hi - lo)
         x = np.log1p(log_gain * x) / np.log1p(log_gain)
         return np.clip(x * 255.0, 0, 255).astype(np.uint8)
 
-    def _make_input_tensor(self, spec, final_boxes):
-        mode = self.cnn_input_mode
-        boxes = final_boxes
-
-        if mode == "mask":
-            img = boxes_to_white_mask(
-                image_shape=spec.shape,
-                boxes=boxes,
-                fill_value=int(getattr(self.config, "mask_fill_value", 255)),
-                mode="fill",
-            )
-        else:
-            img = self._spec_to_uint8(spec)
-
-            if mode == "raw_in_boxes":
-                if boxes is None or len(boxes) == 0:
-                    img = np.zeros_like(img, dtype=np.uint8)
-                else:
-                    mask = boxes_to_white_mask(
-                        image_shape=spec.shape,
-                        boxes=boxes,
-                        fill_value=255,
-                        mode="fill",
-                    )
-                    out = np.zeros_like(img, dtype=np.uint8)
-                    keep = mask > 0
-                    out[keep] = img[keep]
-                    img = out
-
-            elif mode == "raw_with_boxes":
-                if boxes is not None and len(boxes) > 0:
-                    arr = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
-                    H, W = img.shape[:2]
-                    for box in arr:
-                        x1, y1, x2, y2 = [int(v) for v in box]
-                        x1 = max(0, min(x1, W - 1))
-                        x2 = max(0, min(x2, W - 1))
-                        y1 = max(0, min(y1, H - 1))
-                        y2 = max(0, min(y2, H - 1))
-                        if x2 <= x1 or y2 <= y1:
-                            continue
-                        cv2.rectangle(
-                            img,
-                            (x1, y1),
-                            (x2, y2),
-                            color=int(self.box_draw_value),
-                            thickness=int(self.box_draw_thickness),
-                        )
-
-            elif mode != "raw":
-                raise ValueError(f"Unsupported cnn_input_mode={mode}")
-
-        x = img.astype(np.float32) / 255.0
-        x = cv2.resize(
-            x,
-            (self.mask_img_size, self.mask_img_size),
-            interpolation=cv2.INTER_NEAREST if mode == "mask" else cv2.INTER_LINEAR,
-        )
-        x = np.expand_dims(x, axis=0)
-        return torch.from_numpy(x).float()
-
-    # ------------------------- detection helpers -------------------------
-    def _sanitize_boxes(self, boxes, H, W):
+    def _boxes_to_white_mask(self, image_shape: Tuple[int, int], boxes, fill_value: int = 255) -> np.ndarray:
+        h, w = int(image_shape[0]), int(image_shape[1])
+        mask = np.zeros((h, w), dtype=np.uint8)
         if boxes is None:
-            return []
-        arr = np.asarray(boxes, dtype=np.int32).reshape(-1, 4) if len(boxes) > 0 else np.zeros((0, 4), dtype=np.int32)
-        out = []
-        img_area = float(H * W)
-        min_area = int(getattr(self.config, "min_area", getattr(self.config, "pre_min_area", 0)))
-        max_bbox_area_ratio = float(getattr(self.config, "max_bbox_area_ratio", 0.0))
+            return mask
+        arr = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
         for b in arr:
             x1, y1, x2, y2 = [int(v) for v in b]
-            x1 = max(0, min(x1, W - 1))
-            x2 = max(0, min(x2, W))
-            y1 = max(0, min(y1, H - 1))
-            y2 = max(0, min(y2, H))
+            x1 = max(0, min(x1, w - 1))
+            x2 = max(0, min(x2, w - 1))
+            y1 = max(0, min(y1, h - 1))
+            y2 = max(0, min(y2, h - 1))
             if x2 <= x1 or y2 <= y1:
                 continue
-            area = (x2 - x1) * (y2 - y1)
-            if min_area > 0 and area < min_area:
-                continue
-            if max_bbox_area_ratio > 0 and area > max_bbox_area_ratio * img_area:
-                continue
-            out.append([x1, y1, x2, y2])
-        return out
+            mask[y1:y2, x1:x2] = int(fill_value)
+        return mask
 
-    def _get_boxes_for_sample(self, spec, fp=None):
-        H, W = spec.shape[:2]
-        if fp is not None:
-            got = self.bbox_cache.get(fp)
-            if got is not None:
-                return got.cpu().numpy().tolist()
-        try:
-            boxes = self.detector.detect(spec)
-            boxes = self._sanitize_boxes(boxes, H, W)
-        except Exception as e:
-            if self.logger:
-                self.logger.warning(f"[DetectorError] {os.path.basename(fp) if fp else 'unknown'}: {e}")
-            boxes = []
-        if fp is not None:
-            self.bbox_cache.put(fp, torch.as_tensor(boxes, dtype=torch.int32))
-        return boxes
-
-    # ------------------------- preprocess / grouping -------------------------
-    def _extract_groups(self, yolo_boxes, spec):
-        if hasattr(self.preprocessor, "select_signal_groups"):
-            groups = self.preprocessor.select_signal_groups(yolo_boxes, spectrogram=spec)
+    def _make_input_tensor(self, spec, final_boxes):
+        mode = self.cnn_input_mode
+        raw = self._spec_to_uint8(spec)
+        if mode == "mask":
+            img = self._boxes_to_white_mask(spec.shape, final_boxes, fill_value=255)
         else:
-            if hasattr(self.preprocessor, "select_main_boxes"):
-                boxes = self.preprocessor.select_main_boxes(yolo_boxes, spectrogram=spec)
-                boxes = boxes.tolist() if hasattr(boxes, "tolist") else boxes
-                groups = [{"boxes": boxes}] if boxes is not None and len(boxes) > 0 else []
-            else:
-                groups = []
-        return groups if groups is not None else []
-
-    def _select_main_group(self, groups):
-        if groups is None or len(groups) == 0:
-            return None
-        # Prefer preprocess score if available, otherwise larger group / wider time span.
-        def key_fn(g):
-            score = float(g.get("score", 0.0))
-            n_boxes = int(g.get("n_boxes", len(g.get("boxes", []))))
-            tspan = float(g.get("time_span_ratio", 0.0))
-            return (score, n_boxes, tspan)
-        return max(groups, key=key_fn)
-
-    def _pixel_y_to_freq_mhz(self, y_center: float, H: int) -> float:
-        # mid row = 0 MHz; down positive, up negative
-        sr = float(getattr(self.config, "sampling_rate", 122.88e6))
-        rel = float(y_center) / max(float(H - 1), 1.0) - 0.5
-        return (rel * sr) / 1e6
-
-    def _group_center_freq_mhz(self, group: dict, spec_shape) -> float:
-        for key in ["group_freq_center", "freq_center", "center_freq", "mean_freq"]:
-            if key in group:
-                return float(group[key])
-        boxes = np.asarray(group.get("boxes", []), dtype=np.float32).reshape(-1, 4)
-        if boxes.size == 0:
-            return float("nan")
-        cy = (boxes[:, 1] + boxes[:, 3]) / 2.0
-        return float(np.mean([self._pixel_y_to_freq_mhz(v, spec_shape[0]) for v in cy]))
-
-    def _match_groups_to_targets(self, groups, targets, spec_shape):
-        if groups is None:
-            groups = []
-        if targets is None:
-            targets = []
-
-        if len(groups) == 0 or len(targets) == 0:
-            return [], list(range(len(targets))), list(range(len(groups)))
-
-        match_freq_thresh = float(getattr(self, "match_freq_thresh", 10.0))
-        match_bw_weight = float(getattr(self.config, "match_bw_weight", 0.2))
-        match_size_penalty = float(getattr(self.config, "match_size_penalty", 1.0))
-
-        group_freqs = np.array([self._group_center_freq_mhz(g, spec_shape) for g in groups], dtype=np.float32)
-        group_bws = np.array([float(g.get("bandwidth", np.nan)) for g in groups], dtype=np.float32)
-        group_sizes = np.array([max(int(g.get("n_boxes", len(g.get("boxes", [])))), 1) for g in groups], dtype=np.float32)
-
-        target_freqs = np.array([float(t["center_freq"]) for t in targets], dtype=np.float32)
-        target_bws = np.array([float(t.get("bandwidth", np.nan)) for t in targets], dtype=np.float32)
-
-        valid_group_mask = np.isfinite(group_freqs)
-        if not valid_group_mask.any():
-            return [], list(range(len(targets))), list(range(len(groups)))
-
-        T, G = len(targets), len(groups)
-        cost = np.full((T, G), np.inf, dtype=np.float32)
-        freq_err_mat = np.full((T, G), np.inf, dtype=np.float32)
-        bw_err_mat = np.full((T, G), np.nan, dtype=np.float32)
-
-        for ti in range(T):
-            for gi in range(G):
-                if not valid_group_mask[gi]:
-                    continue
-                freq_err = abs(float(target_freqs[ti]) - float(group_freqs[gi]))
-                bw_err = 0.0
-                if np.isfinite(target_bws[ti]) and np.isfinite(group_bws[gi]):
-                    bw_err = abs(float(target_bws[ti]) - float(group_bws[gi]))
-                    bw_err_mat[ti, gi] = bw_err
-                freq_err_mat[ti, gi] = freq_err
-                size_penalty = match_size_penalty / float(group_sizes[gi])
-                cost[ti, gi] = freq_err + match_bw_weight * bw_err + size_penalty
-
-        matched, used_t, used_g = [], set(), set()
-        finite_mask = np.isfinite(cost)
-        if not finite_mask.any():
-            return matched, list(range(T)), list(range(G))
-
-        if linear_sum_assignment is not None:
-            valid_target_idx = np.where(finite_mask.any(axis=1))[0]
-            valid_group_idx = np.where(finite_mask.any(axis=0))[0]
-            if len(valid_target_idx) > 0 and len(valid_group_idx) > 0:
-                sub_cost = cost[np.ix_(valid_target_idx, valid_group_idx)].copy()
-                BIG = 1e9
-                sub_cost[~np.isfinite(sub_cost)] = BIG
-                row_ind, col_ind = linear_sum_assignment(sub_cost)
-                for r, c in zip(row_ind.tolist(), col_ind.tolist()):
-                    ti = int(valid_target_idx[r])
-                    gi = int(valid_group_idx[c])
-                    if not np.isfinite(cost[ti, gi]):
+            img = raw.copy()
+            if mode == "raw_in_boxes":
+                mask = self._boxes_to_white_mask(spec.shape, final_boxes, fill_value=255)
+                out = np.zeros_like(img, dtype=np.uint8)
+                keep = mask > 0
+                out[keep] = img[keep]
+                img = out
+            elif mode == "raw_with_boxes":
+                arr = np.asarray(final_boxes, dtype=np.int32).reshape(-1, 4) if final_boxes is not None else np.zeros((0, 4), dtype=np.int32)
+                h, w = img.shape[:2]
+                for box in arr:
+                    x1, y1, x2, y2 = [int(v) for v in box]
+                    x1 = max(0, min(x1, w - 1))
+                    x2 = max(0, min(x2, w - 1))
+                    y1 = max(0, min(y1, h - 1))
+                    y2 = max(0, min(y2, h - 1))
+                    if x2 <= x1 or y2 <= y1:
                         continue
-                    if self.skip_unmatched and abs(float(target_freqs[ti]) - float(group_freqs[gi])) > match_freq_thresh:
-                        continue
-                    matched.append({
-                        "target_idx": ti,
-                        "group_idx": gi,
-                        "label": int(targets[ti]["label"]),
-                        "class_name": str(targets[ti].get("class_name", "")),
-                        "target_center_freq": float(target_freqs[ti]),
-                        "group_center_freq": float(group_freqs[gi]),
-                        "freq_error": float(freq_err_mat[ti, gi]),
-                        "bw_error": float(bw_err_mat[ti, gi]) if np.isfinite(bw_err_mat[ti, gi]) else None,
-                        "boxes": groups[gi].get("boxes", []),
-                        "group": groups[gi],
-                    })
-                    used_t.add(ti)
-                    used_g.add(gi)
-        else:
-            pairs = []
-            for ti in range(T):
-                for gi in range(G):
-                    if np.isfinite(cost[ti, gi]):
-                        pairs.append((float(cost[ti, gi]), ti, gi))
-            pairs.sort(key=lambda x: x[0])
-            for c, ti, gi in pairs:
-                if ti in used_t or gi in used_g:
-                    continue
-                if self.skip_unmatched and abs(float(target_freqs[ti]) - float(group_freqs[gi])) > match_freq_thresh:
-                    continue
-                matched.append({
-                    "target_idx": ti,
-                    "group_idx": gi,
-                    "label": int(targets[ti]["label"]),
-                    "class_name": str(targets[ti].get("class_name", "")),
-                    "target_center_freq": float(target_freqs[ti]),
-                    "group_center_freq": float(group_freqs[gi]),
-                    "freq_error": float(freq_err_mat[ti, gi]),
-                    "bw_error": float(bw_err_mat[ti, gi]) if np.isfinite(bw_err_mat[ti, gi]) else None,
-                    "boxes": groups[gi].get("boxes", []),
-                    "group": groups[gi],
-                })
-                used_t.add(ti)
-                used_g.add(gi)
+                    cv2.rectangle(img, (x1, y1), (x2, y2), color=int(self.box_draw_value), thickness=int(self.box_draw_thickness))
+            elif mode != "raw":
+                raise ValueError(f"Unsupported cnn_input_mode={mode}")
+        x = img.astype(np.float32) / 255.0
+        x = cv2.resize(x, (self.mask_img_size, self.mask_img_size), interpolation=cv2.INTER_NEAREST if mode == "mask" else cv2.INTER_LINEAR)
+        x = np.expand_dims(x, axis=0)
+        return torch.from_numpy(x).float(), img
 
-        unmatched_targets = [i for i in range(T) if i not in used_t]
-        unmatched_groups = [i for i in range(G) if i not in used_g]
-        return matched, unmatched_targets, unmatched_groups
-
-    # ------------------------- visual debug -------------------------
     def _save_groups_image(self, spec_u8, groups, save_path):
         from PIL import Image, ImageDraw
         img = Image.fromarray(spec_u8).convert("RGB")
         draw = ImageDraw.Draw(img)
-        colors = [
-            (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
-            (255, 0, 255), (0, 255, 255), (255, 128, 0), (128, 255, 0),
-        ]
+        colors = [(255,0,0),(0,255,0),(0,0,255),(255,255,0),(255,0,255),(0,255,255),(255,128,0),(128,255,0)]
         for gi, g in enumerate(groups):
             boxes = np.asarray(g.get("boxes", []), dtype=np.int32).reshape(-1, 4)
             if len(boxes) == 0:
@@ -403,7 +213,7 @@ class Trainer:
             for b in boxes:
                 x1, y1, x2, y2 = [int(v) for v in b]
                 draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-            x1, y1, _, _ = [int(v) for v in boxes[0]]
+            x1, y1, x2, y2 = [int(v) for v in boxes[0]]
             label = f"G{gi}"
             if "score" in g:
                 label += f" s={float(g['score']):.2f}"
@@ -415,531 +225,563 @@ class Trainer:
         img.save(save_path)
 
     def _save_detect_result_images(self, spec, yolo_boxes, groups, matched_boxes, fp, sample_idx=0, split_name="val"):
-        save_dir = os.path.join(self.config.result_dir, "detect_result", str(split_name))
-        os.makedirs(save_dir, exist_ok=True)
-        base = os.path.splitext(os.path.basename(fp))[0] if fp else f"sample_{sample_idx}"
+        save_dir = self.result_dir / "detect_result" / str(split_name)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        base = Path(fp).stem if fp else f"sample_{sample_idx}"
         spec_u8 = self._spec_to_uint8_vis_log(spec, p_low=1.0, p_high=99.5, log_gain=9.0)
 
         from PIL import Image, ImageDraw
-
         img = Image.fromarray(spec_u8).convert("RGB")
         draw = ImageDraw.Draw(img)
         for b in np.asarray(yolo_boxes, dtype=np.int32).reshape(-1, 4):
             x1, y1, x2, y2 = [int(v) for v in b]
             draw.rectangle([x1, y1, x2, y2], outline=(255, 0, 0), width=2)
-        img.save(os.path.join(save_dir, f"{base}_yolo.png"))
+        img.save(save_dir / f"{base}_yolo.png")
 
-        self._save_groups_image(spec_u8, groups, os.path.join(save_dir, f"{base}_groups.png"))
+        self._save_groups_image(spec_u8, groups, save_dir / f"{base}_groups.png")
 
         img = Image.fromarray(spec_u8).convert("RGB")
         draw = ImageDraw.Draw(img)
         for b in np.asarray(matched_boxes, dtype=np.int32).reshape(-1, 4):
             x1, y1, x2, y2 = [int(v) for v in b]
             draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)
-        img.save(os.path.join(save_dir, f"{base}_matched.png"))
+        img.save(save_dir / f"{base}_matched.png")
 
-    # ------------------------- build instances -------------------------
-    def _build_single_instances(self, inputs_bhw, targets_list, sample_fps=None, save_detect_result=False, max_save_images=1, split_name="val"):
-        if isinstance(inputs_bhw, torch.Tensor):
-            batch = inputs_bhw.detach().cpu()
+    def _extract_groups(self, yolo_boxes, spec):
+        if hasattr(self.preprocessor, "select_signal_groups"):
+            return self.preprocessor.select_signal_groups(yolo_boxes, spectrogram=spec)
+        if hasattr(self.preprocessor, "select_main_boxes"):
+            main_boxes = self.preprocessor.select_main_boxes(yolo_boxes, spectrogram=spec)
+            main_boxes = np.asarray(main_boxes, dtype=np.int32).reshape(-1, 4)
+            if len(main_boxes) == 0:
+                return []
+            return [{"boxes": main_boxes, "score": 1.0, "center_freq": 0.0, "bandwidth": 0.0, "group_type": "single_fallback"}]
+        raise AttributeError("Preprocessor has neither select_signal_groups nor select_main_boxes")
+
+    def _select_main_group(self, groups):
+        if groups is None or len(groups) == 0:
+            return None
+        groups_sorted = sorted(groups, key=lambda g: float(g.get("score", 0.0)), reverse=True)
+        return groups_sorted[0]
+
+    def _pixel_y_to_freq_mhz(self, y, img_h):
+        if img_h <= 1:
+            return 0.0
+        rel = float(y) / float(img_h - 1) - 0.5
+        sr = float(getattr(self.config, "sampling_rate", 122.88e6))
+        return rel * sr / 1e6
+
+    def _group_center_freq_mhz(self, group, spec_shape):
+        if isinstance(group, dict) and "center_freq" in group:
+            return float(group["center_freq"])
+        boxes = np.asarray(group.get("boxes", []), dtype=np.float32).reshape(-1, 4)
+        if len(boxes) == 0:
+            return 0.0
+        y_center = float(np.mean((boxes[:, 1] + boxes[:, 3]) / 2.0))
+        return self._pixel_y_to_freq_mhz(y_center, spec_shape[0])
+
+    def _group_bandwidth_mhz(self, group):
+        if isinstance(group, dict) and "bandwidth" in group:
+            return float(group["bandwidth"])
+        return 0.0
+
+    def _match_groups_to_targets(self, groups, targets, spec_shape):
+        if groups is None:
+            groups = []
+        if targets is None:
+            targets = []
+        n_g = len(groups)
+        n_t = len(targets)
+        if n_g == 0 or n_t == 0:
+            return [], list(range(n_t)), list(range(n_g))
+
+        group_freqs = [self._group_center_freq_mhz(g, spec_shape) for g in groups]
+        group_bws = [self._group_bandwidth_mhz(g) for g in groups]
+        target_freqs = [float(t.get("center_freq", 0.0)) for t in targets]
+        target_bws = [float(t.get("bandwidth", 0.0)) for t in targets]
+
+        cost = np.zeros((n_t, n_g), dtype=np.float32)
+        for ti in range(n_t):
+            for gi in range(n_g):
+                freq_diff = abs(target_freqs[ti] - group_freqs[gi])
+                bw_diff = abs(target_bws[ti] - group_bws[gi])
+                cost[ti, gi] = float(freq_diff + self.match_bandwidth_weight * bw_diff)
+
+        pairs = []
+        if linear_sum_assignment is not None:
+            rows, cols = linear_sum_assignment(cost)
+            pairs = list(zip(rows.tolist(), cols.tolist()))
         else:
-            batch = torch.as_tensor(inputs_bhw)
-        if batch.ndim == 4 and batch.shape[1] == 1:
-            batch = batch[:, 0]
-        if batch.ndim != 3:
-            raise ValueError(f"Expected inputs shape [B,H,W] or [B,1,H,W], got {tuple(batch.shape)}")
+            used_g = set()
+            for ti in range(n_t):
+                best_g, best_c = None, None
+                for gi in range(n_g):
+                    if gi in used_g:
+                        continue
+                    c = cost[ti, gi]
+                    if best_c is None or c < best_c:
+                        best_c = c
+                        best_g = gi
+                if best_g is not None:
+                    used_g.add(best_g)
+                    pairs.append((ti, best_g))
 
-        image_infos, image_tensors, labels, metas = [], [], [], []
-        selected_total, target_total, saved_count = 0, 0, 0
+        matched = []
+        used_t, used_g = set(), set()
+        for ti, gi in pairs:
+            freq_diff = abs(target_freqs[ti] - group_freqs[gi])
+            if self.skip_unmatched and freq_diff > self.match_freq_thresh:
+                continue
+            g = groups[gi]
+            matched.append({
+                "boxes": np.asarray(g.get("boxes", []), dtype=np.int32).reshape(-1, 4),
+                "group_idx": int(gi),
+                "target_idx": int(ti),
+                "label": int(targets[ti]["label"]),
+                "target": targets[ti],
+                "group": g,
+            })
+            used_t.add(ti)
+            used_g.add(gi)
 
-        B = batch.shape[0]
-        for i in range(B):
-            spec = batch[i].numpy()
-            fp = None if sample_fps is None else sample_fps[i]
+        unmatched_targets = [i for i in range(n_t) if i not in used_t]
+        unmatched_groups = [i for i in range(n_g) if i not in used_g]
+        return matched, unmatched_targets, unmatched_groups
+
+    def _build_single_instances(self, inputs, targets_list, sample_fps=None, save_detect_result=False, max_save_images=8, split_name="val"):
+        inputs_np = inputs.detach().cpu().numpy() if torch.is_tensor(inputs) else np.asarray(inputs)
+        batch_images, batch_labels, batch_metas, image_infos = [], [], [], []
+        saved_count = 0
+
+        for i in range(len(inputs_np)):
+            spec = np.asarray(inputs_np[i])
+            fp = sample_fps[i] if sample_fps is not None else f"sample_{i}"
             targets = targets_list[i] if targets_list is not None else []
-
             if len(targets) != 1:
-                if self.logger:
-                    self.logger.warning(f"[SingleTrainSkip] expected exactly 1 target, got {len(targets)} for {os.path.basename(fp) if fp else i}")
-                image_infos.append({
-                    "image_idx": i,
-                    "num_targets": len(targets),
-                    "matched_count": 0,
-                    "unmatched_targets": len(targets),
-                    "unmatched_groups": 0,
-                })
+                self.logger.warning(f"[SingleSignalSkip] expected 1 target, got {len(targets)}: {fp}")
                 continue
 
-            target_total += 1
-            yolo_boxes = self._get_boxes_for_sample(spec, fp=fp)
+            yolo_boxes = self.detector.detect(spec)
+            yolo_boxes = np.asarray(yolo_boxes, dtype=np.int32).reshape(-1, 4) if len(yolo_boxes) > 0 else np.zeros((0, 4), dtype=np.int32)
             groups = self._extract_groups(yolo_boxes, spec)
             main_group = self._select_main_group(groups)
+            if main_group is None:
+                continue
 
-            matched_boxes = []
-            if main_group is not None and len(main_group.get("boxes", [])) > 0:
-                final_boxes = np.asarray(main_group["boxes"], dtype=np.int32).reshape(-1, 4)
-                matched_boxes = final_boxes.tolist()
-                x = self._make_input_tensor(spec, final_boxes)
-                image_tensors.append(x)
-                labels.append(int(targets[0]["label"]))
-                metas.append({
-                    "fp": fp,
-                    "image_idx": i,
-                    "target_idx": 0,
-                    "group_idx": 0,
-                    "freq_error": 0.0,
-                    "class_name": str(targets[0].get("class_name", "")),
-                })
-                selected_total += 1
-                image_infos.append({
-                    "image_idx": i,
-                    "num_targets": 1,
-                    "matched_count": 1,
-                    "unmatched_targets": 0,
-                    "unmatched_groups": max(len(groups) - 1, 0),
-                })
-            else:
-                image_infos.append({
-                    "image_idx": i,
-                    "num_targets": 1,
-                    "matched_count": 0,
-                    "unmatched_targets": 1,
-                    "unmatched_groups": len(groups),
-                })
+            final_boxes = np.asarray(main_group.get("boxes", []), dtype=np.int32).reshape(-1, 4)
+            if len(final_boxes) == 0:
+                continue
+
+            x, _ = self._make_input_tensor(spec, final_boxes)
+            label = int(targets[0]["label"])
+            batch_images.append(x)
+            batch_labels.append(label)
+            batch_metas.append({"fp": fp, "target_idx": 0, "group_idx": 0, "label": label, "target_name": self._label_name(label)})
+            image_infos.append({"fp": fp, "num_targets": 1, "num_matched": 1, "unmatched_targets": [], "unmatched_groups": []})
 
             if save_detect_result and saved_count < max_save_images:
-                self._save_detect_result_images(spec, yolo_boxes, groups, matched_boxes, fp, sample_idx=i, split_name=split_name)
+                self._save_detect_result_images(spec, yolo_boxes, groups, final_boxes.tolist(), fp, i, split_name)
                 saved_count += 1
 
-        if len(image_tensors) == 0:
-            return None, None, metas, selected_total, target_total, image_infos
+        if len(batch_images) == 0:
+            return None, None, None, 0, 0, image_infos
+        images = torch.stack(batch_images, dim=0)
+        labels = torch.as_tensor(batch_labels, dtype=torch.long)
+        return images, labels, batch_metas, len(batch_labels), len(batch_labels), image_infos
 
-        images = torch.stack(image_tensors, dim=0)
-        labels = torch.as_tensor(labels, dtype=torch.long)
-        return images, labels, metas, selected_total, target_total, image_infos
+    def _build_multi_matched_instances(self, inputs, targets_list, sample_fps=None, save_detect_result=False, max_save_images=8, split_name="val"):
+        inputs_np = inputs.detach().cpu().numpy() if torch.is_tensor(inputs) else np.asarray(inputs)
+        batch_images, batch_labels, batch_metas, image_infos = [], [], [], []
+        matched_total = 0
+        target_total = 0
+        saved_count = 0
 
-    def _build_multi_matched_instances(self, inputs_bhw, targets_list, sample_fps=None, save_detect_result=False, max_save_images=1, split_name="infer"):
-        if isinstance(inputs_bhw, torch.Tensor):
-            batch = inputs_bhw.detach().cpu()
-        else:
-            batch = torch.as_tensor(inputs_bhw)
-        if batch.ndim == 4 and batch.shape[1] == 1:
-            batch = batch[:, 0]
-        if batch.ndim != 3:
-            raise ValueError(f"Expected inputs shape [B,H,W] or [B,1,H,W], got {tuple(batch.shape)}")
-
-        image_infos, image_tensors, labels, metas = [], [], [], []
-        match_total, target_total, saved_count = 0, 0, 0
-
-        B = batch.shape[0]
-        for i in range(B):
-            spec = batch[i].numpy()
-            fp = None if sample_fps is None else sample_fps[i]
+        for i in range(len(inputs_np)):
+            spec = np.asarray(inputs_np[i])
+            fp = sample_fps[i] if sample_fps is not None else f"sample_{i}"
             targets = targets_list[i] if targets_list is not None else []
-            target_total += len(targets)
 
-            yolo_boxes = self._get_boxes_for_sample(spec, fp=fp)
+            yolo_boxes = self.detector.detect(spec)
+            yolo_boxes = np.asarray(yolo_boxes, dtype=np.int32).reshape(-1, 4) if len(yolo_boxes) > 0 else np.zeros((0, 4), dtype=np.int32)
+
             groups = self._extract_groups(yolo_boxes, spec)
             matched, unmatched_targets, unmatched_groups = self._match_groups_to_targets(groups, targets, spec.shape)
-            match_total += len(matched)
+
+            matched_total += len(matched)
+            target_total += len(targets)
 
             image_infos.append({
-                "image_idx": i,
+                "fp": fp,
                 "num_targets": len(targets),
-                "matched_count": len(matched),
-                "unmatched_targets": len(unmatched_targets),
-                "unmatched_groups": len(unmatched_groups),
+                "num_matched": len(matched),
+                "unmatched_targets": unmatched_targets,
+                "unmatched_groups": unmatched_groups,
             })
 
             if save_detect_result and saved_count < max_save_images:
                 matched_boxes = []
                 for m in matched:
                     matched_boxes.extend(np.asarray(m["boxes"], dtype=np.int32).reshape(-1, 4).tolist())
-                self._save_detect_result_images(spec, yolo_boxes, groups, matched_boxes, fp, sample_idx=i, split_name=split_name)
+                self._save_detect_result_images(spec, yolo_boxes, groups, matched_boxes, fp, i, split_name)
                 saved_count += 1
 
             for m in matched:
-                final_boxes = m["boxes"]
-                if final_boxes is None or len(final_boxes) == 0:
-                    continue
-                x = self._make_input_tensor(spec, final_boxes)
-                image_tensors.append(x)
-                labels.append(int(m["label"]))
-                metas.append({
+                final_boxes = np.asarray(m["boxes"], dtype=np.int32).reshape(-1, 4)
+                x, _ = self._make_input_tensor(spec, final_boxes)
+                batch_images.append(x)
+                batch_labels.append(int(m["label"]))
+                batch_metas.append({
                     "fp": fp,
-                    "image_idx": i,
-                    "target_idx": m["target_idx"],
-                    "group_idx": m["group_idx"],
-                    "freq_error": m["freq_error"],
-                    "class_name": m["class_name"],
+                    "target_idx": int(m["target_idx"]),
+                    "group_idx": int(m["group_idx"]),
+                    "label": int(m["label"]),
+                    "target_name": self._label_name(int(m["label"])),
                 })
 
-        if len(image_tensors) == 0:
-            return None, None, metas, match_total, target_total, image_infos
-
-        images = torch.stack(image_tensors, dim=0)
-        labels = torch.as_tensor(labels, dtype=torch.long)
-        return images, labels, metas, match_total, target_total, image_infos
+        if len(batch_images) == 0:
+            return None, None, None, matched_total, target_total, image_infos
+        images = torch.stack(batch_images, dim=0)
+        labels = torch.as_tensor(batch_labels, dtype=torch.long)
+        return images, labels, batch_metas, matched_total, target_total, image_infos
 
     def _compute_image_exact_acc(self, metas, labels, preds, image_infos):
-        if image_infos is None or len(image_infos) == 0:
+        if metas is None or len(metas) == 0:
             return 0, 0
+        labels_np = labels.detach().cpu().numpy()
+        preds_np = preds.detach().cpu().numpy()
 
-        matched_total_per_image = {info["image_idx"]: 0 for info in image_infos}
-        matched_correct_per_image = {info["image_idx"]: 0 for info in image_infos}
+        per_fp = {}
+        for meta, y_true, y_pred in zip(metas, labels_np.tolist(), preds_np.tolist()):
+            fp = meta["fp"]
+            per_fp.setdefault(fp, [])
+            per_fp[fp].append(int(y_true == y_pred))
 
-        if preds is not None and labels is not None and metas is not None:
-            preds_np = preds.detach().cpu().numpy()
-            labels_np = labels.detach().cpu().numpy()
-            for meta, p, y in zip(metas, preds_np, labels_np):
-                img_idx = int(meta["image_idx"])
-                matched_total_per_image[img_idx] += 1
-                if int(p) == int(y):
-                    matched_correct_per_image[img_idx] += 1
-
-        image_correct = 0
-        image_total = len(image_infos)
-        for info in image_infos:
-            img_idx = int(info["image_idx"])
-            num_targets = int(info["num_targets"])
-            matched_count = int(info["matched_count"])
-            unmatched_targets = int(info["unmatched_targets"])
-            all_targets_matched = (unmatched_targets == 0 and matched_count == num_targets)
-            all_matched_correct = (
-                matched_total_per_image[img_idx] == matched_count and
-                matched_correct_per_image[img_idx] == matched_count
-            )
-            if all_targets_matched and all_matched_correct:
+        info_map = {info["fp"]: info for info in image_infos}
+        image_total, image_correct = 0, 0
+        for fp, corr_list in per_fp.items():
+            info = info_map.get(fp, {})
+            num_targets = int(info.get("num_targets", len(corr_list)))
+            num_matched = int(info.get("num_matched", len(corr_list)))
+            image_total += 1
+            if num_targets == num_matched and all(corr_list):
                 image_correct += 1
         return image_correct, image_total
 
-    # ------------------------- loss -------------------------
-    def _forward_loss(self, images, labels):
-        with autocast(enabled=bool(self.config.use_amp_autocast), device_type=self.device.type):
-            logits = self.classifier(images)
-            loss = self.criterion(logits, labels)
-        return logits, loss
+    def _save_confusion_matrix(self, y_true, y_pred, split_name="val", epoch: Optional[int] = None):
+        if confusion_matrix is None or len(y_true) == 0:
+            return
 
-    # ------------------------- training / validation (single-signal) -------------------------
-    def train_one_epoch(self, epoch):
-        self.classifier.train()
-        _set_epoch_for_loaders(self.train_loader, epoch)
+        # Only keep non-excluded label ids on both axes.
+        if len(self.inv_class_map) > 0:
+            label_ids = [i for i in sorted(self.inv_class_map.keys()) if i not in self.eval_exclude_label_ids]
+        else:
+            label_ids = [i for i in sorted(set(int(x) for x in y_true) | set(int(x) for x in y_pred)) if i not in self.eval_exclude_label_ids]
+        if len(label_ids) == 0:
+            return
 
-        loss_meter = AverageMeter()
-        correct = 0
-        total = 0
-        selected_total = 0
-        target_total = 0
-        skipped_batches = 0
-        image_correct_total = 0
-        image_total = 0
+        cm = confusion_matrix(y_true, y_pred, labels=label_ids)
+        class_names = [self._label_name(i) for i in label_ids]
 
-        pbar = tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}", leave=True)
-        for batch in pbar:
-            inputs, targets_list, snrs, fps = batch
-            images, labels, metas, batch_selected, batch_targets, image_infos = self._build_single_instances(
-                inputs,
-                targets_list,
-                sample_fps=fps,
-                save_detect_result=False,
-                split_name="train",
-            )
-            selected_total += batch_selected
-            target_total += batch_targets
+        save_dir = self.result_dir / "confusion_matrix" / str(split_name)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        stem = "confusion_matrix" if epoch is None else f"confusion_matrix_epoch_{epoch+1}"
+        np.save(save_dir / f"{stem}.npy", cm)
 
-            if images is None or labels is None or labels.numel() == 0:
-                skipped_batches += 1
-                pbar.set_postfix(skipped=skipped_batches, select=f"{selected_total}/{max(target_total,1)}")
-                continue
-
-            images = images.to(self.device, non_blocking=True)
-            labels = labels.to(self.device, non_blocking=True)
-
-            self.optimizer.zero_grad(set_to_none=True)
-            logits, loss = self._forward_loss(images, labels)
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-
-            preds = logits.argmax(dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.numel()
-
-            batch_image_correct, batch_image_total = self._compute_image_exact_acc(metas, labels, preds, image_infos)
-            image_correct_total += batch_image_correct
-            image_total += batch_image_total
-
-            loss_meter.update(loss.item(), labels.size(0))
-            select_recall = float(selected_total) / max(float(target_total), 1.0)
-            image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
-            pbar.set_postfix(loss=f"{loss_meter.avg:.4f}", acc=f"{100.0 * correct / max(total,1):.2f}%", select=f"{select_recall:.3f}", img_exact=f"{image_exact_acc:.2f}%")
-
-        self.scheduler.step(epoch + 1)
-
-        train_loss = loss_meter.avg if total > 0 else 0.0
-        train_acc = 100.0 * correct / max(total, 1)
-        train_select_recall = float(selected_total) / max(float(target_total), 1.0)
-        train_image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
-
-        if dist.is_initialized():
-            train_loss = _reduce_scalar(torch.tensor(train_loss, device=self.device), op="mean").item()
-            train_acc = _reduce_scalar(torch.tensor(train_acc, device=self.device), op="mean").item()
-            train_select_recall = _reduce_scalar(torch.tensor(train_select_recall, device=self.device), op="mean").item()
-            train_image_exact_acc = _reduce_scalar(torch.tensor(train_image_exact_acc, device=self.device), op="mean").item()
-
-        return train_loss, train_acc, train_select_recall, train_image_exact_acc
+        for normalize, suffix in [(False, ""), (True, "_norm")]:
+            cm_plot = cm.astype(np.float64)
+            if normalize:
+                row_sum = cm_plot.sum(axis=1, keepdims=True)
+                row_sum[row_sum == 0] = 1.0
+                cm_plot = cm_plot / row_sum
+            plt.figure(figsize=(10, 8))
+            plt.imshow(cm_plot, interpolation="nearest", cmap="Blues")
+            plt.title("Confusion Matrix" + (" (Normalized)" if normalize else ""))
+            plt.colorbar()
+            tick_marks = np.arange(len(class_names))
+            plt.xticks(tick_marks, class_names, rotation=45, ha="right")
+            plt.yticks(tick_marks, class_names)
+            thresh = cm_plot.max() / 2.0 if cm_plot.size > 0 else 0.0
+            for i in range(cm_plot.shape[0]):
+                for j in range(cm_plot.shape[1]):
+                    text = f"{cm_plot[i, j]:.2f}" if normalize else str(int(cm[i, j]))
+                    plt.text(j, i, text, horizontalalignment="center", color="white" if cm_plot[i, j] > thresh else "black", fontsize=8)
+            plt.ylabel("True Label")
+            plt.xlabel("Predicted Label")
+            plt.tight_layout()
+            plt.savefig(save_dir / f"{stem}{suffix}.png", dpi=200)
+            plt.close()
 
     @torch.no_grad()
-    def validate(self, epoch):
+    def evaluate_loader(self, loader, epoch=0, split_name="val", mode="single", save_confusion=True, save_summary=True):
         self.classifier.eval()
-
         loss_meter = AverageMeter()
         correct = 0
         total = 0
-        selected_total = 0
+        matched_total = 0
         target_total = 0
-        all_preds = []
-        all_targets = []
         image_correct_total = 0
         image_total = 0
+        all_preds, all_targets, instance_rows = [], [], []
 
-        pbar = tqdm(self.val_loader, desc=f"Validating Epoch {epoch + 1}", leave=True)
+        desc = f"Evaluating {split_name}" if epoch is None else f"{split_name.capitalize()} Epoch {epoch + 1}"
+        pbar = tqdm(loader, desc=desc, leave=True)
+
         for batch_idx, batch in enumerate(pbar):
             inputs, targets_list, snrs, fps = batch
             need_save_detect_result = self.save_detect_vis_once and (not self._detect_vis_saved) and batch_idx == 0
 
-            images, labels, metas, batch_selected, batch_targets, image_infos = self._build_single_instances(
-                inputs,
-                targets_list,
-                sample_fps=fps,
-                save_detect_result=need_save_detect_result,
-                max_save_images=self.detect_vis_num_samples,
-                split_name="val",
-            )
-            selected_total += batch_selected
+            if mode == "single":
+                images, labels, metas, batch_matched, batch_targets, image_infos = self._build_single_instances(
+                    inputs, targets_list, sample_fps=fps, save_detect_result=need_save_detect_result,
+                    max_save_images=self.detect_vis_num_samples, split_name=split_name
+                )
+            elif mode == "multi":
+                images, labels, metas, batch_matched, batch_targets, image_infos = self._build_multi_matched_instances(
+                    inputs, targets_list, sample_fps=fps, save_detect_result=need_save_detect_result or (split_name == "infer"),
+                    max_save_images=self.detect_vis_num_samples if split_name != "infer" else max(self.detect_vis_num_samples, len(fps)),
+                    split_name=split_name
+                )
+            else:
+                raise ValueError(f"Unsupported evaluate mode={mode}")
+
+            matched_total += batch_matched
             target_total += batch_targets
 
             if need_save_detect_result:
                 self._detect_vis_saved = True
 
             if images is None or labels is None or labels.numel() == 0:
-                pbar.set_postfix(loss=f"{loss_meter.avg:.4f}", acc=f"{100.0 * correct / max(total,1):.2f}%", select=f"{float(selected_total)/max(float(target_total),1.0):.3f}")
                 continue
 
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
-            logits, loss = self._forward_loss(images, labels)
+            logits = self.classifier(images)
             preds = logits.argmax(dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.numel()
 
-            batch_image_correct, batch_image_total = self._compute_image_exact_acc(metas, labels, preds, image_infos)
+            labels_cpu = labels.detach().cpu().numpy()
+            preds_cpu = preds.detach().cpu().numpy()
+            keep_mask = np.array([not self._should_skip_eval_label(int(y)) for y in labels_cpu], dtype=bool)
+            if not keep_mask.any():
+                continue
+
+            keep_mask_t = torch.as_tensor(keep_mask, device=labels.device, dtype=torch.bool)
+            logits_kept = logits[keep_mask_t]
+            labels_kept = labels[keep_mask_t]
+            preds_kept = preds[keep_mask_t]
+
+            loss = self.criterion(logits_kept, labels_kept)
+            loss_meter.update(loss.item(), labels_kept.size(0))
+
+            preds_kept_cpu = preds_kept.detach().cpu().numpy()
+            labels_kept_cpu = labels_kept.detach().cpu().numpy()
+            correct += int((preds_kept_cpu == labels_kept_cpu).sum())
+            total += int(labels_kept_cpu.shape[0])
+
+            kept_metas = [m for m, k in zip(metas, keep_mask.tolist()) if k]
+            batch_image_correct, batch_image_total = self._compute_image_exact_acc(
+                metas=kept_metas, labels=labels_kept, preds=preds_kept, image_infos=image_infos
+            )
             image_correct_total += batch_image_correct
             image_total += batch_image_total
 
-            loss_meter.update(loss.item(), labels.size(0))
-            all_preds.append(preds.detach().cpu().numpy())
-            all_targets.append(labels.detach().cpu().numpy())
+            all_preds.append(preds_kept_cpu)
+            all_targets.append(labels_kept_cpu)
 
-            select_recall = float(selected_total) / max(float(target_total), 1.0)
-            image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
-            pbar.set_postfix(loss=f"{loss_meter.avg:.4f}", acc=f"{100.0 * correct / max(total,1):.2f}%", select=f"{select_recall:.3f}", img_exact=f"{image_exact_acc:.2f}%")
+            for meta, gt, pd in zip(kept_metas, labels_kept_cpu.tolist(), preds_kept_cpu.tolist()):
+                instance_rows.append({
+                    "file": meta["fp"],
+                    "target_idx": meta["target_idx"],
+                    "group_idx": meta["group_idx"],
+                    "gt_label": gt,
+                    "gt_name": self._label_name(gt),
+                    "pred_label": pd,
+                    "pred_name": self._label_name(pd),
+                    "correct": int(gt == pd),
+                })
 
-        all_preds = np.concatenate(all_preds, axis=0) if len(all_preds) > 0 else np.array([], dtype=np.int64)
-        all_targets = np.concatenate(all_targets, axis=0) if len(all_targets) > 0 else np.array([], dtype=np.int64)
+            acc = 100.0 * correct / max(total, 1)
+            match_recall = float(matched_total) / max(float(target_total), 1.0)
+            pbar.set_postfix(loss=f"{loss_meter.avg:.4f}", acc=f"{acc:.2f}", match=f"{match_recall:.3f}")
 
-        val_loss = loss_meter.avg if total > 0 else 0.0
-        val_acc = 100.0 * correct / max(total, 1)
-        val_select_recall = float(selected_total) / max(float(target_total), 1.0)
-        val_image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
+        if len(all_preds) > 0:
+            all_preds = np.concatenate(all_preds, axis=0)
+            all_targets = np.concatenate(all_targets, axis=0)
+        else:
+            all_preds = np.array([], dtype=np.int64)
+            all_targets = np.array([], dtype=np.int64)
 
-        if dist.is_initialized():
-            val_loss = _reduce_scalar(torch.tensor(val_loss, device=self.device), op="mean").item()
-            val_acc = _reduce_scalar(torch.tensor(val_acc, device=self.device), op="mean").item()
-            val_select_recall = _reduce_scalar(torch.tensor(val_select_recall, device=self.device), op="mean").item()
-            val_image_exact_acc = _reduce_scalar(torch.tensor(val_image_exact_acc, device=self.device), op="mean").item()
+        loss_avg = loss_meter.avg if total > 0 else 0.0
+        acc = 100.0 * correct / max(total, 1)
+        match_recall = float(matched_total) / max(float(target_total), 1.0)
+        image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
 
-        if (not dist.is_initialized()) or dist.get_rank() == 0:
-            self._save_confusion_matrix(all_targets, all_preds, epoch, split_name="val")
+        if save_confusion:
+            self._save_confusion_matrix(all_targets, all_preds, split_name=split_name, epoch=(None if split_name == "infer" else epoch))
 
-        return val_loss, val_acc, val_select_recall, val_image_exact_acc
+        if save_summary:
+            save_dir = self.result_dir / "eval_summary" / str(split_name)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            stem = "infer" if split_name == "infer" else f"epoch_{epoch+1}"
 
-    # ------------------------- inference (multi-signal path) -------------------------
+            with open(save_dir / f"{stem}.json", "w", encoding="utf-8") as f:
+                json.dump({
+                    "split": split_name,
+                    "epoch": None if split_name == "infer" else int(epoch + 1),
+                    "mode": mode,
+                    "loss": float(loss_avg),
+                    "acc": float(acc),
+                    "match_recall": float(match_recall),
+                    "image_exact_acc": float(image_exact_acc),
+                    "num_instances": int(total),
+                    "num_targets": int(target_total),
+                    "num_matched": int(matched_total),
+                    "eval_exclude_classes": sorted(list(self.eval_exclude_classes)),
+                }, f, ensure_ascii=False, indent=2)
+
+            with open(save_dir / f"{stem}_instances.csv", "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["file", "target_idx", "group_idx", "gt_label", "gt_name", "pred_label", "pred_name", "correct"])
+                writer.writeheader()
+                for row in instance_rows:
+                    writer.writerow(row)
+
+        return loss_avg, acc, match_recall, image_exact_acc
+
+    @torch.no_grad()
+    def validate(self, epoch):
+        return self.evaluate_loader(self.val_loader, epoch=epoch, split_name="val", mode="single", save_confusion=True, save_summary=True)
+
+    @torch.no_grad()
+    def validate_extra(self, epoch):
+        if self.extra_val_loader is None:
+            return None, None, None, None
+        return self.evaluate_loader(self.extra_val_loader, epoch=epoch, split_name="extra_val", mode="single", save_confusion=True, save_summary=True)
+
     @torch.no_grad()
     def infer(self, infer_loader):
-        self.classifier.eval()
         self._detect_vis_saved = False
+        infer_loss, infer_acc, infer_match_recall, infer_image_exact_acc = self.evaluate_loader(
+            infer_loader, epoch=None, split_name="infer", mode="multi", save_confusion=True, save_summary=True
+        )
+        self.logger.info(f"[Infer] loss={infer_loss:.4f}, acc={infer_acc:.2f}, match={infer_match_recall:.3f}, img_exact={infer_image_exact_acc:.2f}")
+        return infer_loss, infer_acc, infer_match_recall, infer_image_exact_acc
 
+    def train_one_epoch(self, epoch):
+        self.classifier.train()
         loss_meter = AverageMeter()
         correct = 0
         total = 0
         matched_total = 0
         target_total = 0
-        all_preds = []
-        all_targets = []
         image_correct_total = 0
         image_total = 0
-        rows = []
 
-        pbar = tqdm(infer_loader, desc="Inference", leave=True)
-        for batch_idx, batch in enumerate(pbar):
+        pbar = tqdm(self.train_loader, desc=f"Train Epoch {epoch + 1}", leave=True)
+        for batch in pbar:
             inputs, targets_list, snrs, fps = batch
-
-            images, labels, metas, batch_matched, batch_targets, image_infos = self._build_multi_matched_instances(
-                inputs,
-                targets_list,
-                sample_fps=fps,
-                save_detect_result=True,
-                max_save_images=max(self.detect_vis_num_samples, len(fps)),
-                split_name="infer",
+            images, labels, metas, batch_matched, batch_targets, image_infos = self._build_single_instances(
+                inputs, targets_list, sample_fps=fps, save_detect_result=False, max_save_images=0, split_name="train"
             )
+
             matched_total += batch_matched
             target_total += batch_targets
 
             if images is None or labels is None or labels.numel() == 0:
-                pbar.set_postfix(acc=f"{100.0 * correct / max(total,1):.2f}%", match=f"{float(matched_total)/max(float(target_total),1.0):.3f}")
                 continue
 
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
-            logits, loss = self._forward_loss(images, labels)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            logits = self.classifier(images)
+            loss = self.criterion(logits, labels)
+            loss.backward()
+            self.optimizer.step()
+
             preds = logits.argmax(dim=1)
+            preds_cpu = preds.detach().cpu().numpy()
+            labels_cpu = labels.detach().cpu().numpy()
 
-            correct += (preds == labels).sum().item()
-            total += labels.numel()
-            loss_meter.update(loss.item(), labels.size(0))
+            correct += int((preds_cpu == labels_cpu).sum())
+            total += int(labels_cpu.shape[0])
 
-            batch_image_correct, batch_image_total = self._compute_image_exact_acc(metas, labels, preds, image_infos)
+            batch_image_correct, batch_image_total = self._compute_image_exact_acc(
+                metas=metas, labels=labels, preds=preds, image_infos=image_infos
+            )
             image_correct_total += batch_image_correct
             image_total += batch_image_total
 
-            preds_np = preds.detach().cpu().numpy()
-            labels_np = labels.detach().cpu().numpy()
-            all_preds.append(preds_np)
-            all_targets.append(labels_np)
-            for meta, p, y in zip(metas, preds_np.tolist(), labels_np.tolist()):
-                rows.append({
-                    "file": meta["fp"],
-                    "gt": int(y),
-                    "pred": int(p),
-                    "correct": int(p == y),
-                    "class_name": meta.get("class_name", ""),
-                })
-
+            loss_meter.update(loss.item(), labels.size(0))
+            acc = 100.0 * correct / max(total, 1)
             match_recall = float(matched_total) / max(float(target_total), 1.0)
-            image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
-            pbar.set_postfix(loss=f"{loss_meter.avg:.4f}", acc=f"{100.0 * correct / max(total,1):.2f}%", match=f"{match_recall:.3f}", img_exact=f"{image_exact_acc:.2f}%")
+            pbar.set_postfix(loss=f"{loss_meter.avg:.4f}", acc=f"{acc:.2f}", match=f"{match_recall:.3f}")
 
-        all_preds = np.concatenate(all_preds, axis=0) if len(all_preds) > 0 else np.array([], dtype=np.int64)
-        all_targets = np.concatenate(all_targets, axis=0) if len(all_targets) > 0 else np.array([], dtype=np.int64)
+        self.scheduler.step(epoch + 1)
 
-        infer_loss = loss_meter.avg if total > 0 else 0.0
-        infer_acc = 100.0 * correct / max(total, 1)
-        infer_match_recall = float(matched_total) / max(float(target_total), 1.0)
-        infer_image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
+        train_loss = loss_meter.avg if total > 0 else 0.0
+        train_acc = 100.0 * correct / max(total, 1)
+        train_match_recall = float(matched_total) / max(float(target_total), 1.0)
+        train_image_exact_acc = 100.0 * image_correct_total / max(image_total, 1)
 
-        if (not dist.is_initialized()) or dist.get_rank() == 0:
-            self._save_confusion_matrix(all_targets, all_preds, epoch=0, split_name="infer")
-            save_dir = os.path.join(self.config.result_dir, "eval_summary", "infer")
-            os.makedirs(save_dir, exist_ok=True)
-            with open(os.path.join(save_dir, "infer_summary.json"), "w", encoding="utf-8") as f:
-                json.dump({
-                    "loss": infer_loss,
-                    "acc": infer_acc,
-                    "match_recall": infer_match_recall,
-                    "image_exact_acc": infer_image_exact_acc,
-                    "num_instances": int(total),
-                    "num_targets": int(target_total),
-                    "num_matched": int(matched_total),
-                }, f, ensure_ascii=False, indent=2)
-            with open(os.path.join(save_dir, "infer_instances.csv"), "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=["file", "gt", "pred", "correct", "class_name"])
-                writer.writeheader()
-                for row in rows:
-                    writer.writerow(row)
-            self.logger.info(
-                f"[Infer] loss={infer_loss:.4f}, acc={infer_acc:.2f}, "
-                f"match={infer_match_recall:.3f}, img_exact={infer_image_exact_acc:.2f}"
-            )
+        self.writer.add_scalar("train/loss", train_loss, epoch)
+        self.writer.add_scalar("train/acc", train_acc, epoch)
+        self.writer.add_scalar("train/match_recall", train_match_recall, epoch)
+        self.writer.add_scalar("train/image_exact_acc", train_image_exact_acc, epoch)
+        return train_loss, train_acc, train_match_recall, train_image_exact_acc
 
-        return infer_loss, infer_acc, infer_match_recall, infer_image_exact_acc
-
-    def _save_confusion_matrix(self, y_true, y_pred, epoch, split_name="val"):
-        if len(y_true) == 0:
-            return
-        labels = list(range(self.config.num_classes))
-        cm = confusion_matrix(y_true, y_pred, labels=labels)
-        if isinstance(self.config.classes, dict):
-            idx_to_name = {v: k for k, v in self.config.classes.items()}
-            names = [idx_to_name.get(i, str(i)) for i in labels]
-        else:
-            names = [str(i) for i in labels]
-        save_dir = os.path.join(self.config.result_dir, "confusion_matrix", str(split_name))
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, f"epoch_{epoch + 1}.png" if split_name != "infer" else "infer.png")
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=names, yticklabels=names)
-        plt.xlabel("Predicted")
-        plt.ylabel("True")
-        plt.title(f"Confusion Matrix - {split_name}{'' if split_name=='infer' else f' Epoch {epoch + 1}'}")
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=200)
-        plt.close()
+    def _save_checkpoint(self, epoch, is_best=False):
+        save_obj = {
+            "epoch": int(epoch),
+            "model": self.classifier.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
+            "config": self.config,
+            "best_val_acc": float(self.best_val_acc),
+        }
+        ckpt_path = self.model_dir / f"epoch_{epoch+1}.pth"
+        torch.save(save_obj, ckpt_path)
+        if is_best:
+            torch.save(save_obj, self.model_dir / "best.pth")
 
     def train(self):
         if self.train_loader is None or self.val_loader is None:
-            raise RuntimeError("train_loader / val_loader is None. Use infer() in infer mode.")
+            raise RuntimeError("train_loader / val_loader is None. Use infer() for inference mode.")
 
-        best_acc = -1.0
-        for epoch in range(int(self.config.epochs)):
-            train_loss, train_acc, train_select_recall, train_image_exact_acc = self.train_one_epoch(epoch)
-            val_loss, val_acc, val_select_recall, val_image_exact_acc = self.validate(epoch)
+        for epoch in range(self.epochs):
+            self.logger.info(f"===== Epoch {epoch + 1}/{self.epochs} =====")
 
-            if (not dist.is_initialized()) or dist.get_rank() == 0:
-                self.logger.info(
-                    f"[Epoch {epoch + 1}/{self.config.epochs}] "
-                    f"train_loss={train_loss:.4f}, train_acc={train_acc:.2f}, train_select={train_select_recall:.3f}, train_img_exact={train_image_exact_acc:.2f}, "
-                    f"val_loss={val_loss:.4f}, val_acc={val_acc:.2f}, val_select={val_select_recall:.3f}, val_img_exact={val_image_exact_acc:.2f}"
-                )
+            train_loss, train_acc, train_match_recall, train_image_exact_acc = self.train_one_epoch(epoch)
+            val_loss, val_acc, val_match_recall, val_image_exact_acc = self.validate(epoch)
 
-                if self.writer is not None:
-                    self.writer.add_scalar("train/loss", train_loss, epoch + 1)
-                    self.writer.add_scalar("train/acc", train_acc, epoch + 1)
-                    self.writer.add_scalar("train/select_recall", train_select_recall, epoch + 1)
-                    self.writer.add_scalar("val/loss", val_loss, epoch + 1)
-                    self.writer.add_scalar("val/acc", val_acc, epoch + 1)
-                    self.writer.add_scalar("val/select_recall", val_select_recall, epoch + 1)
-                    self.writer.add_scalar("train/image_exact_acc", train_image_exact_acc, epoch + 1)
-                    self.writer.add_scalar("val/image_exact_acc", val_image_exact_acc, epoch + 1)
+            self.writer.add_scalar("val/loss", val_loss, epoch)
+            self.writer.add_scalar("val/acc", val_acc, epoch)
+            self.writer.add_scalar("val/match_recall", val_match_recall, epoch)
+            self.writer.add_scalar("val/image_exact_acc", val_image_exact_acc, epoch)
 
-                is_best = val_acc > best_acc
-                if is_best:
-                    best_acc = val_acc
+            if self.extra_val_loader is not None:
+                extra_loss, extra_acc, extra_match, extra_img_acc = self.validate_extra(epoch)
+                if extra_loss is not None:
+                    self.writer.add_scalar("extra_val/loss", extra_loss, epoch)
+                    self.writer.add_scalar("extra_val/acc", extra_acc, epoch)
+                    self.writer.add_scalar("extra_val/match_recall", extra_match, epoch)
+                    self.writer.add_scalar("extra_val/image_exact_acc", extra_img_acc, epoch)
+                    self.logger.info(f"[Extra Val] loss={extra_loss:.4f}, acc={extra_acc:.2f}, match={extra_match:.3f}, img_exact={extra_img_acc:.2f}")
 
-                save_checkpoint(
-                    models={"model": self.classifier.module if hasattr(self.classifier, "module") else self.classifier},
-                    optimizer=self.optimizer,
-                    scheduler=self.scheduler,
-                    epoch=epoch + 1,
-                    path=os.path.join(self.config.model_dir, f"epoch_{epoch + 1}.pth"),
-                    cfg=self.config,
-                )
+            self.logger.info(f"[Train] loss={train_loss:.4f}, acc={train_acc:.2f}, match={train_match_recall:.3f}, img_exact={train_image_exact_acc:.2f}")
+            self.logger.info(f"[Val]   loss={val_loss:.4f}, acc={val_acc:.2f}, match={val_match_recall:.3f}, img_exact={val_image_exact_acc:.2f}")
 
-                self.early_stopping(val_loss, self.classifier)
-                stop = self.early_stopping.early_stop
+            is_best = val_acc > self.best_val_acc
+            if is_best:
+                self.best_val_acc = val_acc
+                self.no_improve_epochs = 0
             else:
-                stop = False
+                self.no_improve_epochs += 1
 
-            if dist.is_initialized():
-                stop_tensor = torch.tensor(int(stop), device=self.device)
-                dist.broadcast(stop_tensor, src=0)
-                stop = bool(stop_tensor.item())
+            if ((epoch + 1) % self.save_interval == 0) or is_best:
+                self._save_checkpoint(epoch, is_best=is_best)
 
-            if stop:
-                if (not dist.is_initialized()) or dist.get_rank() == 0:
-                    self.logger.info("Early stopping triggered.")
+            if self.no_improve_epochs >= self.early_stop_patience:
+                self.logger.info(f"Early stopping triggered at epoch {epoch + 1}")
                 break
 
-        if self.writer is not None:
-            self.writer.close()
+        self.writer.close()

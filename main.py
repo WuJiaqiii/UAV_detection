@@ -68,7 +68,7 @@ def get_parser():
     g_pre.add_argument("--merge_energy_thresh", type=float, default=1.0)
     g_pre.add_argument("--min_group_len", type=int, default=2)
     g_pre.add_argument("--min_group_time_span_ratio", type=float, default=0.50)
-    g_pre.add_argument("--score_n_boxes_weight", type=float, default=0.10)
+    g_pre.add_argument("--score_n_boxes_weight", type=float, default=0.50)
     g_pre.add_argument("--score_time_span_weight", type=float, default=2.00)
     g_pre.add_argument("--score_contrast_weight", type=float, default=1.0)
     g_pre.add_argument("--score_w_std_weight", type=float, default=1.0)
@@ -94,6 +94,7 @@ def get_parser():
     g_data.add_argument("--num_workers", type=int, default=4)
     g_data.add_argument("--sample_ratio", type=float, default=1.0)
     g_data.add_argument("--exclude_classes", type=str, nargs="*", default=[])
+    g_data.add_argument("--eval_exclude_classes", type=str, nargs="*", default=[])
 
     # Classifier Model
     g_model = parser.add_argument_group("CNN Classifier")
