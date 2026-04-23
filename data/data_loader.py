@@ -16,6 +16,40 @@ except ImportError:
     loadmat = None
 
 
+def _normalize_dataset_paths(dataset_path):
+    if dataset_path is None:
+        return []
+    if isinstance(dataset_path, (list, tuple)):
+        return [str(p) for p in dataset_path if str(p).strip()]
+    s = str(dataset_path).strip()
+    return [s] if s else []
+
+
+def _collect_data_files(dataset_path, input_type: str):
+    dataset_paths = _normalize_dataset_paths(dataset_path)
+    if len(dataset_paths) == 0:
+        raise ValueError("config.dataset_path must not be empty")
+
+    data_files = []
+    for path in dataset_paths:
+        if os.path.isfile(path):
+            ext = os.path.splitext(path)[1].lower().lstrip('.')
+            if ext != input_type:
+                raise ValueError(f"dataset_path file type {ext} does not match input_type={input_type}: {path}")
+            data_files.append(path)
+        elif os.path.isdir(path):
+            pattern = "*." + input_type
+            data_files.extend(sorted(glob.glob(os.path.join(path, pattern))))
+        else:
+            raise ValueError(f"config.dataset_path element must be an existing file or directory, got: {path}")
+
+    data_files = sorted(set(data_files))
+    if not data_files:
+        joined = ", ".join(dataset_paths)
+        raise FileNotFoundError(f"No *.{input_type} files found under: {joined}")
+    return dataset_paths, data_files
+
+
 class UAVDataset(Dataset):
     """
     Unified dataloader for single-signal training and multi-signal inference.
@@ -37,27 +71,12 @@ class UAVDataset(Dataset):
         self.run_mode = str(getattr(config, "run_mode", "train")).lower()
         self.train_signal_mode = str(getattr(config, "train_signal_mode", "single")).lower()
 
-        if not getattr(config, "dataset_path", None):
-            raise ValueError("config.dataset_path must not be empty")
         if self.input_type not in {"mat", "png"}:
             raise ValueError(f"Unsupported input_type={self.input_type}, expected 'mat' or 'png'")
 
         self.mod2label = {str(k): int(v) for k, v in getattr(config, "classes", {}).items()}
 
-        dataset_path = str(config.dataset_path)
-        if os.path.isfile(dataset_path):
-            ext = os.path.splitext(dataset_path)[1].lower().lstrip('.')
-            if ext != self.input_type:
-                raise ValueError(f"dataset_path file type {ext} does not match input_type={self.input_type}")
-            data_files = [dataset_path]
-        elif os.path.isdir(dataset_path):
-            pattern = "*." + self.input_type
-            data_files = sorted(glob.glob(os.path.join(dataset_path, pattern)))
-        else:
-            raise ValueError(f"config.dataset_path must be an existing file or directory, got: {dataset_path}")
-
-        if not data_files:
-            raise FileNotFoundError(f"No *.{self.input_type} files found under: {dataset_path}")
+        dataset_paths, data_files = _collect_data_files(config.dataset_path, self.input_type)
 
         self.samples: List[Dict[str, Any]] = []
         bad = 0
@@ -149,7 +168,7 @@ class UAVDataset(Dataset):
         if not self.samples:
             raise RuntimeError(f"All files were skipped. bad={bad}, total={len(data_files)}")
 
-        logger.info(f"Indexed {len(self.samples)} samples from {dataset_path} (skipped {bad})")
+        logger.info(f"Indexed {len(self.samples)} samples from {dataset_paths} (skipped {bad})")
         logger.info(f"Dataset input_type={self.input_type}, validate_on_init={validate_on_init}, run_mode={self.run_mode}, train_signal_mode={self.train_signal_mode}")
 
     def _load_x(self, fp: str) -> torch.Tensor:

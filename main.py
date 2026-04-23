@@ -87,7 +87,13 @@ def get_parser():
 
     # Dataset / DataLoader
     g_data = parser.add_argument_group("Data")
-    g_data.add_argument("--dataset_path", type=str, required=True)
+    g_data.add_argument(
+        "--dataset_path",
+        type=str,
+        nargs="+",
+        required=True,
+        help="One or more dataset paths. Files under all paths will be merged into one dataset."
+    )
     g_data.add_argument("--input_type", type=str, default="mat", choices=["mat", "png"])
     g_data.add_argument("--val_ratio", type=float, default=0.2)
     g_data.add_argument("--batch_size", type=int, default=32)
