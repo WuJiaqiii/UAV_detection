@@ -224,6 +224,51 @@ class Trainer:
             draw.text((x1, max(0, y1 - 12)), label, fill=color)
         img.save(save_path)
 
+
+    def _save_classified_groups_image(self, spec, groups, group_pred_map, fp, sample_idx=0, split_name="infer"):
+        """
+        Save final retained groups with predicted class names.
+        group_pred_map: {group_idx: {"pred_label": int, "pred_name": str}}
+        """
+        save_dir = self.result_dir / "detect_result" / str(split_name)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        base = Path(fp).stem if fp else f"sample_{sample_idx}"
+        spec_u8 = self._spec_to_uint8_vis_log(spec, p_low=1.0, p_high=99.5, log_gain=9.0)
+
+        from PIL import Image, ImageDraw
+        img = Image.fromarray(spec_u8).convert("RGB")
+        draw = ImageDraw.Draw(img)
+        colors = [
+            (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
+            (255, 0, 255), (0, 255, 255), (255, 128, 0), (128, 255, 0),
+        ]
+
+        for gi, g in enumerate(groups):
+            if gi not in group_pred_map:
+                continue
+            boxes = np.asarray(g.get("boxes", []), dtype=np.int32).reshape(-1, 4)
+            if len(boxes) == 0:
+                continue
+            color = colors[gi % len(colors)]
+            for b in boxes:
+                x1, y1, x2, y2 = [int(v) for v in b]
+                draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+
+            pred_name = str(group_pred_map[gi].get("pred_name", group_pred_map[gi].get("pred_label", "unknown")))
+            extra = []
+            if "score" in g:
+                extra.append(f"s={float(g['score']):.2f}")
+            if "center_freq" in g:
+                extra.append(f"f={float(g['center_freq']):.1f}")
+            label = f"G{gi}: {pred_name}"
+            if extra:
+                label += " | " + " ".join(extra)
+
+            x1, y1, x2, y2 = [int(v) for v in boxes[0]]
+            draw.text((x1, max(0, y1 - 12)), label, fill=color)
+
+        img.save(save_dir / f"{base}_classified_groups.png")
+
     def _save_detect_result_images(self, spec, yolo_boxes, groups, matched_boxes, fp, sample_idx=0, split_name="val"):
         save_dir = self.result_dir / "detect_result" / str(split_name)
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -412,6 +457,10 @@ class Trainer:
 
             image_infos.append({
                 "fp": fp,
+                "spec": spec,
+                "yolo_boxes": yolo_boxes,
+                "groups": groups,
+                "matched": matched,
                 "num_targets": len(targets),
                 "num_matched": len(matched),
                 "unmatched_targets": unmatched_targets,
@@ -436,6 +485,7 @@ class Trainer:
                     "group_idx": int(m["group_idx"]),
                     "label": int(m["label"]),
                     "target_name": self._label_name(int(m["label"])),
+                    "boxes": final_boxes.copy(),
                 })
 
         if len(batch_images) == 0:
@@ -443,6 +493,143 @@ class Trainer:
         images = torch.stack(batch_images, dim=0)
         labels = torch.as_tensor(batch_labels, dtype=torch.long)
         return images, labels, batch_metas, matched_total, target_total, image_infos
+
+
+    def _build_multi_group_instances(self, inputs, targets_list, sample_fps=None, save_detect_result=False, max_save_images=8, split_name="infer"):
+        """
+        Build instances for ALL final groups (no matching in infer main path).
+        Matching to GT is deferred to metric computation later.
+        """
+        inputs_np = inputs.detach().cpu().numpy() if torch.is_tensor(inputs) else np.asarray(inputs)
+        batch_images, batch_metas, image_infos = [], [], []
+        saved_count = 0
+
+        for i in range(len(inputs_np)):
+            spec = np.asarray(inputs_np[i])
+            fp = sample_fps[i] if sample_fps is not None else f"sample_{i}"
+            targets = targets_list[i] if targets_list is not None else []
+
+            yolo_boxes = self.detector.detect(spec)
+            yolo_boxes = np.asarray(yolo_boxes, dtype=np.int32).reshape(-1, 4) if len(yolo_boxes) > 0 else np.zeros((0, 4), dtype=np.int32)
+
+            groups = self._extract_groups(yolo_boxes, spec)
+            if groups is None:
+                groups = []
+
+            image_infos.append({
+                "fp": fp,
+                "spec": spec,
+                "yolo_boxes": yolo_boxes,
+                "groups": groups,
+                "targets": targets,
+            })
+
+            if save_detect_result and saved_count < max_save_images:
+                all_group_boxes = []
+                for g in groups:
+                    all_group_boxes.extend(np.asarray(g.get("boxes", []), dtype=np.int32).reshape(-1, 4).tolist())
+                self._save_detect_result_images(spec, yolo_boxes, groups, all_group_boxes, fp, i, split_name)
+                saved_count += 1
+
+            for gi, g in enumerate(groups):
+                final_boxes = np.asarray(g.get("boxes", []), dtype=np.int32).reshape(-1, 4)
+                if len(final_boxes) == 0:
+                    continue
+                x, _ = self._make_input_tensor(spec, final_boxes)
+                batch_images.append(x)
+                batch_metas.append({
+                    "fp": fp,
+                    "group_idx": int(gi),
+                    "boxes": final_boxes.copy(),
+                })
+
+        if len(batch_images) == 0:
+            return None, None, image_infos
+
+        images = torch.stack(batch_images, dim=0)
+        return images, batch_metas, image_infos
+
+    def _evaluate_infer_predictions(self, image_infos, metas, preds):
+        """
+        After all final groups are classified, use GT only here to compute metrics.
+        """
+        if metas is None or len(metas) == 0:
+            return 0, 0, 0, 0, np.array([], dtype=np.int64), np.array([], dtype=np.int64), []
+
+        preds_np = preds.detach().cpu().numpy() if torch.is_tensor(preds) else np.asarray(preds)
+
+        pred_map_by_fp = {}
+        for meta, pred in zip(metas, preds_np.tolist()):
+            fp = meta["fp"]
+            pred_map_by_fp.setdefault(fp, {})
+            pred_map_by_fp[fp][int(meta["group_idx"])] = int(pred)
+
+        correct = 0
+        total = 0
+        matched_total = 0
+        target_total = 0
+        image_correct_total = 0
+        image_total = 0
+        all_targets = []
+        all_preds = []
+        instance_rows = []
+
+        for info in image_infos:
+            fp = info.get("fp", "")
+            spec = info.get("spec", None)
+            groups = info.get("groups", []) or []
+            targets = info.get("targets", []) or []
+
+            matched, unmatched_targets, unmatched_groups = self._match_groups_to_targets(groups, targets, spec.shape)
+            matched_total += len(matched)
+            target_total += len(targets)
+            image_total += 1
+
+            per_image_all_correct = (len(matched) == len(targets))
+            for m in matched:
+                gi = int(m["group_idx"])
+                if fp not in pred_map_by_fp or gi not in pred_map_by_fp[fp]:
+                    per_image_all_correct = False
+                    continue
+
+                gt = int(m["label"])
+                pd = int(pred_map_by_fp[fp][gi])
+
+                if self._should_skip_eval_label(gt):
+                    continue
+
+                total += 1
+                correct_i = int(pd == gt)
+                correct += correct_i
+                all_targets.append(gt)
+                all_preds.append(pd)
+                instance_rows.append({
+                    "file": fp,
+                    "target_idx": int(m["target_idx"]),
+                    "group_idx": gi,
+                    "gt_label": gt,
+                    "gt_name": self._label_name(gt),
+                    "pred_label": pd,
+                    "pred_name": self._label_name(pd),
+                    "correct": correct_i,
+                })
+                if correct_i == 0:
+                    per_image_all_correct = False
+
+            if per_image_all_correct and (len(targets) == len(matched)):
+                image_correct_total += 1
+
+        return (
+            correct,
+            total,
+            matched_total,
+            target_total,
+            image_correct_total,
+            image_total,
+            np.asarray(all_targets, dtype=np.int64),
+            np.asarray(all_preds, dtype=np.int64),
+            instance_rows,
+        )
 
     def _compute_image_exact_acc(self, metas, labels, preds, image_infos):
         if metas is None or len(metas) == 0:
@@ -511,6 +698,37 @@ class Trainer:
             plt.savefig(save_dir / f"{stem}{suffix}.png", dpi=200)
             plt.close()
 
+
+    def _save_infer_classified_results(self, metas, preds, image_infos, split_name="infer"):
+        if metas is None or len(metas) == 0:
+            return
+        preds_np = preds.detach().cpu().numpy() if torch.is_tensor(preds) else np.asarray(preds)
+
+        pred_map_by_fp = {}
+        for meta, pred in zip(metas, preds_np.tolist()):
+            fp = meta["fp"]
+            pred_map_by_fp.setdefault(fp, {})
+            pred_map_by_fp[fp][int(meta["group_idx"])] = {
+                "pred_label": int(pred),
+                "pred_name": self._label_name(int(pred)),
+            }
+
+        for info in image_infos:
+            fp = info.get("fp", "")
+            if fp not in pred_map_by_fp:
+                continue
+            spec = info.get("spec", None)
+            groups = info.get("groups", None)
+            if spec is None or groups is None:
+                continue
+            self._save_classified_groups_image(
+                spec=spec,
+                groups=groups,
+                group_pred_map=pred_map_by_fp[fp],
+                fp=fp,
+                split_name=split_name,
+            )
+
     @torch.no_grad()
     def evaluate_loader(self, loader, epoch=0, split_name="val", mode="single", save_confusion=True, save_summary=True):
         self.classifier.eval()
@@ -536,29 +754,78 @@ class Trainer:
                     max_save_images=self.detect_vis_num_samples, split_name=split_name
                 )
             elif mode == "multi":
-                images, labels, metas, batch_matched, batch_targets, image_infos = self._build_multi_matched_instances(
-                    inputs, targets_list, sample_fps=fps, save_detect_result=need_save_detect_result or (split_name == "infer"),
-                    max_save_images=self.detect_vis_num_samples if split_name != "infer" else max(self.detect_vis_num_samples, len(fps)),
-                    split_name=split_name
-                )
+                if split_name == "infer":
+                    images, metas, image_infos = self._build_multi_group_instances(
+                        inputs, targets_list, sample_fps=fps, save_detect_result=need_save_detect_result or True,
+                        max_save_images=max(self.detect_vis_num_samples, len(fps)),
+                        split_name=split_name
+                    )
+                    labels = None
+                    batch_matched = 0
+                    batch_targets = sum(len(t) for t in targets_list)
+                else:
+                    images, labels, metas, batch_matched, batch_targets, image_infos = self._build_multi_matched_instances(
+                        inputs, targets_list, sample_fps=fps, save_detect_result=need_save_detect_result or (split_name == "infer"),
+                        max_save_images=self.detect_vis_num_samples if split_name != "infer" else max(self.detect_vis_num_samples, len(fps)),
+                        split_name=split_name
+                    )
             else:
                 raise ValueError(f"Unsupported evaluate mode={mode}")
 
-            matched_total += batch_matched
-            target_total += batch_targets
+            if split_name != "infer" or mode != "multi":
+                matched_total += batch_matched
+                target_total += batch_targets
 
             if need_save_detect_result:
                 self._detect_vis_saved = True
 
-            if images is None or labels is None or labels.numel() == 0:
+            if images is None:
+                continue
+            if split_name != "infer" and (labels is None or labels.numel() == 0):
                 continue
 
             images = images.to(self.device, non_blocking=True)
-            labels = labels.to(self.device, non_blocking=True)
-
             logits = self.classifier(images)
             preds = logits.argmax(dim=1)
 
+            if split_name == "infer" and mode == "multi":
+                self._save_infer_classified_results(
+                    metas=metas,
+                    preds=preds,
+                    image_infos=image_infos,
+                    split_name=split_name,
+                )
+
+                (
+                    batch_correct,
+                    batch_total,
+                    batch_matched_eval,
+                    batch_targets_eval,
+                    batch_image_correct,
+                    batch_image_total,
+                    batch_targets_arr,
+                    batch_preds_arr,
+                    batch_rows,
+                ) = self._evaluate_infer_predictions(image_infos, metas, preds)
+
+                correct += batch_correct
+                total += batch_total
+                matched_total += batch_matched_eval
+                target_total += batch_targets_eval
+                image_correct_total += batch_image_correct
+                image_total += batch_image_total
+
+                if len(batch_preds_arr) > 0:
+                    all_preds.append(batch_preds_arr)
+                    all_targets.append(batch_targets_arr)
+                instance_rows.extend(batch_rows)
+
+                acc = 100.0 * correct / max(total, 1)
+                match_recall = float(matched_total) / max(float(target_total), 1.0)
+                pbar.set_postfix(loss=f"{loss_meter.avg:.4f}", acc=f"{acc:.2f}", match=f"{match_recall:.3f}")
+                continue
+
+            labels = labels.to(self.device, non_blocking=True)
             labels_cpu = labels.detach().cpu().numpy()
             preds_cpu = preds.detach().cpu().numpy()
             keep_mask = np.array([not self._should_skip_eval_label(int(y)) for y in labels_cpu], dtype=bool)
