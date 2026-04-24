@@ -7,7 +7,7 @@ import cv2
 
 from typing import List, Dict, Any, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler, DistributedSampler, Subset
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
 import torch.distributed as dist
 
 try:
@@ -48,6 +48,38 @@ def _collect_data_files(dataset_path, input_type: str):
         joined = ", ".join(dataset_paths)
         raise FileNotFoundError(f"No *.{input_type} files found under: {joined}")
     return dataset_paths, data_files
+
+
+def _sample_group_key(fp: str) -> str:
+    """
+    Group samples by original signal identity, so slices from the same signal
+    (e.g. ...-Figure-1.mat, ...-Figure-2.mat) stay in the same split.
+    """
+    stem = os.path.splitext(os.path.basename(fp))[0]
+    stem = re.sub(r"-Figure-\d+$", "", stem)
+    return stem
+
+
+def _grouped_train_val_split(dataset, val_ratio: float, random_state: int = 42):
+    idxs = np.arange(len(dataset))
+    if len(idxs) == 0:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+
+    groups = np.array([_sample_group_key(dataset.samples[i]["fp"]) for i in idxs], dtype=object)
+    unique_groups = np.unique(groups)
+
+    # Fallback: if every sample is unique or there is only one group, keep old behavior.
+    if len(unique_groups) <= 1:
+        return train_test_split(
+            idxs,
+            test_size=val_ratio,
+            shuffle=True,
+            random_state=random_state,
+        )
+
+    splitter = GroupShuffleSplit(n_splits=1, test_size=val_ratio, random_state=random_state)
+    train_idx, val_idx = next(splitter.split(idxs, groups=groups))
+    return idxs[train_idx], idxs[val_idx]
 
 
 class UAVDataset(Dataset):
@@ -306,13 +338,25 @@ def get_dataloader(dataset, config, mode="train"):
     if mode == "infer":
         return create_infer_dataloader(dataset, config)
 
-    idxs = np.arange(len(dataset))
-    train_idx, val_idx = train_test_split(
-        idxs,
-        test_size=config.val_ratio,
-        shuffle=True,
+    train_idx, val_idx = _grouped_train_val_split(
+        dataset,
+        val_ratio=float(config.val_ratio),
         random_state=42,
     )
+
+    if len(train_idx) == 0 or len(val_idx) == 0:
+        raise RuntimeError(
+            f"Grouped train/val split failed: train={len(train_idx)}, val={len(val_idx)}. "
+            f"Please check dataset size / val_ratio / grouping rule."
+        )
+
+    if hasattr(dataset, "logger"):
+        train_groups = len(set(_sample_group_key(dataset.samples[i]["fp"]) for i in train_idx.tolist()))
+        val_groups = len(set(_sample_group_key(dataset.samples[i]["fp"]) for i in val_idx.tolist()))
+        dataset.logger.info(
+            f"Grouped split by signal source: train_samples={len(train_idx)}, val_samples={len(val_idx)}, "
+            f"train_groups={train_groups}, val_groups={val_groups}"
+        )
 
     train_dataset = Subset(dataset, train_idx.tolist())
     val_dataset = Subset(dataset, val_idx.tolist())
