@@ -86,6 +86,8 @@ class Trainer:
         self.cnn_input_mode = str(getattr(config, "cnn_input_mode", "mask")).lower()
         self.box_draw_thickness = int(getattr(config, "box_draw_thickness", 2))
         self.box_draw_value = int(getattr(config, "box_draw_value", 255))
+        self.center_group_vertically = bool(getattr(config, "center_group_vertically", True))
+        self.center_group_horizontally = bool(getattr(config, "center_group_horizontally", False))
 
         self.save_detect_vis_once = bool(getattr(config, "save_detect_vis_once", False))
         self.detect_vis_num_samples = int(getattr(config, "detect_vis_num_samples", 8))
@@ -168,11 +170,88 @@ class Trainer:
             mask[y1:y2, x1:x2] = int(fill_value)
         return mask
 
+
+    def _boxes_to_centered_white_mask(
+        self,
+        image_shape: Tuple[int, int],
+        boxes,
+        fill_value: int = 255,
+        center_vertically: bool = True,
+        center_horizontally: bool = False,
+    ) -> np.ndarray:
+        """
+        Canonicalize group position before building mask so the classifier relies
+        more on relative geometry and less on absolute frequency position.
+        """
+        h, w = int(image_shape[0]), int(image_shape[1])
+        mask = np.zeros((h, w), dtype=np.uint8)
+        if boxes is None:
+            return mask
+
+        arr = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+        if len(arr) == 0:
+            return mask
+
+        # valid boxes only
+        valid = []
+        for b in arr:
+            x1, y1, x2, y2 = [int(v) for v in b]
+            x1 = max(0, min(x1, w - 1))
+            x2 = max(0, min(x2, w))
+            y1 = max(0, min(y1, h - 1))
+            y2 = max(0, min(y2, h))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            valid.append([x1, y1, x2, y2])
+
+        if len(valid) == 0:
+            return mask
+
+        arr = np.asarray(valid, dtype=np.int32)
+
+        gx1 = int(arr[:, 0].min())
+        gy1 = int(arr[:, 1].min())
+        gx2 = int(arr[:, 2].max())
+        gy2 = int(arr[:, 3].max())
+
+        group_cx = 0.5 * (gx1 + gx2)
+        group_cy = 0.5 * (gy1 + gy2)
+
+        canvas_cx = 0.5 * (w - 1)
+        canvas_cy = 0.5 * (h - 1)
+
+        dx = int(round(canvas_cx - group_cx)) if center_horizontally else 0
+        dy = int(round(canvas_cy - group_cy)) if center_vertically else 0
+
+        shifted = arr.copy()
+        shifted[:, [0, 2]] += dx
+        shifted[:, [1, 3]] += dy
+
+        for b in shifted:
+            x1, y1, x2, y2 = [int(v) for v in b]
+            x1 = max(0, min(x1, w - 1))
+            x2 = max(0, min(x2, w))
+            y1 = max(0, min(y1, h - 1))
+            y2 = max(0, min(y2, h))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            mask[y1:y2, x1:x2] = int(fill_value)
+        return mask
+
     def _make_input_tensor(self, spec, final_boxes):
         mode = self.cnn_input_mode
         raw = self._spec_to_uint8(spec)
         if mode == "mask":
-            img = self._boxes_to_white_mask(spec.shape, final_boxes, fill_value=255)
+            if self.center_group_vertically or self.center_group_horizontally:
+                img = self._boxes_to_centered_white_mask(
+                    spec.shape,
+                    final_boxes,
+                    fill_value=255,
+                    center_vertically=self.center_group_vertically,
+                    center_horizontally=self.center_group_horizontally,
+                )
+            else:
+                img = self._boxes_to_white_mask(spec.shape, final_boxes, fill_value=255)
         else:
             img = raw.copy()
             if mode == "raw_in_boxes":

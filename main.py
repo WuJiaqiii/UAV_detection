@@ -98,7 +98,7 @@ def get_parser():
     g_data.add_argument("--val_ratio", type=float, default=0.2)
     g_data.add_argument("--batch_size", type=int, default=32)
     g_data.add_argument("--num_workers", type=int, default=4)
-    g_data.add_argument("--sample_ratio", type=float, default=1.0)
+    g_data.add_argument("--sample_ratio", type=float, default=0.1)
     g_data.add_argument("--exclude_classes", type=str, nargs="*", default=[])
     g_data.add_argument("--eval_exclude_classes", type=str, nargs="*", default=[])
 

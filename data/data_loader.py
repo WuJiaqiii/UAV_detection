@@ -288,15 +288,20 @@ def multi_signal_collate_fn(batch: List[Tuple[torch.Tensor, List[Dict[str, Any]]
     return xs, list(targets_list), snrs, list(fps)
 
 
-def create_dataloader(dataset: Dataset, config, shuffle: bool):
+def create_dataloader(dataset: Dataset, config, shuffle: bool, sample_ratio: float = 1.0):
+    sample_ratio = float(sample_ratio)
+
     if dist.is_initialized():
         dataset, sampler = build_ddp_sampler(
             dataset,
             shuffle=shuffle,
-            sample_ratio=config.sample_ratio
+            sample_ratio=sample_ratio
         )
     else:
-        sampler = RandomSampler(dataset, config.sample_ratio)
+        if sample_ratio >= 1.0:
+            sampler = None
+        else:
+            sampler = RandomSampler(dataset, sample_ratio)
 
     return DataLoader(
         dataset,
@@ -361,6 +366,6 @@ def get_dataloader(dataset, config, mode="train"):
     train_dataset = Subset(dataset, train_idx.tolist())
     val_dataset = Subset(dataset, val_idx.tolist())
 
-    train_loader = create_dataloader(train_dataset, config, shuffle=True)
-    val_loader = create_dataloader(val_dataset, config, shuffle=False)
+    train_loader = create_dataloader(train_dataset, config, shuffle=True, sample_ratio=float(getattr(config, "sample_ratio", 1.0)))
+    val_loader = create_dataloader(val_dataset, config, shuffle=False, sample_ratio=1.0)
     return train_loader, val_loader
