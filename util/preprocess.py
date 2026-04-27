@@ -324,6 +324,38 @@ class SignalPreprocessor:
             clusters.append(np.array([i], dtype=np.int32))
 
         return clusters
+    
+    def _covered_x_ratio(self, boxes, img_w):
+        if boxes is None or len(boxes) == 0:
+            return 0.0
+
+        boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+        intervals = []
+        for b in boxes:
+            x1, _, x2, _ = [int(v) for v in b]
+            x1 = max(0, min(x1, img_w - 1))
+            x2 = max(0, min(x2, img_w))
+            if x2 <= x1:
+                continue
+            intervals.append((x1, x2))
+
+        if len(intervals) == 0:
+            return 0.0
+
+        intervals.sort(key=lambda t: t[0])
+
+        merged = []
+        cur_l, cur_r = intervals[0]
+        for l, r in intervals[1:]:
+            if l <= cur_r:
+                cur_r = max(cur_r, r)
+            else:
+                merged.append((cur_l, cur_r))
+                cur_l, cur_r = l, r
+        merged.append((cur_l, cur_r))
+
+        covered = float(sum(r - l for l, r in merged))
+        return covered / max(float(img_w), 1.0)
 
     def _build_group_stats(self, boxes, stats, spectrogram_shape):
         H, W = spectrogram_shape[:2]
@@ -346,7 +378,8 @@ class SignalPreprocessor:
         log_w = np.log(w + 1e-6)
         log_h = np.log(h + 1e-6)
 
-        time_span_ratio = float((cx.max() - cx.min()) / max(float(W), 1.0))
+        # time_span_ratio = float((cx.max() - cx.min()) / max(float(W), 1.0))
+        time_span_ratio = self._covered_x_ratio(boxes, W)
 
         # frequency stats in MHz for trainer-side matching
         freq_centers_mhz = np.array([self._pixel_y_to_freq_mhz(v, H) for v in cy], dtype=np.float32)

@@ -109,6 +109,18 @@ class Trainer:
             int(v) for k, v in getattr(self.config, "classes", {}).items()
             if str(k) in self.eval_exclude_classes
         }
+        self.background_label_id = None
+        if "Background" in getattr(self.config, "classes", {}):
+            self.background_label_id = int(getattr(self.config, "classes", {})["Background"])
+
+        self.checkpoint_path = str(getattr(config, "checkpoint_path", "") or "").strip()
+        self.resume_optimizer = bool(getattr(config, "resume_optimizer", True))
+
+        if self.checkpoint_path:
+            self._load_checkpoint(
+                self.checkpoint_path,
+                load_optimizer=(self.run_mode == "train" and self.resume_optimizer),
+            )
 
     def _build_inv_class_map(self) -> Dict[int, str]:
         classes = getattr(self.config, "classes", {})
@@ -628,12 +640,19 @@ class Trainer:
         images = torch.stack(batch_images, dim=0)
         return images, batch_metas, image_infos
 
+
     def _evaluate_infer_predictions(self, image_infos, metas, preds):
         """
         After all final groups are classified, use GT only here to compute metrics.
+
+        Important:
+        - matched groups use their matched signal label as GT
+        - unmatched groups are treated as Background GT (if Background exists)
+        - unmatched targets still reduce match_recall / image_exact_acc, but do not
+          directly create a classification instance because no group exists for them
         """
         if metas is None or len(metas) == 0:
-            return 0, 0, 0, 0, np.array([], dtype=np.int64), np.array([], dtype=np.int64), []
+            return 0, 0, 0, 0, 0, 0, np.array([], dtype=np.int64), np.array([], dtype=np.int64), []
 
         preds_np = preds.detach().cpu().numpy() if torch.is_tensor(preds) else np.asarray(preds)
 
@@ -653,6 +672,8 @@ class Trainer:
         all_preds = []
         instance_rows = []
 
+        bg_id = self.background_label_id
+
         for info in image_infos:
             fp = info.get("fp", "")
             spec = info.get("spec", None)
@@ -664,7 +685,11 @@ class Trainer:
             target_total += len(targets)
             image_total += 1
 
+            # For image exactness:
+            # must match all targets and every evaluated group prediction must be correct.
             per_image_all_correct = (len(matched) == len(targets))
+
+            # 1) matched groups -> true signal labels
             for m in matched:
                 gi = int(m["group_idx"])
                 if fp not in pred_map_by_fp or gi not in pred_map_by_fp[fp]:
@@ -678,8 +703,8 @@ class Trainer:
                     continue
 
                 total += 1
-                correct_i = int(pd == gt)
-                correct += correct_i
+                is_corr = int(pd == gt)
+                correct += is_corr
                 all_targets.append(gt)
                 all_preds.append(pd)
                 instance_rows.append({
@@ -690,10 +715,45 @@ class Trainer:
                     "gt_name": self._label_name(gt),
                     "pred_label": pd,
                     "pred_name": self._label_name(pd),
-                    "correct": correct_i,
+                    "correct": is_corr,
+                    "eval_role": "matched_signal",
                 })
-                if correct_i == 0:
+                if is_corr == 0:
                     per_image_all_correct = False
+
+            # 2) unmatched groups -> Background GT
+            if bg_id is not None:
+                for gi in unmatched_groups:
+                    gi = int(gi)
+                    if fp not in pred_map_by_fp or gi not in pred_map_by_fp[fp]:
+                        # if a final group was not classified for any reason, image cannot be exact
+                        per_image_all_correct = False
+                        continue
+
+                    gt = int(bg_id)
+                    pd = int(pred_map_by_fp[fp][gi])
+
+                    if self._should_skip_eval_label(gt):
+                        continue
+
+                    total += 1
+                    is_corr = int(pd == gt)
+                    correct += is_corr
+                    all_targets.append(gt)
+                    all_preds.append(pd)
+                    instance_rows.append({
+                        "file": fp,
+                        "target_idx": -1,
+                        "group_idx": gi,
+                        "gt_label": gt,
+                        "gt_name": self._label_name(gt),
+                        "pred_label": pd,
+                        "pred_name": self._label_name(pd),
+                        "correct": is_corr,
+                        "eval_role": "unmatched_group_as_background",
+                    })
+                    if is_corr == 0:
+                        per_image_all_correct = False
 
             if per_image_all_correct and (len(targets) == len(matched)):
                 image_correct_total += 1
@@ -1075,19 +1135,86 @@ class Trainer:
         self.writer.add_scalar("train/image_exact_acc", train_image_exact_acc, epoch)
         return train_loss, train_acc, train_match_recall, train_image_exact_acc
 
+    def _load_checkpoint(self, ckpt_path: str, load_optimizer: bool = False):
+        ckpt_path = str(ckpt_path)
+        if not ckpt_path:
+            return
+
+        if not os.path.isfile(ckpt_path):
+            self.logger.warning(f'Checkpoint "{ckpt_path}" not found')
+            return
+
+        try:
+            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        except TypeError:
+            ckpt = torch.load(ckpt_path, map_location=self.device)
+
+        state_dict = None
+        if isinstance(ckpt, dict):
+            if "model_state_dict" in ckpt:
+                state_dict = ckpt["model_state_dict"]
+            elif "state_dict" in ckpt:
+                state_dict = ckpt["state_dict"]
+            elif "model" in ckpt and isinstance(ckpt["model"], dict):
+                state_dict = ckpt["model"]
+
+        if state_dict is None:
+            raise RuntimeError(
+                f'No model weights found in checkpoint: {ckpt_path}. '
+                f'Expected one of: model_state_dict / state_dict / model'
+            )
+
+        missing, unexpected = self.classifier.load_state_dict(state_dict, strict=False)
+        self.logger.info(f"[ckpt] loaded model from {ckpt_path}")
+        if len(missing) > 0:
+            self.logger.warning(f"[ckpt] missing keys: {missing[:10]}{' ...' if len(missing) > 10 else ''}")
+        if len(unexpected) > 0:
+            self.logger.warning(f"[ckpt] unexpected keys: {unexpected[:10]}{' ...' if len(unexpected) > 10 else ''}")
+
+        if load_optimizer and isinstance(ckpt, dict):
+            if "optimizer_state_dict" in ckpt:
+                try:
+                    self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                    self.logger.info("[ckpt] optimizer loaded")
+                except Exception as e:
+                    self.logger.warning(f"[ckpt] failed to load optimizer: {e}")
+
+            if "scheduler_state_dict" in ckpt:
+                try:
+                    self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+                    self.logger.info("[ckpt] scheduler loaded")
+                except Exception as e:
+                    self.logger.warning(f"[ckpt] failed to load scheduler: {e}")
+
+            if "best_val_acc" in ckpt:
+                try:
+                    self.best_val_acc = float(ckpt["best_val_acc"])
+                except Exception:
+                    pass
+
     def _save_checkpoint(self, epoch, is_best=False):
         save_obj = {
             "epoch": int(epoch),
-            "model": self.classifier.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
-            "config": self.config,
+            "model_state_dict": self.classifier.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
             "best_val_acc": float(self.best_val_acc),
+            "config": vars(self.config) if hasattr(self.config, "__dict__") else {},
         }
-        ckpt_path = self.model_dir / f"epoch_{epoch+1}.pth"
-        torch.save(save_obj, ckpt_path)
+
+        ckpt_path = self.model_dir / f"epoch_{epoch + 1}.pth"
+        tmp_path = self.model_dir / f"epoch_{epoch + 1}.pth.tmp"
+
+        torch.save(save_obj, tmp_path)
+        os.replace(tmp_path, ckpt_path)
+        self.logger.info(f"[ckpt] saved: {ckpt_path}")
+
         if is_best:
-            torch.save(save_obj, self.model_dir / "best.pth")
+            best_path = self.model_dir / "best.pth"
+            best_tmp = self.model_dir / "best.pth.tmp"
+            torch.save(save_obj, best_tmp)
+            os.replace(best_tmp, best_path)
+            self.logger.info(f"[ckpt] saved best: {best_path}")
 
     def train(self):
         if self.train_loader is None or self.val_loader is None:

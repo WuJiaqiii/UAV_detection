@@ -67,7 +67,7 @@ def get_parser():
     g_pre.add_argument("--merge_h_log_thresh", type=float, default=0.35)
     g_pre.add_argument("--merge_energy_thresh", type=float, default=1.0)
     g_pre.add_argument("--min_group_len", type=int, default=2)
-    g_pre.add_argument("--min_group_time_span_ratio", type=float, default=0.50)
+    g_pre.add_argument("--min_group_time_span_ratio", type=float, default=0.15)
     g_pre.add_argument("--score_n_boxes_weight", type=float, default=0.50)
     g_pre.add_argument("--score_time_span_weight", type=float, default=2.00)
     g_pre.add_argument("--score_contrast_weight", type=float, default=1.0)
@@ -87,13 +87,7 @@ def get_parser():
 
     # Dataset / DataLoader
     g_data = parser.add_argument_group("Data")
-    g_data.add_argument(
-        "--dataset_path",
-        type=str,
-        nargs="+",
-        required=True,
-        help="One or more dataset paths. Files under all paths will be merged into one dataset."
-    )
+    g_data.add_argument("--dataset_path", type=str, nargs="+", required=True, help="One or more dataset paths.")
     g_data.add_argument("--input_type", type=str, default="mat", choices=["mat", "png"])
     g_data.add_argument("--val_ratio", type=float, default=0.2)
     g_data.add_argument("--batch_size", type=int, default=32)
@@ -195,11 +189,11 @@ def main(args):
     trainable_params = sum(p.numel() for p in classifier.parameters() if p.requires_grad)
     logger.info(f"Num of trainable params in backbone: {trainable_params:,}")
 
-    if config.checkpoint_path and os.path.isfile(config.checkpoint_path):
-        load_checkpoint({"model": classifier}, path=config.checkpoint_path, device='cpu', logger=logger)
-    else:
-        if config.checkpoint_path:
-            logger.warning(f'Checkpoint "{config.checkpoint_path}" not found')
+    # if config.checkpoint_path and os.path.isfile(config.checkpoint_path):
+    #     load_checkpoint({"model": classifier}, path=config.checkpoint_path, device='cpu', logger=logger)
+    # else:
+    #     if config.checkpoint_path:
+    #         logger.warning(f'Checkpoint "{config.checkpoint_path}" not found')
 
     if torch.distributed.is_initialized():
         torch.cuda.set_device(local_rank)
