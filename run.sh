@@ -9,6 +9,8 @@ python main.py \
   --run_mode train \
   --exclude_classes FPV1 \
   --eval_exclude_classes FPV1
+
+
  # --checkpoint_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/UAV_20260424_110316/models/epoch_11.pth \
 
 #  --bbox_cache_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/cache \

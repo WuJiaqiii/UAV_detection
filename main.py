@@ -4,7 +4,7 @@ import torch
 import logging
 import torch.distributed
 
-from data.data_loader import UAVDataset, get_dataloader
+from data.data_loader import UAVDataset, get_dataloader, create_dataloader
 from model.resnet import MaskImageClassifier
 from util.trainer import Trainer
 from util.preprocess import SignalPreprocessor
@@ -25,8 +25,6 @@ def get_parser():
     g_run.add_argument("--run_mode", type=str, default="train", choices=["train", "infer"])
     g_run.add_argument("--train_signal_mode", type=str, default="single", choices=["single", "multi"],
                        help="Only used in train mode. Recommended: single")
-    g_run.add_argument("--infer_path", type=str, default=None,
-                       help="Optional file or directory for infer mode. If set, overrides dataset_path")
     g_run.add_argument("--use_data_parallel", action=argparse.BooleanOptionalAction, default=False)
     g_run.add_argument("--use_amp_autocast", action=argparse.BooleanOptionalAction, default=False)
 
@@ -87,7 +85,21 @@ def get_parser():
 
     # Dataset / DataLoader
     g_data = parser.add_argument_group("Data")
-    g_data.add_argument("--dataset_path", type=str, nargs="+", required=True, help="One or more dataset paths.")
+    g_data.add_argument("--dataset_path", type=str, nargs="+", default=None, help="One or more dataset paths. Used by auto split mode, or infer mode.")
+    g_data.add_argument(
+        "--train_dataset_path",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Optional explicit training dataset path(s). If set together with --val_dataset_path, auto split is disabled."
+    )
+    g_data.add_argument(
+        "--val_dataset_path",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Optional explicit validation dataset path(s). If set together with --train_dataset_path, auto split is disabled."
+    )
     g_data.add_argument("--input_type", type=str, default="mat", choices=["mat", "png"])
     g_data.add_argument("--val_ratio", type=float, default=0.2)
     g_data.add_argument("--batch_size", type=int, default=32)
@@ -130,6 +142,12 @@ def get_parser():
 
     return parser.parse_args()
 
+def _path_is_set(p):
+    if p is None:
+        return False
+    if isinstance(p, (list, tuple)):
+        return len([x for x in p if str(x).strip()]) > 0
+    return bool(str(p).strip())
 
 def main(args):
     set_seed(seed=42)
@@ -146,17 +164,13 @@ def main(args):
         config.device = torch.device(f'cuda:{local_rank}')
     config.rank, config.world_size, config.local_rank = rank, world_size, local_rank
 
-    # infer path can override dataset_path without touching training config files manually
-    if str(getattr(config, "run_mode", "train")).lower() == "infer" and getattr(config, "infer_path", None):
-        config.dataset_path = config.infer_path
-
     # exclude classes -> remap labels compactly
     exclude_set = set(getattr(config, "exclude_classes", []) or [])
     config.classes_all = dict(config.classes)
     kept_items = [(name, old_idx) for name, old_idx in sorted(config.classes.items(), key=lambda x: x[1]) if name not in exclude_set]
     config.classes = {name: new_idx for new_idx, (name, _) in enumerate(kept_items)}
     config.num_classes = len(config.classes)
-
+    
     if rank == 0:
         config.freeze()
         config.make_dir()
@@ -165,6 +179,14 @@ def main(args):
         logger.init_exp(config)
         logger.info(f"DDP initialized: world_size={world_size}")
         logger.info(f"run_mode={config.run_mode}, train_signal_mode={getattr(config, 'train_signal_mode', 'single')}")
+        use_explicit_train_val = (
+            _path_is_set(getattr(config, "train_dataset_path", None)) or
+            _path_is_set(getattr(config, "val_dataset_path", None))
+        )
+        if str(config.run_mode).lower() == "train" and use_explicit_train_val:
+            logger.info(f"Use explicit train/val datasets.")
+            logger.info(f"train_dataset_path={config.train_dataset_path}")
+            logger.info(f"val_dataset_path={config.val_dataset_path}")
     else:
         logger = logging.getLogger("ddp_logger")
         logger.addHandler(logging.NullHandler())
@@ -174,6 +196,20 @@ def main(args):
     if str(config.run_mode).lower() == "train":
         train_loader, val_loader = get_dataloader(dataset, config, mode="train")
     else:
+        infer_loader = get_dataloader(dataset, config, mode="infer")
+        train_loader, val_loader = None, None
+        
+    if str(config.run_mode).lower() == "train":
+        if use_explicit_train_val:
+            train_dataset = UAVDataset(config, logger, dataset_path=config.train_dataset_path)
+            val_dataset = UAVDataset(config, logger, dataset_path=config.val_dataset_path)
+            train_loader = create_dataloader(train_dataset, config, shuffle=True, sample_ratio=float(config.sample_ratio))
+            val_loader = create_dataloader(val_dataset, config, shuffle=False, sample_ratio=1.0)
+        else:
+            dataset = UAVDataset(config, logger)
+            train_loader, val_loader = get_dataloader(dataset, config, mode="train")
+    else:
+        dataset = UAVDataset(config, logger)
         infer_loader = get_dataloader(dataset, config, mode="infer")
         train_loader, val_loader = None, None
 
@@ -188,12 +224,6 @@ def main(args):
 
     trainable_params = sum(p.numel() for p in classifier.parameters() if p.requires_grad)
     logger.info(f"Num of trainable params in backbone: {trainable_params:,}")
-
-    # if config.checkpoint_path and os.path.isfile(config.checkpoint_path):
-    #     load_checkpoint({"model": classifier}, path=config.checkpoint_path, device='cpu', logger=logger)
-    # else:
-    #     if config.checkpoint_path:
-    #         logger.warning(f'Checkpoint "{config.checkpoint_path}" not found')
 
     if torch.distributed.is_initialized():
         torch.cuda.set_device(local_rank)

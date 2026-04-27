@@ -95,7 +95,7 @@ class UAVDataset(Dataset):
     _SIGNAL_RE = re.compile(r'(?P<protocol>[A-Za-z0-9_]+)-\[(?P<bracket>[^\]]+)\]')
     _SNR_RE = re.compile(r'-SNR-(?P<snr>[-+]?\d+(?:\.\d+)?)')
 
-    def __init__(self, config, logger, validate_on_init: bool = False):
+    def __init__(self, config, logger, validate_on_init: bool = False, dataset_path=None):
         self.config = config
         self.logger = logger
         self.input_type = str(config.input_type).lower()
@@ -108,7 +108,8 @@ class UAVDataset(Dataset):
 
         self.mod2label = {str(k): int(v) for k, v in getattr(config, "classes", {}).items()}
 
-        dataset_paths, data_files = _collect_data_files(config.dataset_path, self.input_type)
+        use_dataset_path = config.dataset_path if dataset_path is None else dataset_path
+        dataset_paths, data_files = _collect_data_files(use_dataset_path, self.input_type)
 
         self.samples: List[Dict[str, Any]] = []
         bad = 0
