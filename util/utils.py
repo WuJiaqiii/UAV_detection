@@ -1,13 +1,8 @@
-import os
 import torch
 import logging
 import numpy as np
 import random
-from scipy.optimize import linear_sum_assignment
-from sklearn.metrics import accuracy_score
-import matplotlib.pyplot as plt
 from datetime import datetime, timedelta, timezone
-import seaborn as sns
 import torch.distributed as dist
 
 def set_seed(seed):
@@ -57,25 +52,6 @@ class ColorFormatter(logging.Formatter):
         record.levelname = f"{color}{record.levelname}{self.RESET}"
         record.msg = f"{color}{record.msg}{self.RESET}"
         return super().format(record)
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
         
 class ExpLogger(logging.Logger):
     def init_exp(self, config):
@@ -142,32 +118,3 @@ class EarlyStopping:
                 f'--Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).')
             self.val_loss_min = val_loss
             self.counter = 0
-
-def compute_cluster_accuracy(real_labels, pred_labels):
-    real_labels = torch.tensor(real_labels)
-    pred_labels = torch.tensor(pred_labels)
-    unique_real = torch.unique(real_labels)
-    unique_pred = torch.unique(pred_labels)
-    
-    cost_matrix = torch.zeros((len(unique_real), len(unique_pred)), dtype=torch.int32)
-    
-    for i, real_label in enumerate(unique_real):
-        for j, pred_label in enumerate(unique_pred):
-            matches = torch.sum((real_labels == real_label) & (pred_labels == pred_label))
-            cost_matrix[i, j] = -matches
-
-    row_ind, col_ind = linear_sum_assignment(cost_matrix.numpy())
-    matched_labels = pred_labels.clone()
-    for i, j in zip(row_ind, col_ind):
-        matched_labels[pred_labels == unique_pred[j]] = unique_real[i]
-
-    return accuracy_score(real_labels.numpy(), matched_labels.numpy())
-    
-def save_confusion_matrix(cm, class_names, save_path):
-    plt.figure(figsize=(10, 7))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False, xticklabels=class_names, yticklabels=class_names)
-    plt.xlabel('Predicted Labels')
-    plt.ylabel('True Labels')
-    plt.title('Confusion Matrix')
-    plt.savefig(save_path)
-    plt.close()

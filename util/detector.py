@@ -57,30 +57,17 @@ class YoloV5Detector:
         if not yolov5_dir.exists():
             raise FileNotFoundError(f"Local yolov5 directory not found: {yolov5_dir}")
         
-        # 关键：把项目根目录放进 sys.path，这样可以按包方式 import yolov5.hubconf
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
 
-        # 不再用 torch.hub.load，直接导入 yolov5.hubconf
         import yolov5.hubconf as hubconf
 
-        # 仍然走 high-level custom 接口，和 plot.py 同类
         self.model = hubconf.custom(
             path=str(config.yolo_weights),
             autoshape=True,
             _verbose=False,
             device=self.device_str if self.device_str != "" else None,
         )
-
-        # # Keep same behavior as plot.py
-        # sys.path.insert(0, str(yolov5_dir))
-
-        # self.model = torch.hub.load(
-        #     str(yolov5_dir),
-        #     "custom",
-        #     path=str(config.yolo_weights),
-        #     source="local",
-        # )
 
         # device selection, same idea as plot.py
         if self.device_str:
@@ -107,7 +94,7 @@ class YoloV5Detector:
 
     @torch.inference_mode()
     def detect(self, spec: Union[np.ndarray, torch.Tensor]) -> List[List[int]]:
-        # 1) to numpy (H, W)
+
         if isinstance(spec, torch.Tensor):
             spec_np = spec.detach().cpu().numpy()
         else:
@@ -121,29 +108,19 @@ class YoloV5Detector:
 
         H0, W0 = spec_np.shape
 
-        # 2) Convert mat matrix to the exact same uint8 grayscale style as old PNG generation
-        # gray_u8 = _to_uint8_gray_png_style(spec_np)
-
-        # 3) Make it RGB HWC uint8, same kind of input as plot.py
-        # image_rgb = np.stack([gray_u8, gray_u8, gray_u8], axis=-1)
-        # image_rgb = np.ascontiguousarray(image_rgb)
-        
         gray_u8 = spec_float32_to_uint8_gray(spec_np)
         image_bgr = cv2.cvtColor(gray_u8, cv2.COLOR_GRAY2BGR)
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         image_rgb = np.ascontiguousarray(image_rgb)
 
-        # 4) High-level inference path, same as plot.py
         results = self.model(image_rgb, size=self.imgsz)
 
-        # 5) Read raw detections
         det = results.xyxy[0].cpu()
         if det is None or len(det) == 0:
             return []
 
         boxes = det[:, :4].numpy().astype(np.int32)
 
-        # 6) Clip to original image bounds
         boxes[:, 0] = np.clip(boxes[:, 0], 0, W0 - 1)
         boxes[:, 2] = np.clip(boxes[:, 2], 0, W0 - 1)
         boxes[:, 1] = np.clip(boxes[:, 1], 0, H0 - 1)

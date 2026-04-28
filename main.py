@@ -9,10 +9,8 @@ from model.resnet import MaskImageClassifier
 from util.trainer import Trainer
 from util.preprocess import SignalPreprocessor
 from util.detector import YoloV5Detector
-from util.checkpoint import load_checkpoint
 from util.utils import create_logger, set_seed
 from util.config import Config
-
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -23,8 +21,7 @@ def get_parser():
     # Runtime / Mode
     g_run = parser.add_argument_group("Runtime")
     g_run.add_argument("--run_mode", type=str, default="train", choices=["train", "infer"])
-    g_run.add_argument("--train_signal_mode", type=str, default="single", choices=["single", "multi"],
-                       help="Only used in train mode. Recommended: single")
+    g_run.add_argument("--train_signal_mode", type=str, default="single", choices=["single", "multi"], help="Only used in train mode. Recommended: single")
     g_run.add_argument("--use_data_parallel", action=argparse.BooleanOptionalAction, default=False)
     g_run.add_argument("--use_amp_autocast", action=argparse.BooleanOptionalAction, default=False)
 
@@ -85,26 +82,14 @@ def get_parser():
 
     # Dataset / DataLoader
     g_data = parser.add_argument_group("Data")
-    g_data.add_argument("--dataset_path", type=str, nargs="+", default=None, help="One or more dataset paths. Used by auto split mode, or infer mode.")
-    g_data.add_argument(
-        "--train_dataset_path",
-        type=str,
-        nargs="+",
-        default=None,
-        help="Optional explicit training dataset path(s). If set together with --val_dataset_path, auto split is disabled."
-    )
-    g_data.add_argument(
-        "--val_dataset_path",
-        type=str,
-        nargs="+",
-        default=None,
-        help="Optional explicit validation dataset path(s). If set together with --train_dataset_path, auto split is disabled."
-    )
+    g_data.add_argument("--dataset_path", type=str, nargs="+", default=None, help="One or more dataset paths. Used by auto split mode or infer mode.")
+    g_data.add_argument("--train_dataset_path", type=str, nargs="+", default=None, help="Optional explicit training dataset path(s).")
+    g_data.add_argument("--val_dataset_path", type=str, nargs="+", default=None, help="Optional explicit validation dataset path(s).")
     g_data.add_argument("--input_type", type=str, default="mat", choices=["mat", "png"])
     g_data.add_argument("--val_ratio", type=float, default=0.2)
     g_data.add_argument("--batch_size", type=int, default=32)
     g_data.add_argument("--num_workers", type=int, default=4)
-    g_data.add_argument("--sample_ratio", type=float, default=0.1)
+    g_data.add_argument("--sample_ratio", type=float, default=1.0)
     g_data.add_argument("--exclude_classes", type=str, nargs="*", default=[])
     g_data.add_argument("--eval_exclude_classes", type=str, nargs="*", default=[])
 
@@ -137,17 +122,12 @@ def get_parser():
     g_io.add_argument("--bbox_cache_path", type=str, default=None)
 
     g_vis = parser.add_argument_group("Visualization")
-    g_vis.add_argument("--save_detect_vis_once", action=argparse.BooleanOptionalAction, default=True)
-    g_vis.add_argument("--detect_vis_num_samples", type=int, default=1000)
+    g_vis.add_argument("--save_val_detect_vis", action=argparse.BooleanOptionalAction, default=True, help="Whether to save random validation visualizations every epoch.")
+    g_vis.add_argument("--val_detect_vis_ratio", type=float, default=0.01, help="Ratio of validation samples to randomly save every epoch. Set 0 to disable.")
 
     return parser.parse_args()
 
-def _path_is_set(p):
-    if p is None:
-        return False
-    if isinstance(p, (list, tuple)):
-        return len([x for x in p if str(x).strip()]) > 0
-    return bool(str(p).strip())
+
 
 def main(args):
     set_seed(seed=42)
@@ -171,6 +151,7 @@ def main(args):
     config.classes = {name: new_idx for new_idx, (name, _) in enumerate(kept_items)}
     config.num_classes = len(config.classes)
     
+    use_explicit_train_val = os.path.exists(config.train_dataset_path) or os.path.exists(config.val_dataset_path)
     if rank == 0:
         config.freeze()
         config.make_dir()
@@ -179,10 +160,6 @@ def main(args):
         logger.init_exp(config)
         logger.info(f"DDP initialized: world_size={world_size}")
         logger.info(f"run_mode={config.run_mode}, train_signal_mode={getattr(config, 'train_signal_mode', 'single')}")
-        use_explicit_train_val = (
-            _path_is_set(getattr(config, "train_dataset_path", None)) or
-            _path_is_set(getattr(config, "val_dataset_path", None))
-        )
         if str(config.run_mode).lower() == "train" and use_explicit_train_val:
             logger.info(f"Use explicit train/val datasets.")
             logger.info(f"train_dataset_path={config.train_dataset_path}")
@@ -190,14 +167,6 @@ def main(args):
     else:
         logger = logging.getLogger("ddp_logger")
         logger.addHandler(logging.NullHandler())
-
-    dataset = UAVDataset(config, logger)
-
-    if str(config.run_mode).lower() == "train":
-        train_loader, val_loader = get_dataloader(dataset, config, mode="train")
-    else:
-        infer_loader = get_dataloader(dataset, config, mode="infer")
-        train_loader, val_loader = None, None
         
     if str(config.run_mode).lower() == "train":
         if use_explicit_train_val:
@@ -239,7 +208,6 @@ def main(args):
         trainer.train()
     else:
         trainer.infer(infer_loader)
-
 
 if __name__ == "__main__":
     args = get_parser()

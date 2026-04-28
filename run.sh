@@ -1,6 +1,7 @@
 #!/bin/bash
 python main.py \
-  --dataset_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/train_data_space_awgn/1 /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/data/background/mats \
+  --train_dataset_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/new_dataset/new_dataset_awgn_space/train/1 /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/data/background/mats \
+  --val_dataset_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/new_dataset/new_dataset_awgn_space/val/1 \
   --epochs 300 \
   --batch_size 256 \
   --lr 1e-4 \
@@ -8,7 +9,8 @@ python main.py \
   --cnn_input_mode mask \
   --run_mode train \
   --exclude_classes FPV1 \
-  --eval_exclude_classes FPV1
+  --eval_exclude_classes FPV1 \
+  --checkpoint_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/UAV_20260428_032408/models/best.pth \
 
 
  # --checkpoint_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/UAV_20260424_110316/models/epoch_11.pth \
