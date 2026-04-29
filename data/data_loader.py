@@ -158,10 +158,12 @@ class UAVDataset(Dataset):
 
                 try:
                     center_freq = float(parts[1])
-                    upper_freq = float(parts[3])
-                    bandwidth = 2.0 * abs(upper_freq - center_freq)
+                    bandwidth = float(parts[3])
                 except ValueError:
-                    logger.warning(f"[SkipTarget] center_freq/upper_freq parse failed: {protocol} ({fname})")
+                    logger.warning(f"[SkipTarget] center_freq/bandwidth parse failed: {protocol} ({fname})")
+                    continue
+                if bandwidth <= 0:
+                    logger.warning(f"[SkipTarget] invalid bandwidth <= 0: {bandwidth} ({protocol}, {fname})")
                     continue
 
                 targets.append({

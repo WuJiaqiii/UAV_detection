@@ -4,12 +4,38 @@ import numpy as np
 import random
 from datetime import datetime, timedelta, timezone
 import torch.distributed as dist
+import tqdm 
+import sys
 
 def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+    
+def _path_is_set(p):
+    if p is None:
+        return False
+    if isinstance(p, (list, tuple)):
+        return len([x for x in p if str(x).strip()]) > 0
+    return bool(str(p).strip())
+
+def _make_pbar(iterable, desc: str, leave: bool = False):
+    """
+    Create tqdm progress bar.
+
+    disable=True when stdout is not a real terminal, e.g. nohup/log file,
+    otherwise tqdm progress will be written repeatedly into log files.
+    """
+    return tqdm(
+        iterable,
+        desc=desc,
+        leave=leave,
+        dynamic_ncols=True,
+        mininterval=0.5,
+        file=sys.stdout,
+        disable=not sys.stdout.isatty(),
+    )
 
 def _reduce_scalar(val, device, dtype=torch.float32, op=dist.ReduceOp.SUM):
     if isinstance(val, torch.Tensor):

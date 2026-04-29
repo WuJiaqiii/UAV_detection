@@ -1,13 +1,9 @@
-from pathlib import Path
-from typing import Dict
-
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
 
 try:
     from scipy.optimize import linear_sum_assignment
@@ -18,6 +14,7 @@ from util.input_builder import CNNInputBuilder
 from util.vis import DetectionVisualizer
 from util.metrics import AverageMeter, save_confusion_matrix, save_eval_summary, save_instance_csv
 from util.checkpoint import save_training_checkpoint, load_training_checkpoint
+from util.utils import _make_pbar
 
 class Trainer:
     """
@@ -31,13 +28,14 @@ class Trainer:
         Background prediction is treated as ignored output.
     """
 
-    def __init__(self, config, dataloaders, logger, detector, preprocessor, classifier):
+    def __init__(self, config, dataloaders, logger, detector, preprocessor, classifier, bbox_cache=None):
         
         self.config = config
         self.logger = logger
         self.detector = detector
         self.preprocessor = preprocessor
         self.classifier = classifier
+        self.bbox_cache = bbox_cache
 
         if isinstance(dataloaders, (tuple, list)) and len(dataloaders) == 2:
             self.train_loader, self.val_loader = dataloaders
@@ -72,7 +70,7 @@ class Trainer:
         self.inv_class_map = {int(v): str(k) for k, v in self.config.classes.items()}
         self.eval_exclude_label_ids = {int(v) for k, v in getattr(self.config, "classes", {}).items() if str(k) in self.config.eval_exclude_classes}
 
-        self.background_label_id = int(self.config.classes)["Background"]
+        self.background_label_id = int(self.config.classes["Background"])
 
         if self.config.val_detect_vis_ratio < 0:
             raise ValueError("--val_detect_vis_ratio must be >= 0")
@@ -113,6 +111,46 @@ class Trainer:
     # ------------------------------------------------------------------
     # Group helpers
     # ------------------------------------------------------------------
+    def _detect_boxes(self, spec, fp):
+        """
+        Unified YOLO detection entry with optional bbox cache.
+
+        Returns:
+            np.ndarray, shape [N, 4], dtype int32
+        """
+        # No cache: run YOLO directly.
+        if self.bbox_cache is None:
+            boxes = self.detector.detect(spec)
+            return (
+                np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+                if len(boxes) > 0
+                else np.zeros((0, 4), dtype=np.int32)
+            )
+
+        # Try reading cache.
+        cached = self.bbox_cache.get(fp)
+        if cached is not None:
+            if torch.is_tensor(cached):
+                cached = cached.detach().cpu().numpy()
+            boxes = np.asarray(cached, dtype=np.int32).reshape(-1, 4)
+            return boxes
+
+        # Cache miss: run YOLO.
+        boxes = self.detector.detect(spec)
+        boxes = (
+            np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+            if len(boxes) > 0
+            else np.zeros((0, 4), dtype=np.int32)
+        )
+
+        # Write cache if mode allows.
+        self.bbox_cache.put(
+            fp,
+            torch.as_tensor(boxes, dtype=torch.int32),
+        )
+
+        return boxes
+    
     def _extract_groups(self, yolo_boxes, spec):
         if not hasattr(self.preprocessor, "select_signal_groups"):
             raise AttributeError("preprocessor must provide select_signal_groups()")
@@ -258,12 +296,7 @@ class Trainer:
             target_total += 1
             label = int(targets[0]["label"])
 
-            yolo_boxes = self.detector.detect(spec)
-            yolo_boxes = (
-                np.asarray(yolo_boxes, dtype=np.int32).reshape(-1, 4)
-                if len(yolo_boxes) > 0
-                else np.zeros((0, 4), dtype=np.int32)
-            )
+            yolo_boxes = self._detect_boxes(spec, fp)
 
             groups = self._extract_groups(yolo_boxes, spec)
             main_group = self._select_main_group(groups)
@@ -350,12 +383,7 @@ class Trainer:
             fp = sample_fps[i] if sample_fps is not None else f"sample_{i}"
             targets = targets_list[i] if targets_list is not None else []
 
-            yolo_boxes = self.detector.detect(spec)
-            yolo_boxes = (
-                np.asarray(yolo_boxes, dtype=np.int32).reshape(-1, 4)
-                if len(yolo_boxes) > 0
-                else np.zeros((0, 4), dtype=np.int32)
-            )
+            yolo_boxes = self._detect_boxes(spec, fp)
 
             groups = self._extract_groups(yolo_boxes, spec)
 
@@ -650,7 +678,8 @@ class Trainer:
         loss_meter = AverageMeter()
         correct = total = matched_total = target_total = 0
 
-        pbar = tqdm(self.train_loader, desc=f"Train Epoch {epoch + 1}", leave=True)
+        # pbar = tqdm(self.train_loader, desc=f"Train Epoch {epoch + 1}", leave=True)
+        pbar = _make_pbar(self.train_loader, desc=f"Train Epoch {epoch + 1}", leave=False)
 
         for batch in pbar:
             inputs, targets_list, snrs, fps = batch
@@ -741,7 +770,8 @@ class Trainer:
                 f"selected={len(val_vis_fp_set)} samples"
             )
 
-        pbar = tqdm(loader, desc=f"Val Epoch {epoch + 1}", leave=True)
+        # pbar = tqdm(loader, desc=f"Val Epoch {epoch + 1}", leave=True)
+        pbar = _make_pbar(loader, desc=f"Val Epoch {epoch + 1}", leave=False)
 
         for batch in pbar:
             inputs, targets_list, snrs, fps = batch
@@ -901,7 +931,8 @@ class Trainer:
                 f"selected={len(infer_vis_fp_set)} samples"
             )
 
-        pbar = tqdm(loader, desc="Infer", leave=True)
+        # pbar = tqdm(loader, desc="Infer", leave=True)
+        pbar = _make_pbar(loader, desc=f"Infer", leave=False)
 
         for batch in pbar:
             inputs, targets_list, snrs, fps = batch

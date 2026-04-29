@@ -1,4 +1,5 @@
 import os
+import hashlib
 from collections import OrderedDict
 import torch
 
@@ -30,8 +31,10 @@ class BBoxCache:
 
     def _key_and_meta(self, fp: str):
         rel = self._safe_relpath(fp, self.dataset_root)
-        base = os.path.splitext(os.path.basename(fp))[0]
-        key = base
+        stem = os.path.splitext(os.path.basename(fp))[0]
+        digest = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:12]
+        key = f"{stem}_{digest}"
+
         try:
             st = os.stat(fp)
             meta = {
@@ -45,6 +48,7 @@ class BBoxCache:
                 "size": None,
                 "mtime": None,
             }
+
         return key, meta
 
     def _path_for_key(self, key: str) -> str:

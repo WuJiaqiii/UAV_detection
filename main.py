@@ -9,8 +9,9 @@ from model.resnet import MaskImageClassifier
 from util.trainer import Trainer
 from util.preprocess import SignalPreprocessor
 from util.detector import YoloV5Detector
-from util.utils import create_logger, set_seed
+from util.utils import create_logger, set_seed, _path_is_set
 from util.config import Config
+from util.bboxcache import BBoxCache
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -118,12 +119,19 @@ def get_parser():
     g_io = parser.add_argument_group("Checkpoint / Cache")
     g_io.add_argument("--checkpoint_path", type=str, default=None)
     g_io.add_argument("--save_interval", type=int, default=5)
-    g_io.add_argument("--bbox_cache_mode", type=str, default="refresh")
-    g_io.add_argument("--bbox_cache_path", type=str, default=None)
+
+    g_cache = parser.add_argument_group("BBox Cache")
+    g_cache.add_argument("--bbox_cache_mode", type=str, default="off",
+        choices=["off", "read", "write", "refresh", "readwrite"], help="BBox cache mode.")
+    g_cache.add_argument("--bbox_cache_path", type=str, default="", help="Directory to save/load YOLO bbox cache.")
+    g_cache.add_argument("--bbox_cache_mem_max", type=int, default=0, help="Max number of bbox entries kept in memory. 0 means no memory cache.")
+    g_cache.add_argument("--bbox_cache_dataset_root", type=str, default="", help="Optional dataset root used to build cache metadata.")
 
     g_vis = parser.add_argument_group("Visualization")
     g_vis.add_argument("--save_val_detect_vis", action=argparse.BooleanOptionalAction, default=True, help="Whether to save random validation visualizations every epoch.")
     g_vis.add_argument("--val_detect_vis_ratio", type=float, default=0.01, help="Ratio of validation samples to randomly save every epoch. Set 0 to disable.")
+    g_vis.add_argument("--infer_detect_vis_ratio", type=float, default=1)
+    
 
     return parser.parse_args()
 
@@ -151,7 +159,7 @@ def main(args):
     config.classes = {name: new_idx for new_idx, (name, _) in enumerate(kept_items)}
     config.num_classes = len(config.classes)
     
-    use_explicit_train_val = os.path.exists(config.train_dataset_path) or os.path.exists(config.val_dataset_path)
+    use_explicit_train_val = _path_is_set(config.train_dataset_path) or _path_is_set(config.val_dataset_path)
     if rank == 0:
         config.freeze()
         config.make_dir()
@@ -202,7 +210,34 @@ def main(args):
 
     detector = YoloV5Detector(config, yolo_device)
     preprocessor = SignalPreprocessor(config, logger)
-    trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier)
+    
+    bbox_cache = None
+    if config.bbox_cache_mode != "off":
+        if not str(config.bbox_cache_path).strip():
+            raise ValueError("--bbox_cache_path must be provided when bbox_cache_mode != off")
+
+        dataset_root = str(config.bbox_cache_dataset_root).strip()
+        if not dataset_root:
+            dataset_root = None
+
+        bbox_cache = BBoxCache(
+            base_dir=config.bbox_cache_path,
+            dataset_root=dataset_root,
+            mode=config.bbox_cache_mode,
+            mem_max=config.bbox_cache_mem_max,
+            logger=logger,
+        )
+
+        logger.info(
+            f"[BBoxCache] enabled: mode={config.bbox_cache_mode}, "
+            f"path={config.bbox_cache_path}, "
+            f"mem_max={config.bbox_cache_mem_max}, "
+            f"dataset_root={dataset_root}"
+        )
+    else:
+        logger.info("[BBoxCache] disabled")
+    
+    trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier, bbox_cache)
 
     if str(config.run_mode).lower() == "train":
         trainer.train()

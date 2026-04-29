@@ -10,8 +10,11 @@ python main.py \
   --run_mode train \
   --exclude_classes FPV1 \
   --eval_exclude_classes FPV1 \
-  --checkpoint_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/UAV_20260428_032408/models/best.pth \
+  --bbox_cache_mode refresh \
+  --bbox_cache_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/cache \
+  --bbox_cache_dataset_root /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/new_dataset/new_dataset_awgn_space
 
+#  --checkpoint_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/UAV_20260428_032408/models/best.pth \
 
  # --checkpoint_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/UAV_20260424_110316/models/epoch_11.pth \
 
