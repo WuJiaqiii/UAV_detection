@@ -1,0 +1,16 @@
+{
+  "input_dir": "/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/new_dataset/new_dataset_awgn_space/train/1",
+  "output_dir": "/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/data/background",
+  "total_files": 37282,
+  "bad_parse_or_invalid_target": 9043,
+  "no_group": 227,
+  "missed_target_no_samples": 135,
+  "no_background_group": 17783,
+  "background_saved": 21295,
+  "failed": 0,
+  "output_mat_mode": "raw_in_boxes",
+  "mat_key": "summed_submatrices",
+  "match_freq_thresh": 10.0,
+  "match_bandwidth_weight": 0.2,
+  "skip_unmatched": true
+}

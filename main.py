@@ -39,7 +39,7 @@ def get_parser():
     g_yolo.add_argument("--yolo_device", type=str, default="")
     g_yolo.add_argument("--yolo_imgsz_h", type=int, default=640)
     g_yolo.add_argument("--yolo_imgsz_w", type=int, default=640)
-    g_yolo.add_argument("--yolo_conf_thres", type=float, default=0.40)
+    g_yolo.add_argument("--yolo_conf_thres", type=float, default=0.05)
     g_yolo.add_argument("--yolo_iou_thres", type=float, default=0.10)
     g_yolo.add_argument("--yolo_max_det", type=int, default=1000)
     g_yolo.add_argument("--yolo_classes", type=int, nargs="*", default=None)
@@ -76,7 +76,7 @@ def get_parser():
     g_match = parser.add_argument_group("Target Matching")
     g_match.add_argument("--match_freq_thresh", type=float, default=30.0)
     g_match.add_argument("--match_bw_thresh", type=float, default=20.0)
-    g_match.add_argument("--match_bw_weight", type=float, default=1.0)
+    g_match.add_argument("--match_bandwidth_weight", type=float, default=1.0)
     g_match.add_argument("--match_size_penalty", type=float, default=1.0)
     g_match.add_argument("--skip_unmatched", action=argparse.BooleanOptionalAction, default=True)
     g_match.add_argument("--match_use_bandwidth", action=argparse.BooleanOptionalAction, default=False)
@@ -131,7 +131,9 @@ def get_parser():
     g_vis.add_argument("--save_val_detect_vis", action=argparse.BooleanOptionalAction, default=True, help="Whether to save random validation visualizations every epoch.")
     g_vis.add_argument("--val_detect_vis_ratio", type=float, default=0.01, help="Ratio of validation samples to randomly save every epoch. Set 0 to disable.")
     g_vis.add_argument("--infer_detect_vis_ratio", type=float, default=1)
-    
+    g_vis.add_argument("--clear_val_detect_vis_each_epoch", action=argparse.BooleanOptionalAction, default=True)
+    g_vis.add_argument("--save_infer_detect_vis", action=argparse.BooleanOptionalAction, default=True, help="Whether to save infer yolo/groups visualization images.")
+    g_vis.add_argument("--save_infer_classified_vis", action=argparse.BooleanOptionalAction, default=True, help="Whether to save infer classified group visualization images.")
 
     return parser.parse_args()
 

@@ -2,28 +2,28 @@
 # -*- coding: utf-8 -*-
 
 """
-Generate group-level .mat dataset from original single-signal .mat files.
+Generate Background-only group-level .mat samples from original single-signal .mat files.
 
 Main logic:
-    original mat
+    original single-signal mat
         -> YOLO detect
         -> SignalPreprocessor.select_signal_groups()
         -> match groups to filename target by center_freq / bandwidth
-        -> matched group      -> true signal class
-        -> unmatched groups   -> Background, only for train split
-        -> missed target      -> generate nothing
+        -> if target is missed: generate nothing
+        -> if target is matched: save all unmatched groups as Background samples
 
 Output mat content:
-    summed_submatrices: full-size matrix where only the selected group boxes are kept.
-                        pixels outside this group are set to 0.
+    summed_submatrices:
+        full-size matrix where only one background group boxes are kept.
+        pixels outside this background group are set to 0.
 
 Filename format:
-    ClassName-[0,center_freq,1000,bandwidth]-SNR-snr-Src-hash-Group-idx.mat
+    Background-[0,center_freq,1000,bandwidth]-SNR-snr-Src-hash-Group-idx.mat
 
 Notes:
     - The second bracket field is center frequency.
     - The fourth bracket field is bandwidth.
-    - Validation split does NOT generate Background samples.
+    - No positive samples are generated.
 """
 
 from __future__ import annotations
@@ -44,16 +44,24 @@ import numpy as np
 import torch
 from scipy.io import loadmat, savemat
 
-try:
-    from scipy.optimize import linear_sum_assignment
-except Exception:
-    linear_sum_assignment = None
-
 
 # ----------------------------------------------------------------------
-# Make project imports work when running from scripts/
+# Make project imports work
 # ----------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_THIS_FILE = Path(__file__).resolve()
+
+# If this script is placed at project root: UAV_detection/generate_background_only.py
+if (_THIS_FILE.parent / "util").exists():
+    PROJECT_ROOT = _THIS_FILE.parent
+# If this script is placed under scripts/: UAV_detection/scripts/generate_background_only.py
+elif (_THIS_FILE.parents[1] / "util").exists():
+    PROJECT_ROOT = _THIS_FILE.parents[1]
+else:
+    raise RuntimeError(
+        "Cannot locate project root. Please place this script under project root "
+        "or under project_root/scripts/."
+    )
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -66,16 +74,22 @@ except Exception:
     BBoxCache = None
 
 
+# ----------------------------------------------------------------------
+# Default class mapping
+# Used only to validate source filename protocols.
+# Background must exist because generated files are labeled as Background.
+# Please keep this consistent with your training Config.
+# ----------------------------------------------------------------------
 DEFAULT_CLASSES = {
-    "FPV1": 0,
-    "Lightbridge1": 1,
-    "Ocusync_mini1": 2,
-    "Ocusync21": 3,
-    "Ocusync31": 4,
-    "Ocusync41": 5,
-    "Skylink11": 6,
-    "Skylink21": 7,
-    "Background": 8,
+    "Background": 0,
+    "FPV1": 1,
+    "Lightbridge1": 2,
+    "Ocusync_mini1": 3,
+    "Ocusync21": 4,
+    "Ocusync31": 5,
+    "Ocusync41": 6,
+    "Skylink11": 7,
+    "Skylink21": 8,
 }
 
 
@@ -86,7 +100,7 @@ SNR_RE = re.compile(r"-SNR-(?P<snr>[-+]?\d+(?:\.\d+)?)")
 # ----------------------------------------------------------------------
 # Logger
 # ----------------------------------------------------------------------
-def create_logger(name: str = "generate_group_level_mats") -> logging.Logger:
+def create_logger(name: str = "generate_background_only") -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -129,7 +143,10 @@ def load_classes(classes_json: str | None) -> Dict[str, int]:
     return {str(k): int(v) for k, v in obj.items()}
 
 
-def parse_single_signal_target(fp: str, classes: Dict[str, int]) -> Tuple[Dict[str, Any] | None, float]:
+def parse_single_signal_target(
+    fp: str,
+    classes: Dict[str, int],
+) -> Tuple[Dict[str, Any] | None, float]:
     """
     Parse one source filename.
 
@@ -154,6 +171,7 @@ def parse_single_signal_target(fp: str, classes: Dict[str, int]) -> Tuple[Dict[s
     prefix = stem.split("-SNR-")[0]
     matches = list(SIGNAL_RE.finditer(prefix))
 
+    # This background generator is designed for original single-signal files only.
     if len(matches) != 1:
         return None, snr
 
@@ -211,21 +229,21 @@ def group_to_mat_fullsize(
 
     mode:
         raw_in_boxes:
-            keep original spectrogram values inside group boxes, set outside to 0.
+            keep original spectrogram values inside group boxes,
+            set outside to 0.
 
         mask:
-            group boxes are mask_value, outside 0.
+            group boxes are mask_value,
+            outside is 0.
     """
     spec = np.asarray(spec, dtype=np.float32)
     h, w = spec.shape[:2]
 
     boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
 
-    if mode == "raw_in_boxes":
-        out = np.zeros_like(spec, dtype=np.float32)
-    elif mode == "mask":
-        out = np.zeros_like(spec, dtype=np.float32)
-    else:
+    out = np.zeros_like(spec, dtype=np.float32)
+
+    if mode not in {"raw_in_boxes", "mask"}:
         raise ValueError(f"Unsupported --output_mat_mode={mode}")
 
     for b in boxes:
@@ -259,8 +277,7 @@ def safe_float_str(x: float, ndigits: int = 4) -> str:
 def snr_to_str(snr: float) -> str:
     if np.isnan(float(snr)):
         return "nan"
-    s = safe_float_str(float(snr), ndigits=2)
-    return s
+    return safe_float_str(float(snr), ndigits=2)
 
 
 def source_hash(fp: str, root: str | None = None) -> str:
@@ -271,11 +288,11 @@ def source_hash(fp: str, root: str | None = None) -> str:
             rel = fp
     else:
         rel = fp
+
     return hashlib.sha1(rel.encode("utf-8")).hexdigest()[:12]
 
 
-def make_output_filename(
-    class_name: str,
+def make_background_filename(
     center_freq: float,
     bandwidth: float,
     snr: float,
@@ -285,39 +302,49 @@ def make_output_filename(
 ) -> str:
     """
     New filename format:
-        Class-[0,center_freq,1000,bandwidth]-SNR-snr-Src-hash-Group-group_idx.mat
+        Background-[0,center_freq,1000,bandwidth]-SNR-snr-Src-hash-Group-group_idx.mat
     """
     c = safe_float_str(center_freq, ndigits=4)
     bw = safe_float_str(max(float(bandwidth), 1e-6), ndigits=4)
     snr_s = snr_to_str(snr)
     h = source_hash(src_fp, root=src_root)
 
-    return f"{class_name}-[0,{c},1000,{bw}]-SNR-{snr_s}-Src-{h}-Group-{int(group_idx)}.mat"
+    return f"Background-[0,{c},1000,{bw}]-SNR-{snr_s}-Src-{h}-Group-{int(group_idx)}.mat"
 
 
-def save_group_mat(
+def save_background_mat(
     save_path: str,
     mat_key: str,
     group_mat: np.ndarray,
     source_fp: str,
-    class_name: str,
-    center_freq: float,
-    bandwidth: float,
+    source_class_name: str,
+    source_center_freq: float,
+    source_bandwidth: float,
+    bg_center_freq: float,
+    bg_bandwidth: float,
     group_idx: int,
     boxes,
-    is_background: bool,
 ):
     boxes_arr = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
 
     payload = {
         mat_key: np.asarray(group_mat, dtype=np.float32),
+
+        # Label metadata for generated sample
+        "class_name": np.array("Background"),
+        "center_freq": np.array([[float(bg_center_freq)]], dtype=np.float32),
+        "bandwidth": np.array([[float(bg_bandwidth)]], dtype=np.float32),
+        "is_background": np.array([[1]], dtype=np.int32),
+
+        # Source metadata
         "source_file": np.array(source_fp),
-        "class_name": np.array(class_name),
-        "center_freq": np.array([[float(center_freq)]], dtype=np.float32),
-        "bandwidth": np.array([[float(bandwidth)]], dtype=np.float32),
+        "source_class_name": np.array(source_class_name),
+        "source_center_freq": np.array([[float(source_center_freq)]], dtype=np.float32),
+        "source_bandwidth": np.array([[float(source_bandwidth)]], dtype=np.float32),
+
+        # Group metadata
         "group_idx": np.array([[int(group_idx)]], dtype=np.int32),
         "boxes": boxes_arr.astype(np.int32),
-        "is_background": np.array([[int(is_background)]], dtype=np.int32),
     }
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -335,9 +362,15 @@ def match_groups_to_single_target(
     skip_unmatched: bool = True,
 ):
     """
-    Return:
-        matched_group_indices: list[int]
+    Match groups to the only true target.
+
+    Returns:
+        matched_group_indices: list[int], length 0 or 1
         unmatched_group_indices: list[int]
+
+    If target is missed, return:
+        matched_group_indices = []
+        unmatched_group_indices = all groups
     """
     if groups is None:
         groups = []
@@ -359,20 +392,27 @@ def match_groups_to_single_target(
         costs.append((cost, freq_diff, gi))
 
     costs = sorted(costs, key=lambda x: x[0])
-    best_cost, best_freq_diff, best_gi = costs[0]
+    _, best_freq_diff, best_gi = costs[0]
 
     if skip_unmatched and best_freq_diff > float(match_freq_thresh):
         return [], list(range(len(groups)))
 
     matched = [int(best_gi)]
     unmatched = [i for i in range(len(groups)) if i != int(best_gi)]
+
     return matched, unmatched
 
 
 # ----------------------------------------------------------------------
 # BBox cache wrapper
 # ----------------------------------------------------------------------
-def detect_with_optional_cache(detector, bbox_cache, spec, fp: str, strict_read: bool = False):
+def detect_with_optional_cache(
+    detector,
+    bbox_cache,
+    spec,
+    fp: str,
+    strict_read: bool = False,
+):
     if bbox_cache is not None:
         cached = bbox_cache.get(fp)
         if cached is not None:
@@ -402,12 +442,19 @@ def detect_with_optional_cache(detector, bbox_cache, spec, fp: str, strict_read:
 def build_config(args) -> SimpleNamespace:
     classes = load_classes(args.classes_json)
 
+    if "Background" not in classes:
+        raise ValueError("classes must contain 'Background'.")
+
     cfg = SimpleNamespace(**vars(args))
     cfg.classes = classes
     cfg.yolo_classes = None
 
     if args.yolo_classes:
-        cfg.yolo_classes = [int(x) for x in str(args.yolo_classes).split(",") if str(x).strip()]
+        cfg.yolo_classes = [
+            int(x)
+            for x in str(args.yolo_classes).split(",")
+            if str(x).strip()
+        ]
 
     return cfg
 
@@ -415,8 +462,7 @@ def build_config(args) -> SimpleNamespace:
 # ----------------------------------------------------------------------
 # Main generation
 # ----------------------------------------------------------------------
-def process_split(
-    split_name: str,
+def process_input_dir(
     input_dir: str,
     output_dir: str,
     cfg,
@@ -424,19 +470,17 @@ def process_split(
     detector,
     preprocessor,
     bbox_cache=None,
-    include_background: bool = False,
 ):
     files = collect_mat_files(input_dir, recursive=cfg.recursive)
-    logger.info(f"[{split_name}] found {len(files)} mat files from {input_dir}")
+    logger.info(f"[Input] found {len(files)} mat files from {input_dir}")
 
-    out_split_dir = os.path.join(output_dir, split_name)
-    os.makedirs(out_split_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     n_total = 0
     n_bad_parse = 0
     n_no_group = 0
     n_missed = 0
-    n_pos_saved = 0
+    n_no_background_group = 0
     n_bg_saved = 0
     n_failed = 0
 
@@ -447,7 +491,7 @@ def process_split(
             target, snr = parse_single_signal_target(fp, cfg.classes)
             if target is None:
                 n_bad_parse += 1
-                logger.warning(f"[{split_name}] skip parse/target invalid: {os.path.basename(fp)}")
+                logger.warning(f"[SkipParse] {os.path.basename(fp)}")
                 continue
 
             spec = load_mat_array(fp, cfg.mat_key)
@@ -460,7 +504,10 @@ def process_split(
                 strict_read=cfg.bbox_cache_strict_read,
             )
 
-            groups = preprocessor.select_signal_groups(yolo_boxes, spectrogram=spec) or []
+            groups = preprocessor.select_signal_groups(
+                yolo_boxes,
+                spectrogram=spec,
+            ) or []
 
             if len(groups) == 0:
                 n_no_group += 1
@@ -474,17 +521,27 @@ def process_split(
                 skip_unmatched=cfg.skip_unmatched,
             )
 
-            # Missed target: generate nothing, including no Background.
+            # Key rule:
+            # If the real signal is missed, do not generate any samples.
             if len(matched_idx) == 0:
                 n_missed += 1
                 continue
 
-            # Positive group: use target center/bandwidth in filename.
-            for gi in matched_idx:
+            # If there is only the real signal group, no background can be generated.
+            if len(unmatched_idx) == 0:
+                n_no_background_group += 1
+                continue
+
+            for gi in unmatched_idx:
                 g = groups[int(gi)]
                 boxes = np.asarray(g.get("boxes", []), dtype=np.int32).reshape(-1, 4)
+
                 if len(boxes) == 0:
                     continue
+
+                bg_center_freq = float(g.get("center_freq", 0.0))
+                bg_bandwidth = float(g.get("bandwidth", 0.0))
+                bg_bandwidth = max(bg_bandwidth, 1e-6)
 
                 group_mat = group_to_mat_fullsize(
                     spec=spec,
@@ -493,122 +550,90 @@ def process_split(
                     mask_value=cfg.mask_value,
                 )
 
-                class_name = str(target["class_name"])
-                center_freq = float(target["center_freq"])
-                bandwidth = float(target["bandwidth"])
-
-                out_name = make_output_filename(
-                    class_name=class_name,
-                    center_freq=center_freq,
-                    bandwidth=bandwidth,
+                out_name = make_background_filename(
+                    center_freq=bg_center_freq,
+                    bandwidth=bg_bandwidth,
                     snr=snr,
                     src_fp=fp,
                     group_idx=int(gi),
                     src_root=input_dir,
                 )
 
-                out_path = os.path.join(out_split_dir, out_name)
+                out_path = os.path.join(output_dir, out_name)
 
-                save_group_mat(
+                save_background_mat(
                     save_path=out_path,
                     mat_key=cfg.mat_key,
                     group_mat=group_mat,
                     source_fp=fp,
-                    class_name=class_name,
-                    center_freq=center_freq,
-                    bandwidth=bandwidth,
+                    source_class_name=str(target["class_name"]),
+                    source_center_freq=float(target["center_freq"]),
+                    source_bandwidth=float(target["bandwidth"]),
+                    bg_center_freq=bg_center_freq,
+                    bg_bandwidth=bg_bandwidth,
                     group_idx=int(gi),
                     boxes=boxes,
-                    is_background=False,
                 )
-                n_pos_saved += 1
 
-            # Background groups: train only.
-            if include_background:
-                if "Background" not in cfg.classes:
-                    raise ValueError("Background is not in cfg.classes, cannot generate background samples.")
-
-                for gi in unmatched_idx:
-                    g = groups[int(gi)]
-                    boxes = np.asarray(g.get("boxes", []), dtype=np.int32).reshape(-1, 4)
-                    if len(boxes) == 0:
-                        continue
-
-                    group_mat = group_to_mat_fullsize(
-                        spec=spec,
-                        boxes=boxes,
-                        mode=cfg.output_mat_mode,
-                        mask_value=cfg.mask_value,
-                    )
-
-                    center_freq = float(g.get("center_freq", 0.0))
-                    bandwidth = float(g.get("bandwidth", 0.0))
-                    bandwidth = max(bandwidth, 1e-6)
-
-                    out_name = make_output_filename(
-                        class_name="Background",
-                        center_freq=center_freq,
-                        bandwidth=bandwidth,
-                        snr=snr,
-                        src_fp=fp,
-                        group_idx=int(gi),
-                        src_root=input_dir,
-                    )
-
-                    out_path = os.path.join(out_split_dir, out_name)
-
-                    save_group_mat(
-                        save_path=out_path,
-                        mat_key=cfg.mat_key,
-                        group_mat=group_mat,
-                        source_fp=fp,
-                        class_name="Background",
-                        center_freq=center_freq,
-                        bandwidth=bandwidth,
-                        group_idx=int(gi),
-                        boxes=boxes,
-                        is_background=True,
-                    )
-                    n_bg_saved += 1
+                n_bg_saved += 1
 
         except Exception as e:
             n_failed += 1
-            logger.warning(f"[{split_name}] failed {os.path.basename(fp)}: {e}")
+            logger.warning(f"[Failed] {os.path.basename(fp)}: {e}")
 
     summary = {
-        "split": split_name,
         "input_dir": input_dir,
-        "output_dir": out_split_dir,
+        "output_dir": output_dir,
         "total_files": n_total,
         "bad_parse_or_invalid_target": n_bad_parse,
         "no_group": n_no_group,
         "missed_target_no_samples": n_missed,
-        "positive_saved": n_pos_saved,
+        "no_background_group": n_no_background_group,
         "background_saved": n_bg_saved,
         "failed": n_failed,
-        "include_background": bool(include_background),
         "output_mat_mode": cfg.output_mat_mode,
+        "mat_key": cfg.mat_key,
+        "match_freq_thresh": cfg.match_freq_thresh,
+        "match_bandwidth_weight": cfg.match_bandwidth_weight,
+        "skip_unmatched": cfg.skip_unmatched,
     }
 
-    summary_path = os.path.join(out_split_dir, "generation_summary.json")
+    summary_path = os.path.join(output_dir, "background_generation_summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
-    logger.info(f"[{split_name}] summary: {json.dumps(summary, ensure_ascii=False)}")
-    logger.info(f"[{split_name}] summary saved to: {summary_path}")
+    logger.info(f"[Summary] {json.dumps(summary, ensure_ascii=False)}")
+    logger.info(f"[Summary] saved to: {summary_path}")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate group-level mat dataset with optional Background groups."
+        description="Generate Background-only group-level mat samples."
     )
 
     # I/O
-    parser.add_argument("--train_input_dir", type=str, default="", help="Original train mat directory.")
-    parser.add_argument("--val_input_dir", type=str, default="", help="Original val mat directory.")
-    parser.add_argument("--output_dir", type=str, required=True, help="Output group-level dataset directory.")
-    parser.add_argument("--recursive", action="store_true", help="Recursively search mat files.")
-    parser.add_argument("--mat_key", type=str, default="summed_submatrices")
+    parser.add_argument(
+        "--input_dir",
+        type=str,
+        default='/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/new_dataset/new_dataset_awgn_space/train/1',
+        help="Original single-signal mat directory.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default='/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/data/background',
+        help="Output directory for generated Background mat files.",
+    )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Recursively search mat files.",
+    )
+    parser.add_argument(
+        "--mat_key",
+        type=str,
+        default="summed_submatrices",
+    )
 
     # Classes
     parser.add_argument(
@@ -617,7 +642,7 @@ def parse_args():
         default="",
         help=(
             "Optional classes mapping JSON string or JSON file. "
-            "Default uses FPV1/Lightbridge1/Ocusync.../Background."
+            "Must contain Background and source signal protocols."
         ),
     )
 
@@ -627,12 +652,16 @@ def parse_args():
         type=str,
         default="raw_in_boxes",
         choices=["raw_in_boxes", "mask"],
-        help="How to save each group as mat.",
+        help="How to save each background group as mat.",
     )
-    parser.add_argument("--mask_value", type=float, default=1.0)
+    parser.add_argument(
+        "--mask_value",
+        type=float,
+        default=1.0,
+    )
 
     # YOLO
-    parser.add_argument("--yolo_weights", type=str, required=True)
+    parser.add_argument("--yolo_weights", type=str, default='/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/best.pt')
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--yolo_conf_thres", type=float, default=0.25)
     parser.add_argument("--yolo_iou_thres", type=float, default=0.45)
@@ -716,8 +745,8 @@ def main():
     args = parse_args()
     logger = create_logger()
 
-    if not args.train_input_dir and not args.val_input_dir:
-        raise ValueError("Please provide at least --train_input_dir or --val_input_dir.")
+    if not os.path.isdir(args.input_dir):
+        raise NotADirectoryError(f"--input_dir is not a directory: {args.input_dir}")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -751,31 +780,15 @@ def main():
     else:
         logger.info("[BBoxCache] disabled")
 
-    if args.train_input_dir:
-        process_split(
-            split_name="train",
-            input_dir=args.train_input_dir,
-            output_dir=args.output_dir,
-            cfg=cfg,
-            logger=logger,
-            detector=detector,
-            preprocessor=preprocessor,
-            bbox_cache=bbox_cache,
-            include_background=True,
-        )
-
-    if args.val_input_dir:
-        process_split(
-            split_name="val",
-            input_dir=args.val_input_dir,
-            output_dir=args.output_dir,
-            cfg=cfg,
-            logger=logger,
-            detector=detector,
-            preprocessor=preprocessor,
-            bbox_cache=bbox_cache,
-            include_background=False,
-        )
+    process_input_dir(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        cfg=cfg,
+        logger=logger,
+        detector=detector,
+        preprocessor=preprocessor,
+        bbox_cache=bbox_cache,
+    )
 
     logger.info("Done.")
 

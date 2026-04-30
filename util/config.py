@@ -16,7 +16,7 @@ class Config:
         for key, value in vars(args).items():
             setattr(self, key, value)
             
-        self.classes = {"Background": 0, "Lightbridge1": 1, "Ocusync21": 2, "Ocusync31": 3, "Ocusync41": 4, "Skylink1": 5, "Skylink21": 6, "FPV1": 7}
+        self.classes = {"Background": 0, "Lightbridge": 1, "Ocusync2": 2, "Ocusync3": 3, "Ocusync4": 4, "Skylink1": 5, "FPV": 6}
         self.mat_key = "summed_submatrices"
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         

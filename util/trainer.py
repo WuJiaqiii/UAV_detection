@@ -679,7 +679,7 @@ class Trainer:
         correct = total = matched_total = target_total = 0
 
         # pbar = tqdm(self.train_loader, desc=f"Train Epoch {epoch + 1}", leave=True)
-        pbar = _make_pbar(self.train_loader, desc=f"Train Epoch {epoch + 1}", leave=False)
+        pbar = _make_pbar(self.train_loader, desc=f"Train Epoch {epoch + 1}", leave=True)
 
         for batch in pbar:
             inputs, targets_list, snrs, fps = batch
@@ -771,7 +771,7 @@ class Trainer:
             )
 
         # pbar = tqdm(loader, desc=f"Val Epoch {epoch + 1}", leave=True)
-        pbar = _make_pbar(loader, desc=f"Val Epoch {epoch + 1}", leave=False)
+        pbar = _make_pbar(loader, desc=f"Val Epoch {epoch + 1}", leave=True)
 
         for batch in pbar:
             inputs, targets_list, snrs, fps = batch
@@ -932,7 +932,7 @@ class Trainer:
             )
 
         # pbar = tqdm(loader, desc="Infer", leave=True)
-        pbar = _make_pbar(loader, desc=f"Infer", leave=False)
+        pbar = _make_pbar(loader, desc=f"Infer", leave=True)
 
         for batch in pbar:
             inputs, targets_list, snrs, fps = batch

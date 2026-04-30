@@ -4,7 +4,7 @@ import numpy as np
 import random
 from datetime import datetime, timedelta, timezone
 import torch.distributed as dist
-import tqdm 
+from tqdm import tqdm 
 import sys
 
 def set_seed(seed):
