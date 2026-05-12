@@ -1,4 +1,6 @@
-import os
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import argparse
 from pathlib import Path
 
@@ -8,56 +10,53 @@ from scipy.io import loadmat
 from tqdm import tqdm
 
 
-def spectrogram_to_yolo_uint8(
-    data: np.ndarray,
-    db_min: float = -80.0,
-    db_max: float = 0.0,
-    eps: float = 1e-12,
+def mat_to_uint8_vis(
+    mat_array: np.ndarray,
+    p_low: float = 1.0,
+    p_high: float = 99.5,
+    log_gain: float = 9.0,
 ) -> np.ndarray:
     """
-    Convert raw power/energy spectrogram to YOLO-style uint8 image.
+    将 2D mat 矩阵转换为 uint8 灰度图。
 
-    Logic:
-        data_norm = data / max(data)
-        data_db = 10 * log10(data_norm + eps)
-        data_db = clip(data_db, db_min, db_max)
-        out = (data_db - db_min) / (db_max - db_min)
-        uint8 = out * 255
+    当前逻辑：
+        1. percentile 裁剪，避免极端值影响显示；
+        2. 归一化到 [0, 1]；
+        3. log1p 映射，增强弱信号；
+        4. 转换到 uint8 [0, 255]。
     """
-    x = np.asarray(data, dtype=np.float32)
+    x = np.asarray(mat_array, dtype=np.float32)
 
     if x.ndim != 2:
         raise ValueError(f"Expected 2D matrix, got shape={x.shape}")
 
-    if db_max <= db_min:
-        raise ValueError(f"Invalid db range: db_min={db_min}, db_max={db_max}")
-
-    finite = np.isfinite(x)
-    if not finite.any():
+    finite_mask = np.isfinite(x)
+    if not finite_mask.any():
         return np.zeros_like(x, dtype=np.uint8)
 
-    x = np.maximum(x, 0.0)
-    ref = float(np.max(x[finite]))
+    valid = x[finite_mask]
 
-    if (not np.isfinite(ref)) or ref <= 0:
+    lo = float(np.percentile(valid, p_low))
+    hi = float(np.percentile(valid, p_high))
+
+    if hi <= lo:
         return np.zeros_like(x, dtype=np.uint8)
 
-    x_norm = x / (ref + float(eps))
-    x_db = 10.0 * np.log10(x_norm + float(eps))
+    # 1) 分位数裁剪
+    x = np.clip(x, lo, hi)
 
-    x_db = np.nan_to_num(
-        x_db,
-        nan=float(db_min),
-        posinf=float(db_max),
-        neginf=float(db_min),
-    )
+    # 2) 归一化到 [0, 1]
+    x = (x - lo) / (hi - lo)
 
-    x_db = np.clip(x_db, float(db_min), float(db_max))
+    # 3) log 增强
+    if log_gain > 0:
+        x = np.log1p(float(log_gain) * x) / np.log1p(float(log_gain))
 
-    out = (x_db - float(db_min)) / (float(db_max) - float(db_min))
-    out = np.clip(out, 0.0, 1.0)
+    # 4) 转 uint8
+    x = np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+    x = np.clip(x * 255.0, 0.0, 255.0)
 
-    return np.clip(out * 255.0, 0, 255).astype(np.uint8)
+    return x.astype(np.uint8)
 
 
 def collect_mat_files(input_dir: Path, recursive: bool = False):
@@ -66,14 +65,26 @@ def collect_mat_files(input_dir: Path, recursive: bool = False):
     return sorted(input_dir.glob("*.mat"))
 
 
+def make_output_path(
+    mat_path: Path,
+    input_dir: Path,
+    output_dir: Path,
+    preserve_tree: bool,
+) -> Path:
+    if preserve_tree:
+        rel = mat_path.relative_to(input_dir)
+        return output_dir / rel.with_suffix(".png")
+    return output_dir / f"{mat_path.stem}.png"
+
+
 def convert_one_mat(
     mat_path: Path,
     input_dir: Path,
     output_dir: Path,
     mat_key: str,
-    db_min: float,
-    db_max: float,
-    eps: float,
+    p_low: float,
+    p_high: float,
+    log_gain: float,
     save_rgb: bool,
     preserve_tree: bool,
 ):
@@ -87,19 +98,19 @@ def convert_one_mat(
     if arr.ndim != 2:
         raise ValueError(f"Expected 2D matrix, got shape={arr.shape}")
 
-    img_u8 = spectrogram_to_yolo_uint8(
+    img_u8 = mat_to_uint8_vis(
         arr,
-        db_min=db_min,
-        db_max=db_max,
-        eps=eps,
+        p_low=p_low,
+        p_high=p_high,
+        log_gain=log_gain,
     )
 
-    if preserve_tree:
-        rel = mat_path.relative_to(input_dir)
-        output_path = output_dir / rel.with_suffix(".png")
-    else:
-        output_path = output_dir / f"{mat_path.stem}.png"
-
+    output_path = make_output_path(
+        mat_path=mat_path,
+        input_dir=input_dir,
+        output_dir=output_dir,
+        preserve_tree=preserve_tree,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if save_rgb:
@@ -115,11 +126,22 @@ def convert_one_mat(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert .mat spectrogram files to YOLO PNG images using fixed dB clipping."
+        description="Convert .mat spectrogram files to .png images using percentile clipping + log enhancement."
     )
 
-    parser.add_argument("--input_dir", type=str, required=True)
-    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument(
+        "--input_dir",
+        type=str,
+        required=True,
+        help="输入 mat 文件目录",
+    )
+
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        required=True,
+        help="输出 png 图片目录",
+    )
 
     parser.add_argument(
         "--mat_key",
@@ -141,31 +163,31 @@ def main():
     )
 
     parser.add_argument(
-        "--db_min",
+        "--p_low",
         type=float,
-        default=-80.0,
-        help="固定 dB 裁剪下界",
+        default=1.0,
+        help="低分位裁剪百分比",
     )
 
     parser.add_argument(
-        "--db_max",
+        "--p_high",
         type=float,
-        default=0.0,
-        help="固定 dB 裁剪上界。若先按每张图最大值归一化，0 dB 表示当前图最大值",
+        default=99.5,
+        help="高分位裁剪百分比",
     )
 
     parser.add_argument(
-        "--eps",
+        "--log_gain",
         type=float,
-        default=1e-12,
-        help="避免 log10(0) 的极小值",
+        default=9.0,
+        help="log 增强系数；设为 0 可关闭 log 映射",
     )
 
     parser.add_argument(
         "--save_rgb",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="是否保存三通道 PNG，推荐开启以贴近 YOLO 输入",
+        help="是否保存为三通道 PNG",
     )
 
     args = parser.parse_args()
@@ -176,8 +198,11 @@ def main():
     if not input_dir.exists() or not input_dir.is_dir():
         raise NotADirectoryError(f"input_dir not found or not a directory: {input_dir}")
 
-    if args.db_max <= args.db_min:
-        raise ValueError(f"Invalid db range: db_min={args.db_min}, db_max={args.db_max}")
+    if not (0.0 <= args.p_low < args.p_high <= 100.0):
+        raise ValueError(
+            f"Invalid percentile range: p_low={args.p_low}, p_high={args.p_high}. "
+            "Expected 0 <= p_low < p_high <= 100."
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -191,8 +216,9 @@ def main():
     print(f"[INFO] Input dir: {input_dir}")
     print(f"[INFO] Output dir: {output_dir}")
     print(f"[INFO] mat_key: {args.mat_key}")
-    print(f"[INFO] db_range: [{args.db_min}, {args.db_max}]")
-    print(f"[INFO] eps: {args.eps}")
+    print(f"[INFO] p_low: {args.p_low}")
+    print(f"[INFO] p_high: {args.p_high}")
+    print(f"[INFO] log_gain: {args.log_gain}")
     print(f"[INFO] save_rgb: {args.save_rgb}")
     print(f"[INFO] preserve_tree: {args.preserve_tree}")
 
@@ -205,9 +231,9 @@ def main():
                 input_dir=input_dir,
                 output_dir=output_dir,
                 mat_key=args.mat_key,
-                db_min=args.db_min,
-                db_max=args.db_max,
-                eps=args.eps,
+                p_low=args.p_low,
+                p_high=args.p_high,
+                log_gain=args.log_gain,
                 save_rgb=args.save_rgb,
                 preserve_tree=args.preserve_tree,
             )
