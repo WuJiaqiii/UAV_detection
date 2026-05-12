@@ -5,7 +5,7 @@ python main.py \
   --epochs 300 \
   --batch_size 128 \
   --lr 1e-4 \
-  --yolo_weights /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/yolov5/runs/train/exp13/weights/best.pt \
+  --yolo_weights /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/yolov5/runs/train/exp18/weights/best.pt \
   --cnn_input_mode mask \
   --run_mode train \
   --exclude_classes FPV \

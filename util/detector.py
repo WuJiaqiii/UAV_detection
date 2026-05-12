@@ -8,13 +8,109 @@ import numpy as np
 import torch
 import cv2
 
+# def spec_float32_to_uint8_gray(spec: np.ndarray) -> np.ndarray:
+#     """
+#     spec: float32/float64 2D matrix, shape (H, W)
+#     return: uint8 grayscale image, shape (H, W)
+
+#     Match your old .mat -> .png logic:
+#         uint8(matrix / max(matrix) * 255)
+#     """
+#     if not isinstance(spec, np.ndarray):
+#         spec = np.asarray(spec)
+
+#     if spec.ndim != 2:
+#         raise ValueError(f"Expected 2D matrix, got {spec.shape}")
+
+#     x = spec.astype(np.float32, copy=False)
+
+#     maxv = float(np.max(x))
+#     if (not np.isfinite(maxv)) or maxv <= 0:
+#         return np.zeros_like(x, dtype=np.uint8)
+
+#     x = x / maxv * 255.0
+#     x = np.clip(x, 0.0, 255.0)
+#     return x.astype(np.uint8)
+
+# def spec_float32_to_uint8_gray(
+#     spec: np.ndarray,
+#     norm_mode: str = "max",
+#     p_low: float = 1.0,
+#     p_high: float = 99.5,
+# ) -> np.ndarray:
+#     """
+#     Convert 2D spectrogram matrix to uint8 grayscale image for YOLO.
+
+#     norm_mode:
+#         max:
+#             Original behavior:
+#                 x / max(x) * 255
+
+#         percentile:
+#             Percentile clipping:
+#                 lo = percentile(x, p_low)
+#                 hi = percentile(x, p_high)
+#                 x = clip(x, lo, hi)
+#                 x = (x - lo) / (hi - lo) * 255
+#     """
+#     if not isinstance(spec, np.ndarray):
+#         spec = np.asarray(spec)
+
+#     if spec.ndim != 2:
+#         raise ValueError(f"Expected 2D matrix, got {spec.shape}")
+
+#     x = spec.astype(np.float32, copy=False)
+
+#     finite_mask = np.isfinite(x)
+#     if not finite_mask.any():
+#         return np.zeros_like(x, dtype=np.uint8)
+
+#     valid = x[finite_mask]
+#     norm_mode = str(norm_mode).lower()
+
+#     if norm_mode == "max":
+#         maxv = float(np.max(valid))
+#         if maxv <= 0:
+#             return np.zeros_like(x, dtype=np.uint8)
+
+#         x = x / maxv * 255.0
+
+#     elif norm_mode == "percentile":
+#         p_low = float(p_low)
+#         p_high = float(p_high)
+
+#         if not (0.0 <= p_low < p_high <= 100.0):
+#             raise ValueError(
+#                 f"Invalid percentile range: p_low={p_low}, p_high={p_high}. "
+#                 "Expected 0 <= p_low < p_high <= 100."
+#             )
+
+#         lo = float(np.percentile(valid, p_low))
+#         hi = float(np.percentile(valid, p_high))
+
+#         if hi <= lo:
+#             return np.zeros_like(x, dtype=np.uint8)
+
+#         x = np.clip(x, lo, hi)
+#         x = (x - lo) / (hi - lo) * 255.0
+
+#     else:
+#         raise ValueError(
+#             f"Unsupported yolo_input_norm={norm_mode}, expected 'max' or 'percentile'."
+#         )
+
+#     x = np.nan_to_num(x, nan=0.0, posinf=255.0, neginf=0.0)
+#     x = np.clip(x, 0.0, 255.0)
+
+#     return x.astype(np.uint8)
+
 def spec_float32_to_uint8_gray(spec: np.ndarray) -> np.ndarray:
     """
-    spec: float32/float64 2D matrix, shape (H, W)
-    return: uint8 grayscale image, shape (H, W)
+    Temporary YOLO input visualization logic:
+        percentile clipping + log enhancement + uint8.
 
-    Match your old .mat -> .png logic:
-        uint8(matrix / max(matrix) * 255)
+    This is for testing whether YOLO miss-detection is caused by weak signals
+    being too dark after the original x / max(x) normalization.
     """
     if not isinstance(spec, np.ndarray):
         spec = np.asarray(spec)
@@ -24,14 +120,37 @@ def spec_float32_to_uint8_gray(spec: np.ndarray) -> np.ndarray:
 
     x = spec.astype(np.float32, copy=False)
 
-    maxv = float(np.max(x))
-    if (not np.isfinite(maxv)) or maxv <= 0:
+    finite_mask = np.isfinite(x)
+    if not finite_mask.any():
         return np.zeros_like(x, dtype=np.uint8)
 
-    x = x / maxv * 255.0
-    x = np.clip(x, 0.0, 255.0)
-    return x.astype(np.uint8)
+    valid = x[finite_mask]
 
+    # 你可以先用这一组参数测试
+    p_low = 1.0
+    p_high = 99.5
+    log_gain = 9.0
+
+    lo = float(np.percentile(valid, p_low))
+    hi = float(np.percentile(valid, p_high))
+
+    if hi <= lo:
+        return np.zeros_like(x, dtype=np.uint8)
+
+    # 1) 分位数裁剪，避免极端亮点压暗弱信号
+    x = np.clip(x, lo, hi)
+
+    # 2) 归一化到 0~1
+    x = (x - lo) / (hi - lo)
+
+    # 3) log 增强弱信号
+    x = np.log1p(log_gain * x) / np.log1p(log_gain)
+
+    # 4) 转 uint8
+    x = np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+    x = np.clip(x * 255.0, 0.0, 255.0)
+
+    return x.astype(np.uint8)
 
 class YoloV5Detector:
     """
@@ -92,6 +211,10 @@ class YoloV5Detector:
         # plot.py uses one imgsz value; here keep compatibility with current config
         self.imgsz = int(max(config.yolo_imgsz_h, config.yolo_imgsz_w))
 
+        self.input_norm = str(config.yolo_input_norm).lower()
+        self.input_p_low = float(config.yolo_input_p_low)
+        self.input_p_high = float(config.yolo_input_p_high)
+
     @torch.inference_mode()
     def detect(self, spec: Union[np.ndarray, torch.Tensor]) -> List[List[int]]:
 
@@ -109,6 +232,12 @@ class YoloV5Detector:
         H0, W0 = spec_np.shape
 
         gray_u8 = spec_float32_to_uint8_gray(spec_np)
+        # gray_u8 = spec_float32_to_uint8_gray(
+        #     spec_np,
+        #     norm_mode=self.input_norm,
+        #     p_low=self.input_p_low,
+        #     p_high=self.input_p_high,
+        # )
         image_bgr = cv2.cvtColor(gray_u8, cv2.COLOR_GRAY2BGR)
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         image_rgb = np.ascontiguousarray(image_rgb)
