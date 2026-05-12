@@ -45,6 +45,10 @@ def get_parser():
     g_yolo.add_argument("--yolo_classes", type=int, nargs="*", default=None)
     g_yolo.add_argument("--yolo_half", action=argparse.BooleanOptionalAction, default=False)
     g_yolo.add_argument("--yolo_warmup", action=argparse.BooleanOptionalAction, default=True)
+    
+    g_yolo.add_argument("--yolo_db_min", type=float, default=-80.0)
+    g_yolo.add_argument("--yolo_db_max", type=float, default=0.0)
+    g_yolo.add_argument("--yolo_db_eps", type=float, default=1e-12)
 
     g_yolo.add_argument("--yolo_input_norm", type=str, default="percentile", choices=["max", "percentile"])
     g_yolo.add_argument("--yolo_input_p_low", type=float, default=1.0)
@@ -106,9 +110,6 @@ def get_parser():
     g_model.add_argument("--mask_pretrained", action=argparse.BooleanOptionalAction, default=True)
     g_model.add_argument("--freeze_backbone", action=argparse.BooleanOptionalAction, default=False)
     g_model.add_argument("--cnn_dropout", type=float, default=0.0)
-    g_model.add_argument("--cnn_input_mode", type=str, default="mask", choices=["mask", "raw", "raw_with_boxes", "raw_in_boxes"])
-    g_model.add_argument("--box_draw_thickness", type=int, default=2)
-    g_model.add_argument("--box_draw_value", type=int, default=255)
     g_model.add_argument("--mask_fill_value", type=int, default=255)
 
     # Training / IO

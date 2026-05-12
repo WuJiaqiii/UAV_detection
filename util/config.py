@@ -17,7 +17,6 @@ class Config:
             setattr(self, key, value)
             
         self.classes = {"Background": 0, "Lightbridge": 1, "Ocusync2": 2, "Ocusync3": 3, "Ocusync4": 4, "Skylink1": 5, "FPV": 6}
-        self.mat_key = "summed_submatrices"
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         self.base_dir = 'experiments'

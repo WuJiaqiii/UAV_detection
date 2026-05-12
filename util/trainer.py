@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -10,11 +11,9 @@ try:
 except Exception:
     linear_sum_assignment = None
 
-from util.input_builder import CNNInputBuilder
 from util.vis import DetectionVisualizer
-from util.metrics import AverageMeter, save_confusion_matrix, save_eval_summary, save_instance_csv
 from util.checkpoint import save_training_checkpoint, load_training_checkpoint
-from util.utils import _make_pbar
+from util.utils import _make_pbar, AverageMeter, save_confusion_matrix, save_eval_summary, save_instance_csv
 
 class Trainer:
     """
@@ -54,15 +53,7 @@ class Trainer:
 
         self.writer = SummaryWriter(str(self.config.log_dir))
 
-        self.input_builder = CNNInputBuilder(
-            mode=str(config.cnn_input_mode).lower(),
-            out_size=int(config.mask_img_size),
-            box_draw_thickness=int(config.box_draw_thickness),
-            box_draw_value=int(config.box_draw_value),
-            mask_fill_value=int(config.mask_fill_value)
-        )
-
-        self.visualizer = DetectionVisualizer(result_dir=self.config.result_dir, logger=self.logger)
+        self.visualizer = DetectionVisualizer(config=self.config, logger=self.logger)
 
         self.best_val_acc = -1.0
         self.no_improve_epochs = 0
@@ -187,6 +178,78 @@ class Trainer:
         if isinstance(group, dict) and "bandwidth" in group:
             return float(group["bandwidth"])
         return 0.0
+    
+    def _boxes_to_centered_mask(self, image_shape, boxes):
+        h, w = int(image_shape[0]), int(image_shape[1])
+        mask = np.zeros((h, w), dtype=np.uint8)
+
+        if boxes is None:
+            return mask
+
+        arr = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
+        if len(arr) == 0:
+            return mask
+
+        valid = []
+        for b in arr:
+            x1, y1, x2, y2 = [int(v) for v in b]
+
+            x1 = max(0, min(x1, w - 1))
+            x2 = max(0, min(x2, w))
+            y1 = max(0, min(y1, h - 1))
+            y2 = max(0, min(y2, h))
+
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            valid.append([x1, y1, x2, y2])
+
+        if len(valid) == 0:
+            return mask
+
+        arr = np.asarray(valid, dtype=np.int32)
+
+        gy1 = int(arr[:, 1].min())
+        gy2 = int(arr[:, 3].max())
+
+        group_cy = 0.5 * (gy1 + gy2)
+        canvas_cy = 0.5 * (h - 1)
+
+        dy = int(round(canvas_cy - group_cy))
+
+        shifted = arr.copy()
+        shifted[:, [1, 3]] += dy
+
+        fill_value = int(self.config.mask_fill_value)
+
+        for b in shifted:
+            x1, y1, x2, y2 = [int(v) for v in b]
+
+            x1 = max(0, min(x1, w - 1))
+            x2 = max(0, min(x2, w))
+            y1 = max(0, min(y1, h - 1))
+            y2 = max(0, min(y2, h))
+
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            mask[y1:y2, x1:x2] = fill_value
+
+        return mask
+
+
+    def _build_mask_input(self, spec, boxes):
+        mask = self._boxes_to_centered_mask(spec.shape, boxes)
+
+        x = mask.astype(np.float32) / 255.0
+        x = cv2.resize(
+            x,
+            (int(self.config.mask_img_size), int(self.config.mask_img_size)),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        x = np.expand_dims(x, axis=0)
+
+        return torch.from_numpy(x).float(), mask
 
     def _match_groups_to_targets(self, groups, targets, spec_shape):
         if groups is None:
@@ -326,7 +389,7 @@ class Trainer:
             image_info["unmatched_targets"] = []
             image_infos.append(image_info)
 
-            x, _ = self.input_builder.build(spec, final_boxes)
+            x, _ = self._build_mask_input(spec, final_boxes)
 
             batch_images.append(x)
             batch_labels.append(label)
@@ -422,7 +485,7 @@ class Trainer:
                 if len(final_boxes) == 0:
                     continue
 
-                x, _ = self.input_builder.build(spec, final_boxes)
+                x, _ = self._build_mask_input(spec, final_boxes)
 
                 batch_images.append(x)
                 batch_metas.append({
