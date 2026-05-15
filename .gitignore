@@ -6,6 +6,7 @@
 *.csv
 *.mat
 *.pt
+*.json
 test.py
 experiments/*
 data/dataset

@@ -155,71 +155,88 @@ def save_instance_csv(result_dir, split_name, epoch, instance_rows):
     
 def spectrogram_to_yolo_float(
     data: np.ndarray,
-    db_min: float,
-    db_max: float,
+    db_min: float = None,
+    db_max: float = None,
     eps: float = 1e-12,
+    p_low: float = 1.0,
+    p_high: float = 99.5,
+    log_gain: float = 9.0,
 ) -> np.ndarray:
     """
-    Convert raw power/energy spectrogram to normalized float image in [0, 1].
+    Convert spectrogram to normalized float image in [0, 1]
+    using percentile clipping + log enhancement.
 
-    Logic:
-        ref = max(data)
-        data_norm = data / ref
-        data_db = 10 * log10(data_norm + eps)
-        data_db = clip(data_db, db_min, db_max)
-        out = (data_db - db_min) / (db_max - db_min)
+    Current temporary logic:
+        lo = percentile(data, p_low)
+        hi = percentile(data, p_high)
+        data = clip(data, lo, hi)
+        data = (data - lo) / (hi - lo)
+        data = log1p(log_gain * data) / log1p(log_gain)
 
-    With db_range=[-80, 0]:
-        0 dB means the strongest point in this image.
-        -80 dB means 80 dB below the strongest point.
+    Note:
+        db_min / db_max are kept only for compatibility with existing calls.
+        They are not used in this temporary percentile+log mode.
     """
     x = np.asarray(data, dtype=np.float32)
 
     if x.ndim != 2:
         raise ValueError(f"Expected 2D spectrogram, got shape={x.shape}")
 
-    if db_max <= db_min:
-        raise ValueError(f"Invalid db range: db_min={db_min}, db_max={db_max}")
-
     finite = np.isfinite(x)
     if not finite.any():
         return np.zeros_like(x, dtype=np.float32)
 
-    x = np.maximum(x, 0.0)
+    p_low = float(p_low)
+    p_high = float(p_high)
 
-    ref = float(np.max(x[finite]))
-    if (not np.isfinite(ref)) or ref <= 0:
+    if not (0.0 <= p_low < p_high <= 100.0):
+        raise ValueError(
+            f"Invalid percentile range: p_low={p_low}, p_high={p_high}. "
+            "Expected 0 <= p_low < p_high <= 100."
+        )
+
+    valid = x[finite]
+    lo = float(np.percentile(valid, p_low))
+    hi = float(np.percentile(valid, p_high))
+
+    if hi <= lo:
         return np.zeros_like(x, dtype=np.float32)
 
-    x_norm = x / (ref + float(eps))
-    data_db = 10.0 * np.log10(x_norm + float(eps))
+    x = np.clip(x, lo, hi)
+    x = (x - lo) / (hi - lo)
 
-    data_db = np.nan_to_num(
-        data_db,
-        nan=float(db_min),
-        posinf=float(db_max),
-        neginf=float(db_min),
-    )
+    if float(log_gain) > 0:
+        x = np.log1p(float(log_gain) * x) / np.log1p(float(log_gain))
 
-    data_db = np.clip(data_db, float(db_min), float(db_max))
+    x = np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+    x = np.clip(x, 0.0, 1.0)
 
-    out = (data_db - float(db_min)) / (float(db_max) - float(db_min))
-    out = np.clip(out, 0.0, 1.0)
-
-    return out.astype(np.float32)
+    return x.astype(np.float32)
 
 
 def spectrogram_to_yolo_uint8(
     data: np.ndarray,
-    db_min: float,
-    db_max: float,
+    db_min: float = None,
+    db_max: float = None,
     eps: float = 1e-12,
+    p_low: float = 1.0,
+    p_high: float = 99.5,
+    log_gain: float = 9.0,
 ) -> np.ndarray:
+    """
+    Convert spectrogram to uint8 image using percentile clipping + log enhancement.
+
+    db_min / db_max are accepted for compatibility with current detector.py / vis.py calls,
+    but are not used in this temporary mode.
+    """
     x = spectrogram_to_yolo_float(
         data=data,
         db_min=db_min,
         db_max=db_max,
         eps=eps,
+        p_low=p_low,
+        p_high=p_high,
+        log_gain=log_gain,
     )
     return np.clip(x * 255.0, 0, 255).astype(np.uint8)
     

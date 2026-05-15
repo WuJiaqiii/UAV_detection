@@ -39,7 +39,7 @@ def get_parser():
     g_yolo.add_argument("--yolo_device", type=str, default="")
     g_yolo.add_argument("--yolo_imgsz_h", type=int, default=640)
     g_yolo.add_argument("--yolo_imgsz_w", type=int, default=640)
-    g_yolo.add_argument("--yolo_conf_thres", type=float, default=0.20)
+    g_yolo.add_argument("--yolo_conf_thres", type=float, default=0.01)
     g_yolo.add_argument("--yolo_iou_thres", type=float, default=0.10)
     g_yolo.add_argument("--yolo_max_det", type=int, default=1000)
     g_yolo.add_argument("--yolo_classes", type=int, nargs="*", default=None)
@@ -56,7 +56,7 @@ def get_parser():
 
     # Preprocessor
     g_pre = parser.add_argument_group("Preprocess")
-    g_pre.add_argument("--min_area", type=int, default=20)
+    g_pre.add_argument("--min_area", type=int, default=4)
     g_pre.add_argument("--min_ratio", type=float, default=0.0)
     g_pre.add_argument("--min_width", type=int, default=2)
     g_pre.add_argument("--min_height", type=int, default=2)

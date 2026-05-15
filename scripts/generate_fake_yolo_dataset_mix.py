@@ -848,7 +848,7 @@ def parse_args():
     parser.add_argument(
         "--num_images",
         type=int,
-        default=2000,
+        default=1500,
         help="需要额外生成的仿真图片数量，不包含真实图片数量。",
     )
 
@@ -876,7 +876,7 @@ def parse_args():
     parser.add_argument(
         "--max_objects",
         type=int,
-        default=10,
+        default=15,
         help="每张仿真图最多目标数。",
     )
 
@@ -939,7 +939,7 @@ def parse_args():
     parser.add_argument(
         "--noise_sigma_max",
         type=float,
-        default=20.0,
+        default=40.0,
         help="高斯噪声 sigma 最大值。",
     )
 

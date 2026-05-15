@@ -661,10 +661,10 @@ def parse_args():
     )
 
     # YOLO
-    parser.add_argument("--yolo_weights", type=str, default='/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/best.pt')
+    parser.add_argument("--yolo_weights", type=str, default='/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/yolov5/runs/train/exp23/weights/best.pt')
     parser.add_argument("--device", type=str, default="")
-    parser.add_argument("--yolo_conf_thres", type=float, default=0.25)
-    parser.add_argument("--yolo_iou_thres", type=float, default=0.45)
+    parser.add_argument("--yolo_conf_thres", type=float, default=0.10)
+    parser.add_argument("--yolo_iou_thres", type=float, default=0.10)
     parser.add_argument("--yolo_max_det", type=int, default=1000)
     parser.add_argument("--yolo_imgsz_h", type=int, default=640)
     parser.add_argument("--yolo_imgsz_w", type=int, default=640)
@@ -703,7 +703,7 @@ def parse_args():
     )
 
     # Preprocessor geometry filters
-    parser.add_argument("--min_area", type=int, default=20)
+    parser.add_argument("--min_area", type=int, default=4)
     parser.add_argument("--min_width", type=int, default=2)
     parser.add_argument("--min_height", type=int, default=2)
     parser.add_argument("--min_ratio", type=float, default=0.0)
@@ -737,6 +737,10 @@ def parse_args():
     parser.add_argument("--score_contrast_std_weight", type=float, default=0.0)
     parser.add_argument("--score_w_std_weight", type=float, default=0.0)
     parser.add_argument("--score_h_std_weight", type=float, default=0.0)
+    
+    parser.add_argument("--yolo_input_norm", type=str, default="percentile", choices=["max", "percentile"])
+    parser.add_argument("--yolo_input_p_low", type=float, default=1.0)
+    parser.add_argument("--yolo_input_p_high", type=float, default=99.5)
 
     return parser.parse_args()
 
