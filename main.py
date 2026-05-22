@@ -39,7 +39,7 @@ def get_parser():
     g_yolo.add_argument("--yolo_device", type=str, default="")
     g_yolo.add_argument("--yolo_imgsz_h", type=int, default=640)
     g_yolo.add_argument("--yolo_imgsz_w", type=int, default=640)
-    g_yolo.add_argument("--yolo_conf_thres", type=float, default=0.01)
+    g_yolo.add_argument("--yolo_conf_thres", type=float, default=0.001)
     g_yolo.add_argument("--yolo_iou_thres", type=float, default=0.10)
     g_yolo.add_argument("--yolo_max_det", type=int, default=1000)
     g_yolo.add_argument("--yolo_classes", type=int, nargs="*", default=None)

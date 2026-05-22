@@ -50,10 +50,8 @@ from scipy.io import loadmat, savemat
 # ----------------------------------------------------------------------
 _THIS_FILE = Path(__file__).resolve()
 
-# If this script is placed at project root: UAV_detection/generate_background_only.py
 if (_THIS_FILE.parent / "util").exists():
     PROJECT_ROOT = _THIS_FILE.parent
-# If this script is placed under scripts/: UAV_detection/scripts/generate_background_only.py
 elif (_THIS_FILE.parents[1] / "util").exists():
     PROJECT_ROOT = _THIS_FILE.parents[1]
 else:
@@ -77,19 +75,29 @@ except Exception:
 # ----------------------------------------------------------------------
 # Default class mapping
 # Used only to validate source filename protocols.
-# Background must exist because generated files are labeled as Background.
-# Please keep this consistent with your training Config.
+#
+# The generated samples are always Background, so old protocol labels are
+# mainly used for parsing and matching source signals.
 # ----------------------------------------------------------------------
 DEFAULT_CLASSES = {
     "Background": 0,
-    "FPV1": 1,
-    "Lightbridge1": 2,
-    "Ocusync_mini1": 3,
-    "Ocusync21": 4,
-    "Ocusync31": 5,
-    "Ocusync41": 6,
-    "Skylink11": 7,
-    "Skylink21": 8,
+
+    # Current renamed classes
+    "Lightbridge": 1,
+    "Ocusync2": 2,
+    "Ocusync3": 3,
+    "Ocusync4": 4,
+    "Skylink1": 5,
+    "FPV": 6,
+
+    # Backward-compatible old names, only for parsing old source filenames
+    "Lightbridge1": 1,
+    "Ocusync21": 2,
+    "Ocusync31": 3,
+    "Ocusync41": 4,
+    "Skylink11": 5,
+    "Skylink21": 5,
+    "FPV1": 6,
 }
 
 
@@ -241,10 +249,10 @@ def group_to_mat_fullsize(
 
     boxes = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
 
-    out = np.zeros_like(spec, dtype=np.float32)
-
     if mode not in {"raw_in_boxes", "mask"}:
         raise ValueError(f"Unsupported --output_mat_mode={mode}")
+
+    out = np.zeros_like(spec, dtype=np.float32)
 
     for b in boxes:
         x1, y1, x2, y2 = [int(v) for v in b]
@@ -367,10 +375,6 @@ def match_groups_to_single_target(
     Returns:
         matched_group_indices: list[int], length 0 or 1
         unmatched_group_indices: list[int]
-
-    If target is missed, return:
-        matched_group_indices = []
-        unmatched_group_indices = all groups
     """
     if groups is None:
         groups = []
@@ -447,14 +451,16 @@ def build_config(args) -> SimpleNamespace:
 
     cfg = SimpleNamespace(**vars(args))
     cfg.classes = classes
-    cfg.yolo_classes = None
 
+    # Current detector/main compatibility
     if args.yolo_classes:
         cfg.yolo_classes = [
             int(x)
             for x in str(args.yolo_classes).split(",")
             if str(x).strip()
         ]
+    else:
+        cfg.yolo_classes = None
 
     return cfg
 
@@ -596,6 +602,9 @@ def process_input_dir(
         "match_freq_thresh": cfg.match_freq_thresh,
         "match_bandwidth_weight": cfg.match_bandwidth_weight,
         "skip_unmatched": cfg.skip_unmatched,
+        "yolo_input_norm": cfg.yolo_input_norm,
+        "yolo_input_p_low": cfg.yolo_input_p_low,
+        "yolo_input_p_high": cfg.yolo_input_p_high,
     }
 
     summary_path = os.path.join(output_dir, "background_generation_summary.json")
@@ -624,16 +633,8 @@ def parse_args():
         default='/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/data/background',
         help="Output directory for generated Background mat files.",
     )
-    parser.add_argument(
-        "--recursive",
-        action="store_true",
-        help="Recursively search mat files.",
-    )
-    parser.add_argument(
-        "--mat_key",
-        type=str,
-        default="summed_submatrices",
-    )
+    parser.add_argument("--recursive", action="store_true")
+    parser.add_argument("--mat_key", type=str, default="summed_submatrices")
 
     # Classes
     parser.add_argument(
@@ -654,17 +655,13 @@ def parse_args():
         choices=["raw_in_boxes", "mask"],
         help="How to save each background group as mat.",
     )
-    parser.add_argument(
-        "--mask_value",
-        type=float,
-        default=1.0,
-    )
+    parser.add_argument("--mask_value", type=float, default=1.0)
 
     # YOLO
     parser.add_argument("--yolo_weights", type=str, default='/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/yolov5/runs/train/exp23/weights/best.pt')
     parser.add_argument("--device", type=str, default="")
-    parser.add_argument("--yolo_conf_thres", type=float, default=0.10)
-    parser.add_argument("--yolo_iou_thres", type=float, default=0.10)
+    parser.add_argument("--yolo_conf_thres", type=float, default=0.25)
+    parser.add_argument("--yolo_iou_thres", type=float, default=0.45)
     parser.add_argument("--yolo_max_det", type=int, default=1000)
     parser.add_argument("--yolo_imgsz_h", type=int, default=640)
     parser.add_argument("--yolo_imgsz_w", type=int, default=640)
@@ -674,6 +671,25 @@ def parse_args():
         default="",
         help="Optional comma-separated YOLO class ids. Usually empty.",
     )
+
+    # Compatibility with current detector.py
+    #
+    # If your current util.utils.spectrogram_to_yolo_uint8 has been temporarily
+    # changed back to percentile+log and ignores db_min/db_max, these db args
+    # are still required because detector.py passes them.
+    parser.add_argument("--yolo_db_min", type=float, default=-80.0)
+    parser.add_argument("--yolo_db_max", type=float, default=0.0)
+    parser.add_argument("--yolo_db_eps", type=float, default=1e-12)
+
+    parser.add_argument(
+        "--yolo_input_norm",
+        type=str,
+        default="percentile",
+        choices=["max", "percentile"],
+        help="Compatibility field required by current detector initialization.",
+    )
+    parser.add_argument("--yolo_input_p_low", type=float, default=1.0)
+    parser.add_argument("--yolo_input_p_high", type=float, default=99.5)
 
     # Matching
     parser.add_argument("--match_freq_thresh", type=float, default=10.0)
@@ -737,10 +753,6 @@ def parse_args():
     parser.add_argument("--score_contrast_std_weight", type=float, default=0.0)
     parser.add_argument("--score_w_std_weight", type=float, default=0.0)
     parser.add_argument("--score_h_std_weight", type=float, default=0.0)
-    
-    parser.add_argument("--yolo_input_norm", type=str, default="percentile", choices=["max", "percentile"])
-    parser.add_argument("--yolo_input_p_low", type=float, default=1.0)
-    parser.add_argument("--yolo_input_p_high", type=float, default=99.5)
 
     return parser.parse_args()
 

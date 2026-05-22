@@ -1,0 +1,20 @@
+python generate_fake_yolo_dataset_mix_lowsnr.py \
+  --img_dir /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/dataset/images \
+  --label_dir /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/dataset/labels \
+  --out_dir /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/data/dataset_mix_lowsnr \
+  --num_images 2000 \
+  --single_class \
+  --class_names UAV \
+  --hard_sample_prob 0.35 \
+  --low_snr_alpha_min 0.08 \
+  --low_snr_alpha_max 0.28 \
+  --hard_noise_sigma_min 15 \
+  --hard_noise_sigma_max 45 \
+  --scene_contrast_min 0.25 \
+  --scene_contrast_max 0.60 \
+  --noise_prob 0.6 \
+  --noise_sigma_min 5 \
+  --noise_sigma_max 25 \
+  --background_noise_std 10 \
+  --rotations 0 \
+  --clean

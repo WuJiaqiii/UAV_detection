@@ -11,4 +11,5 @@ test.py
 experiments/*
 data/dataset
 data/dataset_mix
+data/dataset_mix_lowsnr
 !.gitignore
