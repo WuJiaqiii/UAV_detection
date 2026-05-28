@@ -152,35 +152,22 @@ def save_instance_csv(result_dir, split_name, epoch, instance_rows):
         writer.writeheader()
         for row in instance_rows:
             writer.writerow(row)
-    
-def spectrogram_to_yolo_float(
+
+def _percentile_log_float(
     data: np.ndarray,
-    db_min: float = None,
-    db_max: float = None,
-    eps: float = 1e-12,
     p_low: float = 1.0,
     p_high: float = 99.5,
     log_gain: float = 9.0,
 ) -> np.ndarray:
     """
-    Convert spectrogram to normalized float image in [0, 1]
-    using percentile clipping + log enhancement.
-
-    Current temporary logic:
-        lo = percentile(data, p_low)
-        hi = percentile(data, p_high)
-        data = clip(data, lo, hi)
-        data = (data - lo) / (hi - lo)
-        data = log1p(log_gain * data) / log1p(log_gain)
-
-    Note:
-        db_min / db_max are kept only for compatibility with existing calls.
-        They are not used in this temporary percentile+log mode.
+    One pass:
+        percentile clipping + normalize + log1p enhancement
+    Return float32 image in [0, 1].
     """
     x = np.asarray(data, dtype=np.float32)
 
     if x.ndim != 2:
-        raise ValueError(f"Expected 2D spectrogram, got shape={x.shape}")
+        raise ValueError(f"Expected 2D spectrogram/image, got shape={x.shape}")
 
     finite = np.isfinite(x)
     if not finite.any():
@@ -214,6 +201,49 @@ def spectrogram_to_yolo_float(
     return x.astype(np.float32)
 
 
+def spectrogram_to_yolo_float(
+    data: np.ndarray,
+    db_min: float = None,
+    db_max: float = None,
+    eps: float = 1e-12,
+    p_low: float = 1.0,
+    p_high: float = 99.5,
+    log_gain: float = 9.0,
+) -> np.ndarray:
+    """
+    Temporary test logic:
+        Apply percentile + log twice.
+
+    This is used to test whether YOLO training images were effectively
+    processed twice, while current detector input was only processed once.
+
+    db_min / db_max / eps are kept only for compatibility with existing calls.
+    They are not used in this temporary mode.
+    """
+    # First pass: raw mat -> [0, 1]
+    x1 = _percentile_log_float(
+        data=data,
+        p_low=p_low,
+        p_high=p_high,
+        log_gain=log_gain,
+    )
+
+    # Simulate saved old PNG quantization.
+    # This makes the second pass closer to:
+    #     old PNG -> percentile + log
+    x1_u8 = np.clip(x1 * 255.0, 0, 255).astype(np.uint8)
+
+    # Second pass: uint8 image -> [0, 1]
+    x2 = _percentile_log_float(
+        data=x1_u8,
+        p_low=p_low,
+        p_high=p_high,
+        log_gain=log_gain,
+    )
+
+    return x2.astype(np.float32)
+
+
 def spectrogram_to_yolo_uint8(
     data: np.ndarray,
     db_min: float = None,
@@ -224,10 +254,7 @@ def spectrogram_to_yolo_uint8(
     log_gain: float = 9.0,
 ) -> np.ndarray:
     """
-    Convert spectrogram to uint8 image using percentile clipping + log enhancement.
-
-    db_min / db_max are accepted for compatibility with current detector.py / vis.py calls,
-    but are not used in this temporary mode.
+    Convert spectrogram to uint8 image using double percentile + log.
     """
     x = spectrogram_to_yolo_float(
         data=data,
@@ -239,6 +266,93 @@ def spectrogram_to_yolo_uint8(
         log_gain=log_gain,
     )
     return np.clip(x * 255.0, 0, 255).astype(np.uint8)
+    
+# def spectrogram_to_yolo_float(
+#     data: np.ndarray,
+#     db_min: float = None,
+#     db_max: float = None,
+#     eps: float = 1e-12,
+#     p_low: float = 1.0,
+#     p_high: float = 99.5,
+#     log_gain: float = 9.0,
+# ) -> np.ndarray:
+#     """
+#     Convert spectrogram to normalized float image in [0, 1]
+#     using percentile clipping + log enhancement.
+
+#     Current temporary logic:
+#         lo = percentile(data, p_low)
+#         hi = percentile(data, p_high)
+#         data = clip(data, lo, hi)
+#         data = (data - lo) / (hi - lo)
+#         data = log1p(log_gain * data) / log1p(log_gain)
+
+#     Note:
+#         db_min / db_max are kept only for compatibility with existing calls.
+#         They are not used in this temporary percentile+log mode.
+#     """
+#     x = np.asarray(data, dtype=np.float32)
+
+#     if x.ndim != 2:
+#         raise ValueError(f"Expected 2D spectrogram, got shape={x.shape}")
+
+#     finite = np.isfinite(x)
+#     if not finite.any():
+#         return np.zeros_like(x, dtype=np.float32)
+
+#     p_low = float(p_low)
+#     p_high = float(p_high)
+
+#     if not (0.0 <= p_low < p_high <= 100.0):
+#         raise ValueError(
+#             f"Invalid percentile range: p_low={p_low}, p_high={p_high}. "
+#             "Expected 0 <= p_low < p_high <= 100."
+#         )
+
+#     valid = x[finite]
+#     lo = float(np.percentile(valid, p_low))
+#     hi = float(np.percentile(valid, p_high))
+
+#     if hi <= lo:
+#         return np.zeros_like(x, dtype=np.float32)
+
+#     x = np.clip(x, lo, hi)
+#     x = (x - lo) / (hi - lo)
+
+#     if float(log_gain) > 0:
+#         x = np.log1p(float(log_gain) * x) / np.log1p(float(log_gain))
+
+#     x = np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+#     x = np.clip(x, 0.0, 1.0)
+
+#     return x.astype(np.float32)
+
+
+# def spectrogram_to_yolo_uint8(
+#     data: np.ndarray,
+#     db_min: float = None,
+#     db_max: float = None,
+#     eps: float = 1e-12,
+#     p_low: float = 1.0,
+#     p_high: float = 99.5,
+#     log_gain: float = 9.0,
+# ) -> np.ndarray:
+#     """
+#     Convert spectrogram to uint8 image using percentile clipping + log enhancement.
+
+#     db_min / db_max are accepted for compatibility with current detector.py / vis.py calls,
+#     but are not used in this temporary mode.
+#     """
+#     x = spectrogram_to_yolo_float(
+#         data=data,
+#         db_min=db_min,
+#         db_max=db_max,
+#         eps=eps,
+#         p_low=p_low,
+#         p_high=p_high,
+#         log_gain=log_gain,
+#     )
+#     return np.clip(x * 255.0, 0, 255).astype(np.uint8)
     
 def _path_is_set(p):
     if p is None:

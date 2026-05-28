@@ -5,11 +5,11 @@ python main.py \
   --epochs 300 \
   --batch_size 128 \
   --lr 1e-4 \
-  --yolo_weights /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/yolov5/runs/train/exp28/weights/best.pt \
+  --yolo_weights /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/yolov5/runs/train/exp31/weights/best.pt \
   --run_mode train \
   --exclude_classes FPV \
   --eval_exclude_classes FPV \
-  --bbox_cache_mode refresh \
+  --bbox_cache_mode readwrite \
   --bbox_cache_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/cache \
   --bbox_cache_dataset_root /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/new_dataset/new_dataset_awgn_space \
 
