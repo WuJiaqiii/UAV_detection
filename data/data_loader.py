@@ -99,7 +99,8 @@ class UAVDataset(Dataset):
         self.config = config
         self.logger = logger
         self.input_type = str(config.input_type).lower()
-        self.exclude_set = set(getattr(config, "exclude_classes", []) or [])
+        self.exclude_set = set(getattr(config, "data_exclude_classes", getattr(config, "exclude_classes", [])) or [])
+        self.include_set = set(getattr(config, "data_include_classes", []) or [])
         self.run_mode = str(getattr(config, "run_mode", "train")).lower()
         self.train_signal_mode = str(getattr(config, "train_signal_mode", "single")).lower()
 
@@ -139,6 +140,10 @@ class UAVDataset(Dataset):
 
             all_protocols = [m.group("protocol").strip() for m in matches]
             if self.exclude_set and any(p in self.exclude_set for p in all_protocols):
+                bad += 1
+                continue
+
+            if self.include_set and not all(p in self.include_set for p in all_protocols):
                 bad += 1
                 continue
 

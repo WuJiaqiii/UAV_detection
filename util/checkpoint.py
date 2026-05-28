@@ -53,7 +53,16 @@ def save_training_checkpoint(model, optimizer, scheduler, epoch: int, best_val_a
     return ckpt_path
 
 
-def load_training_checkpoint(model, checkpoint_path: str, device, optimizer=None, scheduler=None, logger=None, load_optimizer: bool = False):
+def load_training_checkpoint(
+    model,
+    checkpoint_path: str,
+    device,
+    optimizer=None,
+    scheduler=None,
+    logger=None,
+    load_optimizer: bool = False,
+    skip_mismatch: bool = False,
+):
     checkpoint_path = str(checkpoint_path or "").strip()
     if not checkpoint_path:
         return None
@@ -77,6 +86,26 @@ def load_training_checkpoint(model, checkpoint_path: str, device, optimizer=None
         )
 
     state_dict = _strip_module_prefix(ckpt["model_state_dict"])
+
+    if skip_mismatch:
+        model_state = model.state_dict()
+        filtered = {}
+        skipped = []
+
+        for k, v in state_dict.items():
+            if k in model_state and tuple(v.shape) == tuple(model_state[k].shape):
+                filtered[k] = v
+            else:
+                skipped.append(k)
+
+        state_dict = filtered
+
+        if logger is not None and skipped:
+            logger.warning(
+                f"[ckpt] skipped mismatch keys: {skipped[:20]}"
+                f"{' ...' if len(skipped) > 20 else ''}"
+            )
+
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
     if logger is not None:

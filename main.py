@@ -7,6 +7,7 @@ import torch.distributed
 from data.data_loader import UAVDataset, get_dataloader, create_dataloader
 from model.resnet import MaskImageClassifier
 from util.trainer import Trainer
+from util.lwf_trainer import LwFTrainer
 from util.preprocess import SignalPreprocessor
 from util.detector import YoloV5Detector
 from util.utils import create_logger, set_seed, _path_is_set
@@ -99,8 +100,22 @@ def get_parser():
     g_data.add_argument("--batch_size", type=int, default=32)
     g_data.add_argument("--num_workers", type=int, default=4)
     g_data.add_argument("--sample_ratio", type=float, default=1.0)
+    
     g_data.add_argument("--exclude_classes", type=str, nargs="*", default=[])
     g_data.add_argument("--eval_exclude_classes", type=str, nargs="*", default=[])
+    g_data.add_argument(
+        "--incremental_split_mode",
+        type=str,
+        default="normal",
+        choices=["normal", "base", "incremental"],
+    )
+
+    g_data.add_argument(
+        "--incremental_new_classes",
+        type=str,
+        nargs="*",
+        default=[],
+    )
 
     # Classifier Model
     g_model = parser.add_argument_group("CNN Classifier")
@@ -120,6 +135,13 @@ def get_parser():
     g_train.add_argument("--early_stop_patience", type=int, default=20)
     g_train.add_argument("--cosine_annealing_T0", type=int, default=50)
     g_train.add_argument("--cosine_annealing_mult", type=int, default=2)
+    
+    g_train.add_argument("--trainer_type", type=str, default="normal", choices=["normal", "lwf"])
+    g_train.add_argument("--lwf_teacher_checkpoint", type=str, default="")
+    g_train.add_argument("--lwf_old_num_classes", type=int, default=0)
+    g_train.add_argument("--lwf_temperature", type=float, default=2.0)
+    g_train.add_argument("--lwf_lambda_kd", type=float, default=1.0)
+    g_train.add_argument("--lwf_freeze_backbone", action=argparse.BooleanOptionalAction, default=False)
 
     g_io = parser.add_argument_group("Checkpoint / Cache")
     g_io.add_argument("--checkpoint_path", type=str, default=None)
@@ -142,7 +164,110 @@ def get_parser():
 
     return parser.parse_args()
 
+def setup_incremental_class_split(config, logger=None):
+    all_classes = dict(config.classes)
+    config.classes_all = dict(all_classes)
 
+    mode = str(getattr(config, "incremental_split_mode", "normal")).lower()
+
+    exclude = set(getattr(config, "exclude_classes", []) or [])
+    new_classes = list(getattr(config, "incremental_new_classes", []) or [])
+
+    for name in exclude:
+        if name not in all_classes:
+            raise ValueError(f"exclude class not found in config.classes: {name}")
+
+    for name in new_classes:
+        if name not in all_classes:
+            raise ValueError(f"incremental new class not found in config.classes: {name}")
+        if name in exclude:
+            raise ValueError(
+                f"class {name} is both in exclude_classes and incremental_new_classes"
+            )
+
+    # 1. 全局排除 exclude_classes
+    remaining = [
+        name
+        for name, _ in sorted(all_classes.items(), key=lambda x: x[1])
+        if name not in exclude
+    ]
+
+    # 2. 按模式决定模型类别空间和数据筛选策略
+    if mode == "normal":
+        ordered = remaining
+
+        # 数据只排除 exclude_classes
+        data_exclude = list(exclude)
+        data_include = []
+
+    elif mode == "base":
+        if not new_classes:
+            raise ValueError(
+                "--incremental_new_classes is required when incremental_split_mode=base"
+            )
+
+        new_set = set(new_classes)
+
+        # base 类别 = remaining 中除去 new_classes
+        ordered = [name for name in remaining if name not in new_set]
+
+        # 数据排除 = 全局 exclude + 增量新类
+        data_exclude = list(exclude | new_set)
+        data_include = []
+
+    elif mode == "incremental":
+        if not new_classes:
+            raise ValueError(
+                "--incremental_new_classes is required when incremental_split_mode=incremental"
+            )
+
+        new_set = set(new_classes)
+
+        base_classes = [name for name in remaining if name not in new_set]
+
+        # student 类别顺序必须 old 在前，new 在后
+        ordered = base_classes + new_classes
+
+        # 数据层面：
+        # 先排除 exclude_classes；
+        # 然后只保留 new_classes。
+        data_exclude = list(exclude)
+        data_include = list(new_classes)
+
+        if int(getattr(config, "lwf_old_num_classes", 0)) <= 0:
+            config.lwf_old_num_classes = len(base_classes)
+
+    else:
+        raise ValueError(f"Unsupported incremental_split_mode={mode}")
+
+    if len(ordered) == 0:
+        raise ValueError(
+            f"No model classes left after split. "
+            f"mode={mode}, exclude_classes={list(exclude)}, "
+            f"incremental_new_classes={new_classes}"
+        )
+
+    # 3. 标签重映射
+    config.classes = {name: i for i, name in enumerate(ordered)}
+    config.num_classes = len(config.classes)
+
+    # 4. 给 dataloader 用
+    config.data_exclude_classes = data_exclude
+    config.data_include_classes = data_include
+
+    if logger is not None:
+        logger.info(f"[ClassSplit] mode={mode}")
+        logger.info(f"[ClassSplit] original_classes={all_classes}")
+        logger.info(f"[ClassSplit] exclude_classes={list(exclude)}")
+        logger.info(f"[ClassSplit] incremental_new_classes={new_classes}")
+        logger.info(f"[ClassSplit] model_classes={config.classes}")
+        logger.info(f"[ClassSplit] num_classes={config.num_classes}")
+        logger.info(f"[ClassSplit] data_exclude_classes={data_exclude}")
+        logger.info(f"[ClassSplit] data_include_classes={data_include}")
+        logger.info(
+            f"[ClassSplit] lwf_old_num_classes="
+            f"{getattr(config, 'lwf_old_num_classes', None)}"
+        )
 
 def main(args):
     set_seed(seed=42)
@@ -159,12 +284,7 @@ def main(args):
         config.device = torch.device(f'cuda:{local_rank}')
     config.rank, config.world_size, config.local_rank = rank, world_size, local_rank
 
-    # exclude classes -> remap labels compactly
-    exclude_set = set(getattr(config, "exclude_classes", []) or [])
-    config.classes_all = dict(config.classes)
-    kept_items = [(name, old_idx) for name, old_idx in sorted(config.classes.items(), key=lambda x: x[1]) if name not in exclude_set]
-    config.classes = {name: new_idx for new_idx, (name, _) in enumerate(kept_items)}
-    config.num_classes = len(config.classes)
+    setup_incremental_class_split(config)
     
     use_explicit_train_val = _path_is_set(config.train_dataset_path) or _path_is_set(config.val_dataset_path)
     if rank == 0:
@@ -244,7 +364,18 @@ def main(args):
     else:
         logger.info("[BBoxCache] disabled")
     
-    trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier, bbox_cache)
+    # trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier, bbox_cache)
+    trainer_cls = LwFTrainer if str(config.trainer_type).lower() == "lwf" else Trainer
+
+    trainer = trainer_cls(
+        config=config,
+        dataloaders=(train_loader, val_loader),
+        logger=logger,
+        detector=detector,
+        preprocessor=preprocessor,
+        classifier=classifier,
+        bbox_cache=bbox_cache,
+    )
 
     if str(config.run_mode).lower() == "train":
         trainer.train()
