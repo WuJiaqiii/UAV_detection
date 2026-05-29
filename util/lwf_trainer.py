@@ -71,6 +71,9 @@ class LwFTrainer(Trainer):
         # Prevent base Trainer from loading checkpoint directly,
         # because old/new classifier heads may have different shapes.
         original_checkpoint_path = config.checkpoint_path
+        was_frozen = getattr(config, "_frozen", False)
+        if was_frozen:
+            config.unfreeze()
         config.checkpoint_path = None
 
         super().__init__(
@@ -84,6 +87,8 @@ class LwFTrainer(Trainer):
         )
 
         config.checkpoint_path = original_checkpoint_path
+        if was_frozen:
+            config.freeze()
         self.checkpoint_path = original_checkpoint_path
 
         self.old_num_classes = int(config.lwf_old_num_classes)

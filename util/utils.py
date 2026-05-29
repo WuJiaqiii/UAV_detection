@@ -421,10 +421,118 @@ class ColorFormatter(logging.Formatter):
         return super().format(record)
         
 class ExpLogger(logging.Logger):
+
     def init_exp(self, config):
-        super().info('---------------------Experiment Settings-------------------------')
-        super().info('Nothing here')
-        super().info('-----------------------------------------------------------------')
+        info = super().info
+
+        info("")
+        info("===================== Experiment Settings =====================")
+
+        # --------------------------------------------------
+        # Run
+        # --------------------------------------------------
+        info("[Run]")
+        info(f"  run_mode                 : {config.run_mode}")
+        info(f"  trainer_type             : {getattr(config, 'trainer_type', 'normal')}")
+        info(f"  device                   : {config.device}")
+
+        # --------------------------------------------------
+        # Dataset
+        # --------------------------------------------------
+        info("[Dataset]")
+        info(f"  train_dataset_path       : {config.train_dataset_path}")
+        info(f"  val_dataset_path         : {config.val_dataset_path}")
+        info(f"  input_type               : {config.input_type}")
+
+        # --------------------------------------------------
+        # Class Split
+        # --------------------------------------------------
+        info("[Classes]")
+        info(f"  incremental_split_mode   : {getattr(config, 'incremental_split_mode', 'normal')}")
+        info(f"  incremental_new_classes  : {getattr(config, 'incremental_new_classes', [])}")
+        info(f"  exclude_classes          : {getattr(config, 'exclude_classes', [])}")
+        info(f"  eval_exclude_classes     : {getattr(config, 'eval_exclude_classes', [])}")
+
+        if hasattr(config, "data_include_classes"):
+            info(f"  train_include_classes    : {config.data_include_classes}")
+
+        if hasattr(config, "data_exclude_classes"):
+            info(f"  train_exclude_classes    : {config.data_exclude_classes}")
+
+        if hasattr(config, "classes"):
+            info(f"  classes                  : {config.classes}")
+
+        if hasattr(config, "num_classes"):
+            info(f"  num_classes              : {config.num_classes}")
+
+        # --------------------------------------------------
+        # YOLO
+        # --------------------------------------------------
+        info("[YOLO]")
+        info(f"  yolo_weights             : {config.yolo_weights}")
+        info(f"  conf_thres               : {config.yolo_conf_thres}")
+        info(f"  iou_thres                : {config.yolo_iou_thres}")
+        info(f"  max_det                  : {config.yolo_max_det}")
+
+        if hasattr(config, "yolo_input_p_low"):
+            info(f"  input_percentile_low     : {config.yolo_input_p_low}")
+
+        if hasattr(config, "yolo_input_p_high"):
+            info(f"  input_percentile_high    : {config.yolo_input_p_high}")
+
+        # --------------------------------------------------
+        # Preprocessor
+        # --------------------------------------------------
+        info("[Preprocessor]")
+        info(f"  min_group_len            : {config.min_group_len}")
+        info(f"  min_group_area           : {config.min_group_area}")
+        info(f"  min_group_time_span      : {config.min_group_time_span_ratio}")
+        info(f"  merge_overlap_thresh     : {config.merge_overlap_thresh}")
+
+        # --------------------------------------------------
+        # Classifier
+        # --------------------------------------------------
+        info("[Classifier]")
+        info(f"  backbone                 : {config.backbone}")
+        info(f"  mask_size                : {config.mask_size}")
+        info(f"  cnn_dropout              : {config.cnn_dropout}")
+
+        # --------------------------------------------------
+        # LwF
+        # --------------------------------------------------
+        if getattr(config, "trainer_type", "normal") == "lwf":
+
+            info("[LwF]")
+            info(f"  teacher_checkpoint       : {config.lwf_teacher_checkpoint}")
+            info(f"  old_num_classes          : {config.lwf_old_num_classes}")
+            info(f"  temperature             : {config.lwf_temperature}")
+            info(f"  lambda_kd               : {config.lwf_lambda_kd}")
+            info(f"  freeze_backbone         : {config.lwf_freeze_backbone}")
+
+        # --------------------------------------------------
+        # Cache
+        # --------------------------------------------------
+        info("[Cache]")
+        info(f"  bbox_cache_mode          : {config.bbox_cache_mode}")
+        info(f"  bbox_cache_path          : {config.bbox_cache_path}")
+
+        # --------------------------------------------------
+        # Training
+        # --------------------------------------------------
+        info("[Training]")
+        info(f"  batch_size               : {config.batch_size}")
+        info(f"  epochs                   : {config.epochs}")
+        info(f"  lr                       : {config.lr}")
+        info(f"  weight_decay             : {config.weight_decay}")
+
+        if hasattr(config, "cosine_annealing_T0"):
+            info(f"  cosine_T0               : {config.cosine_annealing_T0}")
+
+        if hasattr(config, "cosine_annealing_mult"):
+            info(f"  cosine_Tmult            : {config.cosine_annealing_mult}")
+
+        info("================================================================")
+        info("")
         
 logging.setLoggerClass(ExpLogger)
 

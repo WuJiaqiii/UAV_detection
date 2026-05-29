@@ -95,14 +95,21 @@ class UAVDataset(Dataset):
     _SIGNAL_RE = re.compile(r'(?P<protocol>[A-Za-z0-9_]+)-\[(?P<bracket>[^\]]+)\]')
     _SNR_RE = re.compile(r'-SNR-(?P<snr>[-+]?\d+(?:\.\d+)?)')
 
-    def __init__(self, config, logger, validate_on_init: bool = False, dataset_path=None):
+    def __init__(self, config, logger, validate_on_init: bool = False, dataset_path=None, split_name="train"):
         self.config = config
         self.logger = logger
         self.input_type = str(config.input_type).lower()
-        self.exclude_set = set(getattr(config, "data_exclude_classes", getattr(config, "exclude_classes", [])) or [])
-        self.include_set = set(getattr(config, "data_include_classes", []) or [])
         self.run_mode = str(getattr(config, "run_mode", "train")).lower()
         self.train_signal_mode = str(getattr(config, "train_signal_mode", "single")).lower()
+        
+        self.split_name = str(split_name).lower()
+
+        if self.split_name in {"val", "valid", "validation"}:
+            self.exclude_set = set(getattr(config, "val_data_exclude_classes", getattr(config, "exclude_classes", [])) or [])
+            self.include_set = set(getattr(config, "val_data_include_classes", []) or [])
+        else:
+            self.exclude_set = set(getattr(config, "train_data_exclude_classes", getattr(config, "exclude_classes", [])) or [])
+            self.include_set = set(getattr(config, "train_data_include_classes", []) or [])
 
         if self.input_type not in {"mat", "png"}:
             raise ValueError(f"Unsupported input_type={self.input_type}, expected 'mat' or 'png'")

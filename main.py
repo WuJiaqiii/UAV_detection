@@ -140,7 +140,7 @@ def get_parser():
     g_train.add_argument("--lwf_teacher_checkpoint", type=str, default="")
     g_train.add_argument("--lwf_old_num_classes", type=int, default=0)
     g_train.add_argument("--lwf_temperature", type=float, default=2.0)
-    g_train.add_argument("--lwf_lambda_kd", type=float, default=1.0)
+    g_train.add_argument("--lwf_lambda_kd", type=float, default=2.0)
     g_train.add_argument("--lwf_freeze_backbone", action=argparse.BooleanOptionalAction, default=False)
 
     g_io = parser.add_argument_group("Checkpoint / Cache")
@@ -228,11 +228,11 @@ def setup_incremental_class_split(config, logger=None):
         # student 类别顺序必须 old 在前，new 在后
         ordered = base_classes + new_classes
 
-        # 数据层面：
-        # 先排除 exclude_classes；
-        # 然后只保留 new_classes。
-        data_exclude = list(exclude)
-        data_include = list(new_classes)
+        train_data_exclude = list(exclude)
+        train_data_include = list(new_classes)
+
+        val_data_exclude = list(exclude)
+        val_data_include = []
 
         if int(getattr(config, "lwf_old_num_classes", 0)) <= 0:
             config.lwf_old_num_classes = len(base_classes)
@@ -251,9 +251,23 @@ def setup_incremental_class_split(config, logger=None):
     config.classes = {name: i for i, name in enumerate(ordered)}
     config.num_classes = len(config.classes)
 
-    # 4. 给 dataloader 用
-    config.data_exclude_classes = data_exclude
-    config.data_include_classes = data_include
+    if mode == "normal":
+        config.train_data_exclude_classes = data_exclude
+        config.train_data_include_classes = data_include
+        config.val_data_exclude_classes = data_exclude
+        config.val_data_include_classes = data_include
+
+    elif mode == "base":
+        config.train_data_exclude_classes = data_exclude
+        config.train_data_include_classes = data_include
+        config.val_data_exclude_classes = data_exclude
+        config.val_data_include_classes = data_include
+
+    elif mode == "incremental":
+        config.train_data_exclude_classes = train_data_exclude
+        config.train_data_include_classes = train_data_include
+        config.val_data_exclude_classes = val_data_exclude
+        config.val_data_include_classes = val_data_include
 
     if logger is not None:
         logger.info(f"[ClassSplit] mode={mode}")
@@ -305,13 +319,18 @@ def main(args):
         
     if str(config.run_mode).lower() == "train":
         if use_explicit_train_val:
-            train_dataset = UAVDataset(config, logger, dataset_path=config.train_dataset_path)
-            val_dataset = UAVDataset(config, logger, dataset_path=config.val_dataset_path)
+            train_dataset = UAVDataset(config, logger, dataset_path=config.train_dataset_path, split_name="train")
+            val_dataset = UAVDataset(config, logger, dataset_path=config.val_dataset_path, split_name="val")
             train_loader = create_dataloader(train_dataset, config, shuffle=True, sample_ratio=float(config.sample_ratio))
             val_loader = create_dataloader(val_dataset, config, shuffle=False, sample_ratio=1.0)
-        else:
-            dataset = UAVDataset(config, logger)
-            train_loader, val_loader = get_dataloader(dataset, config, mode="train")
+        if config.incremental_split_mode == "incremental" and not use_explicit_train_val:
+            raise ValueError(
+                "incremental mode requires --train_dataset_path and --val_dataset_path, "
+                "because train should keep only new classes while val should keep all classes."
+            )
+        # else:
+        #     dataset = UAVDataset(config, logger)
+        #     train_loader, val_loader = get_dataloader(dataset, config, mode="train")
     else:
         dataset = UAVDataset(config, logger)
         infer_loader = get_dataloader(dataset, config, mode="infer")

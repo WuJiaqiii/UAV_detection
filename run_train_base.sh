@@ -9,6 +9,7 @@ python main.py \
   --run_mode train \
   --exclude_classes FPV \
   --eval_exclude_classes FPV \
+  --trainer_type lwf \
   --incremental_split_mode base \
   --incremental_new_classes Skylink1 \
   --bbox_cache_mode readwrite \
