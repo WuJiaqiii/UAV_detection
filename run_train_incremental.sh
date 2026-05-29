@@ -12,7 +12,7 @@ python main.py \
   --trainer_type lwf \
   --incremental_split_mode incremental \
   --incremental_new_classes Skylink1 \
-  --lwf_teacher_checkpoint /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/UAV_20260528_181821/models/best.pth \
+  --lwf_teacher_checkpoint /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/UAV_20260529_173621/models/best.pth \
   --bbox_cache_mode readwrite \
   --bbox_cache_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/cache \
   --bbox_cache_dataset_root /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/new_dataset/new_dataset_awgn_space \

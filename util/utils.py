@@ -485,16 +485,13 @@ class ExpLogger(logging.Logger):
         # --------------------------------------------------
         info("[Preprocessor]")
         info(f"  min_group_len            : {config.min_group_len}")
-        info(f"  min_group_area           : {config.min_group_area}")
         info(f"  min_group_time_span      : {config.min_group_time_span_ratio}")
-        info(f"  merge_overlap_thresh     : {config.merge_overlap_thresh}")
 
         # --------------------------------------------------
         # Classifier
         # --------------------------------------------------
         info("[Classifier]")
         info(f"  backbone                 : {config.backbone}")
-        info(f"  mask_size                : {config.mask_size}")
         info(f"  cnn_dropout              : {config.cnn_dropout}")
 
         # --------------------------------------------------
