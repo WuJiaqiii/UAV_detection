@@ -1,5 +1,7 @@
 import numpy as np
 import cv2
+import re
+from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -251,6 +253,110 @@ class Trainer:
 
         return torch.from_numpy(x).float(), mask
 
+    # ------------------------------------------------------------------
+    # Classifier-input mask visualization
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _safe_stem_for_vis(fp):
+        """
+        Convert a file path/name into a safe stem for visualization files.
+        """
+        stem = Path(str(fp)).stem
+        stem = re.sub(r"[^A-Za-z0-9_\-\.]+", "_", stem)
+        stem = re.sub(r"_+", "_", stem).strip("_")
+        return stem if stem else "sample"
+
+    @staticmethod
+    def _to_uint8_gray_for_vis(img):
+        """
+        Robustly convert spectrogram-like data into uint8 grayscale for overlay.
+        This is only for visualization and does not affect model input.
+        """
+        arr = np.asarray(img)
+
+        if arr.ndim == 3:
+            arr = np.squeeze(arr)
+            if arr.ndim == 3:
+                arr = arr[0]
+
+        arr = arr.astype(np.float32)
+        finite = np.isfinite(arr)
+
+        if not finite.any():
+            return np.zeros(arr.shape, dtype=np.uint8)
+
+        valid = arr[finite]
+        lo = float(np.percentile(valid, 1.0))
+        hi = float(np.percentile(valid, 99.5))
+
+        if hi <= lo:
+            return np.zeros(arr.shape, dtype=np.uint8)
+
+        out = (np.clip(arr, lo, hi) - lo) / (hi - lo)
+        out = np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
+        return np.clip(out * 255.0, 0, 255).astype(np.uint8)
+
+    def _save_classifier_input_mask_vis(
+        self,
+        spec,
+        mask,
+        x_tensor,
+        fp,
+        sample_idx,
+        group_idx,
+        split_name="infer",
+    ):
+        """
+        Save the binary image immediately before the classifier.
+
+        Saved files:
+            *_binary_full.png
+                Centered binary mask at original spectrogram resolution.
+
+            *_binary_input.png
+                Resized binary mask with size mask_img_size x mask_img_size.
+                This is exactly the spatial image sent into the classifier.
+
+            *_overlay.png
+                Spectrogram with mask region highlighted for PPT explanation.
+        """
+        root = Path(self.config.result_dir) / "classifier_input_masks" / str(split_name)
+        root.mkdir(parents=True, exist_ok=True)
+
+        stem = self._safe_stem_for_vis(fp)
+        prefix = f"{stem}_sample-{int(sample_idx):04d}_group-{int(group_idx):03d}"
+
+        full_mask = (np.asarray(mask) > 0).astype(np.uint8) * 255
+        cv2.imwrite(str(root / f"{prefix}_binary_full.png"), full_mask)
+
+        if torch.is_tensor(x_tensor):
+            x_np = x_tensor.detach().cpu().numpy()
+        else:
+            x_np = np.asarray(x_tensor)
+
+        x_np = np.squeeze(x_np)
+        input_mask = (x_np > 0.5).astype(np.uint8) * 255
+        cv2.imwrite(str(root / f"{prefix}_binary_input.png"), input_mask)
+
+        try:
+            spec_u8 = self._to_uint8_gray_for_vis(spec)
+            overlay = cv2.cvtColor(spec_u8, cv2.COLOR_GRAY2BGR)
+            mask_bool = full_mask > 0
+
+            # Highlight the classifier-selected region in red.
+            overlay[mask_bool] = (
+                0.45 * overlay[mask_bool]
+                + 0.55 * np.array([0, 0, 255], dtype=np.float32)
+            ).astype(np.uint8)
+
+            cv2.imwrite(str(root / f"{prefix}_overlay.png"), overlay)
+        except Exception as error:
+            if hasattr(self, "logger") and self.logger is not None:
+                self.logger.warning(
+                    f"[MaskInputVis] failed to save overlay for {fp}, "
+                    f"group={group_idx}: {error}"
+                )
+
     def _match_groups_to_targets(self, groups, targets, spec_shape):
         if groups is None:
             groups = []
@@ -389,7 +495,7 @@ class Trainer:
             image_info["unmatched_targets"] = []
             image_infos.append(image_info)
 
-            x, _ = self._build_mask_input(spec, final_boxes)
+            x, mask = self._build_mask_input(spec, final_boxes)
 
             batch_images.append(x)
             batch_labels.append(label)
@@ -413,6 +519,15 @@ class Trainer:
                     matched_boxes=final_boxes.tolist(),
                     fp=fp,
                     sample_idx=i,
+                    split_name=split_name,
+                )
+                self._save_classifier_input_mask_vis(
+                    spec=spec,
+                    mask=mask,
+                    x_tensor=x,
+                    fp=fp,
+                    sample_idx=i,
+                    group_idx=0,
                     split_name=split_name,
                 )
                 saved_count += 1
@@ -485,7 +600,18 @@ class Trainer:
                 if len(final_boxes) == 0:
                     continue
 
-                x, _ = self._build_mask_input(spec, final_boxes)
+                x, mask = self._build_mask_input(spec, final_boxes)
+
+                if should_save:
+                    self._save_classifier_input_mask_vis(
+                        spec=spec,
+                        mask=mask,
+                        x_tensor=x,
+                        fp=fp,
+                        sample_idx=i,
+                        group_idx=gi,
+                        split_name=split_name,
+                    )
 
                 batch_images.append(x)
                 batch_metas.append({

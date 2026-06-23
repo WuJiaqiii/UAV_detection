@@ -4,7 +4,7 @@ python main.py \
   --val_dataset_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/dataSet/generated_dataset/new_dataset/new_dataset_awgn_space/val/1 \
   --epochs 300 \
   --batch_size 128 \
-  --lr 1e-4 \
+  --lr 5e-5 \
   --yolo_weights /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/yolov5/runs/train/exp31/weights/best.pt \
   --run_mode train \
   --exclude_classes FPV \

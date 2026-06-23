@@ -134,6 +134,26 @@ class LwFTrainer(Trainer):
             logger=self.logger,
         )
 
+        # Copy old classifier rows from teacher to student.
+        if self.classifier.backbone_name.startswith("resnet"):
+            s_fc = self.classifier.net.fc[-1]
+            t_fc = self.teacher.net.fc[-1]
+        else:
+            s_fc = self.classifier.net.classifier[-1]
+            t_fc = self.teacher.net.classifier[-1]
+
+        with torch.no_grad():
+            s_fc.weight[:self.old_num_classes].copy_(
+                t_fc.weight[:self.old_num_classes]
+            )
+            s_fc.bias[:self.old_num_classes].copy_(
+                t_fc.bias[:self.old_num_classes]
+            )
+
+        self.logger.info(
+            f"[LwF] copied classifier rows 0~{self.old_num_classes - 1}"
+        )
+
         self.teacher.eval()
         for p in self.teacher.parameters():
             p.requires_grad = False

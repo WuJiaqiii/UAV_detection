@@ -17,6 +17,11 @@ class Config:
             setattr(self, key, value)
             
         self.classes = {"Background": 0, "Lightbridge": 1, "Ocusync2": 2, "Ocusync3": 3, "Ocusync4": 4, "Skylink1": 5, "FPV": 6}
+        # self.classes = {"Background": 0, "DJI_Phantom3": 1, "DJI_Phantom4Pro": 2, "DJI_MATRICE200": 3, "DJI_MATRICE100": 4, "DJI_Air2S": 5, "DJI_Mini3Pro": 6,
+        #                 "DJI_Inspire2": 7, "DJI_MavicPro": 8, "DJI_Mini2": 9, "DJI_Mavic3": 10, "DJI_MATRICE300": 11, "DJI_Phantom4ProRTK": 12,
+        #                 "DJI_MATRICE30T": 13, "DJI_AVATA": 14, "DJI_CommunicationModuleDIY": 15, "DJI_MATRICE600Pro": 16, "VBar_Controller": 17,
+        #                 "FrSkyX20_Controller": 18, "FutabaT6IZ_Controller": 19, "TaranisPlus_Controller": 20, "RadioLinkAT9S_Controller": 21, 
+        #                 "FutabaT14SG_Controller": 22, "YunzhuoT12_Controller": 23, "YunzhuoT10_Controller": 24}
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         self.base_dir = 'experiments'

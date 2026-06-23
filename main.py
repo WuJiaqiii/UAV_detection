@@ -139,8 +139,8 @@ def get_parser():
     g_train.add_argument("--trainer_type", type=str, default="normal", choices=["normal", "lwf"])
     g_train.add_argument("--lwf_teacher_checkpoint", type=str, default="")
     g_train.add_argument("--lwf_old_num_classes", type=int, default=0)
-    g_train.add_argument("--lwf_temperature", type=float, default=2.0)
-    g_train.add_argument("--lwf_lambda_kd", type=float, default=2.0)
+    g_train.add_argument("--lwf_temperature", type=float, default=4.0)
+    g_train.add_argument("--lwf_lambda_kd", type=float, default=10.0)
     g_train.add_argument("--lwf_freeze_backbone", action=argparse.BooleanOptionalAction, default=False)
 
     g_io = parser.add_argument_group("Checkpoint / Cache")
@@ -328,9 +328,6 @@ def main(args):
                 "incremental mode requires --train_dataset_path and --val_dataset_path, "
                 "because train should keep only new classes while val should keep all classes."
             )
-        # else:
-        #     dataset = UAVDataset(config, logger)
-        #     train_loader, val_loader = get_dataloader(dataset, config, mode="train")
     else:
         dataset = UAVDataset(config, logger)
         infer_loader = get_dataloader(dataset, config, mode="infer")

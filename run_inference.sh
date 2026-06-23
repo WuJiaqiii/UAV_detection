@@ -6,4 +6,5 @@ python main.py \
   --exclude_classes FPV \
   --eval_exclude_classes FPV\
   --checkpoint_path /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/code/experiments/UAV_20260522_180302/models/best.pth \
-  --bbox_cache_mode off
+  --bbox_cache_mode off \
+  --save_infer_detect_vis
