@@ -156,7 +156,7 @@ def get_parser():
 
     g_vis = parser.add_argument_group("Visualization")
     g_vis.add_argument("--save_val_detect_vis", action=argparse.BooleanOptionalAction, default=True, help="Whether to save random validation visualizations every epoch.")
-    g_vis.add_argument("--val_detect_vis_ratio", type=float, default=0.01, help="Ratio of validation samples to randomly save every epoch. Set 0 to disable.")
+    g_vis.add_argument("--val_detect_vis_ratio", type=float, default=1.0, help="Ratio of validation samples to randomly save every epoch. Set 0 to disable.")
     g_vis.add_argument("--infer_detect_vis_ratio", type=float, default=1)
     g_vis.add_argument("--clear_val_detect_vis_each_epoch", action=argparse.BooleanOptionalAction, default=True)
     g_vis.add_argument("--save_infer_detect_vis", action=argparse.BooleanOptionalAction, default=True, help="Whether to save infer yolo/groups visualization images.")
