@@ -1,10 +1,10 @@
 import os
 import argparse
-import torch
 import logging
-import torch.distributed
+from pathlib import Path
 
 from data.data_loader import UAVDataset, get_dataloader, create_dataloader
+from data.iq_dat_loader import RawIQDataset, create_iq_train_val_loaders, discover_iq_classes
 from model.resnet import MaskImageClassifier
 from util.trainer import Trainer
 from util.lwf_trainer import LwFTrainer
@@ -12,7 +12,7 @@ from util.preprocess import SignalPreprocessor
 from util.detector import YoloV5Detector
 from util.utils import create_logger, set_seed, _path_is_set
 from util.config import Config
-from util.bboxcache import BBoxCache
+from util.bboxcache import BBoxCache, detector_signature_from_config
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -46,7 +46,7 @@ def get_parser():
     g_yolo.add_argument("--yolo_classes", type=int, nargs="*", default=None)
     g_yolo.add_argument("--yolo_half", action=argparse.BooleanOptionalAction, default=False)
     g_yolo.add_argument("--yolo_warmup", action=argparse.BooleanOptionalAction, default=True)
-    
+
     g_yolo.add_argument("--yolo_db_min", type=float, default=-80.0)
     g_yolo.add_argument("--yolo_db_max", type=float, default=0.0)
     g_yolo.add_argument("--yolo_db_eps", type=float, default=1e-12)
@@ -95,12 +95,16 @@ def get_parser():
     g_data.add_argument("--dataset_path", type=str, nargs="+", default=None, help="One or more dataset paths. Used by auto split mode or infer mode.")
     g_data.add_argument("--train_dataset_path", type=str, nargs="+", default=None, help="Optional explicit training dataset path(s).")
     g_data.add_argument("--val_dataset_path", type=str, nargs="+", default=None, help="Optional explicit validation dataset path(s).")
-    g_data.add_argument("--input_type", type=str, default="mat", choices=["mat", "png"])
+    g_data.add_argument("--input_type", type=str, default="mat", choices=["mat", "png", "iq_dat"])
+    g_data.add_argument("--iq_sample_rate", type=int, default=100_000_000, help="Complex samples per second in each .dat recording.")
+    g_data.add_argument("--iq_segment_ms", type=float, default=10.0, help="Length of each IQ crop converted to a spectrogram.")
+    g_data.add_argument("--iq_n_fft", type=int, default=512)
+    g_data.add_argument("--iq_hop_length", type=int, default=1024)
     g_data.add_argument("--val_ratio", type=float, default=0.2)
     g_data.add_argument("--batch_size", type=int, default=32)
     g_data.add_argument("--num_workers", type=int, default=4)
     g_data.add_argument("--sample_ratio", type=float, default=1.0)
-    
+
     g_data.add_argument("--exclude_classes", type=str, nargs="*", default=[])
     g_data.add_argument("--eval_exclude_classes", type=str, nargs="*", default=[])
     g_data.add_argument(
@@ -135,7 +139,7 @@ def get_parser():
     g_train.add_argument("--early_stop_patience", type=int, default=20)
     g_train.add_argument("--cosine_annealing_T0", type=int, default=50)
     g_train.add_argument("--cosine_annealing_mult", type=int, default=2)
-    
+
     g_train.add_argument("--trainer_type", type=str, default="normal", choices=["normal", "lwf"])
     g_train.add_argument("--lwf_teacher_checkpoint", type=str, default="")
     g_train.add_argument("--lwf_old_num_classes", type=int, default=0)
@@ -156,7 +160,7 @@ def get_parser():
 
     g_vis = parser.add_argument_group("Visualization")
     g_vis.add_argument("--save_val_detect_vis", action=argparse.BooleanOptionalAction, default=True, help="Whether to save random validation visualizations every epoch.")
-    g_vis.add_argument("--val_detect_vis_ratio", type=float, default=1.0, help="Ratio of validation samples to randomly save every epoch. Set 0 to disable.")
+    g_vis.add_argument("--val_detect_vis_ratio", type=float, default=0.01, help="Ratio of validation samples to randomly save every epoch. Set 0 to disable.")
     g_vis.add_argument("--infer_detect_vis_ratio", type=float, default=1)
     g_vis.add_argument("--clear_val_detect_vis_each_epoch", action=argparse.BooleanOptionalAction, default=True)
     g_vis.add_argument("--save_infer_detect_vis", action=argparse.BooleanOptionalAction, default=True, help="Whether to save infer yolo/groups visualization images.")
@@ -172,6 +176,8 @@ def setup_incremental_class_split(config, logger=None):
 
     exclude = set(getattr(config, "exclude_classes", []) or [])
     new_classes = list(getattr(config, "incremental_new_classes", []) or [])
+    if len(new_classes) != len(set(new_classes)):
+        raise ValueError("incremental_new_classes contains duplicate class names")
 
     for name in exclude:
         if name not in all_classes:
@@ -285,22 +291,49 @@ def setup_incremental_class_split(config, logger=None):
 
 def main(args):
     set_seed(seed=42)
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        raise RuntimeError("Distributed training is not implemented for the detection/classification pipeline")
+    if args.use_data_parallel or args.use_amp_autocast:
+        raise ValueError("--use_data_parallel and --use_amp_autocast are not implemented")
+    if args.run_mode == "train" and args.train_signal_mode != "single":
+        raise ValueError("Training currently supports only --train_signal_mode single")
+    if args.input_type == "iq_dat" and args.run_mode == "infer":
+        raise ValueError("IQ .dat files have no target frequency labels; the current inference evaluator requires them")
+    if args.input_type == "iq_dat" and args.bbox_cache_mode != "off":
+        raise ValueError("IQ training uses random time crops; file-level bbox caching would reuse boxes from the wrong crop")
+    if not (0.0 < float(args.sample_ratio) <= 1.0):
+        raise ValueError("--sample_ratio must be in (0, 1]")
+    if not (0.0 < float(args.val_ratio) < 1.0):
+        raise ValueError("--val_ratio must be in (0, 1)")
+    if args.trainer_type == "lwf" and args.incremental_split_mode != "incremental":
+        raise ValueError("LwF requires --incremental_split_mode incremental")
+    if args.mask_in_chans != 1:
+        raise ValueError("The current mask builder produces one channel; --mask_in_chans must be 1")
+    if args.mask_img_size < 1 or not (1 <= args.mask_fill_value <= 255):
+        raise ValueError("mask_img_size must be positive and mask_fill_value must be in [1, 255]")
+    if not (Path(__file__).resolve().parent / "yolov5" / "hubconf.py").is_file():
+        raise FileNotFoundError("The yolov5 submodule is empty; initialize it before training")
+    if not Path(args.yolo_weights).is_file():
+        raise FileNotFoundError(f"YOLO weights not found: {args.yolo_weights}")
+    if args.checkpoint_path and not Path(args.checkpoint_path).is_file():
+        raise FileNotFoundError(f"Classifier checkpoint not found: {args.checkpoint_path}")
 
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        rank, local_rank, world_size = int(os.environ['RANK']), int(os.environ.get('LOCAL_RANK', 0)), int(os.environ['WORLD_SIZE'])
-        torch.cuda.set_device(local_rank)
-        torch.distributed.init_process_group(backend='nccl', init_method='env://')
-    else:
-        rank, local_rank, world_size = 0, 0, 1
+    rank, local_rank, world_size = 0, 0, 1
 
     config = Config(args)
-    if world_size > 1:
-        config.device = torch.device(f'cuda:{local_rank}')
+    if config.input_type == "iq_dat":
+        config.sampling_rate = config.iq_sample_rate
+        iq_paths = (config.dataset_path or []) + (config.train_dataset_path or []) + (config.val_dataset_path or [])
+        config.classes = discover_iq_classes(iq_paths)
     config.rank, config.world_size, config.local_rank = rank, world_size, local_rank
 
     setup_incremental_class_split(config)
-    
+    if config.run_mode == "infer" and "Background" not in config.classes:
+        raise ValueError("End-to-end inference evaluation requires a Background class")
+
     use_explicit_train_val = _path_is_set(config.train_dataset_path) or _path_is_set(config.val_dataset_path)
+    if config.run_mode == "train" and config.incremental_split_mode == "incremental" and not use_explicit_train_val:
+        raise ValueError("Incremental mode requires explicit train and validation dataset paths")
     if rank == 0:
         config.freeze()
         config.make_dir()
@@ -316,20 +349,24 @@ def main(args):
     else:
         logger = logging.getLogger("ddp_logger")
         logger.addHandler(logging.NullHandler())
-        
+
     if str(config.run_mode).lower() == "train":
+        if use_explicit_train_val and not (_path_is_set(config.train_dataset_path) and _path_is_set(config.val_dataset_path)):
+            raise ValueError("Provide both --train_dataset_path and --val_dataset_path")
         if use_explicit_train_val:
-            train_dataset = UAVDataset(config, logger, dataset_path=config.train_dataset_path, split_name="train")
-            val_dataset = UAVDataset(config, logger, dataset_path=config.val_dataset_path, split_name="val")
+            dataset_cls = RawIQDataset if config.input_type == "iq_dat" else UAVDataset
+            train_dataset = dataset_cls(config, logger, dataset_path=config.train_dataset_path, split_name="train")
+            val_dataset = dataset_cls(config, logger, dataset_path=config.val_dataset_path, split_name="val")
             train_loader = create_dataloader(train_dataset, config, shuffle=True, sample_ratio=float(config.sample_ratio))
             val_loader = create_dataloader(val_dataset, config, shuffle=False, sample_ratio=1.0)
-        if config.incremental_split_mode == "incremental" and not use_explicit_train_val:
-            raise ValueError(
-                "incremental mode requires --train_dataset_path and --val_dataset_path, "
-                "because train should keep only new classes while val should keep all classes."
-            )
+        elif config.input_type == "iq_dat":
+            train_loader, val_loader = create_iq_train_val_loaders(config, logger)
+        else:
+            dataset = UAVDataset(config, logger)
+            train_loader, val_loader = get_dataloader(dataset, config, mode="train")
     else:
-        dataset = UAVDataset(config, logger)
+        dataset_cls = RawIQDataset if config.input_type == "iq_dat" else UAVDataset
+        dataset = dataset_cls(config, logger, split_name="infer")
         infer_loader = get_dataloader(dataset, config, mode="infer")
         train_loader, val_loader = None, None
 
@@ -345,15 +382,11 @@ def main(args):
     trainable_params = sum(p.numel() for p in classifier.parameters() if p.requires_grad)
     logger.info(f"Num of trainable params in backbone: {trainable_params:,}")
 
-    if torch.distributed.is_initialized():
-        torch.cuda.set_device(local_rank)
-        yolo_device = str(local_rank)
-    else:
-        yolo_device = config.yolo_device if hasattr(config, "yolo_device") else ""
+    yolo_device = config.yolo_device
 
     detector = YoloV5Detector(config, yolo_device)
     preprocessor = SignalPreprocessor(config, logger)
-    
+
     bbox_cache = None
     if config.bbox_cache_mode != "off":
         if not str(config.bbox_cache_path).strip():
@@ -368,6 +401,7 @@ def main(args):
             dataset_root=dataset_root,
             mode=config.bbox_cache_mode,
             mem_max=config.bbox_cache_mem_max,
+            detector_signature=detector_signature_from_config(config),
             logger=logger,
         )
 
@@ -379,8 +413,7 @@ def main(args):
         )
     else:
         logger.info("[BBoxCache] disabled")
-    
-    # trainer = Trainer(config, (train_loader, val_loader), logger, detector, preprocessor, classifier, bbox_cache)
+
     trainer_cls = LwFTrainer if str(config.trainer_type).lower() == "lwf" else Trainer
 
     trainer = trainer_cls(

@@ -59,11 +59,13 @@ class Trainer:
 
         self.best_val_acc = -1.0
         self.no_improve_epochs = 0
+        self.start_epoch = 0
 
         self.inv_class_map = {int(v): str(k) for k, v in self.config.classes.items()}
         self.eval_exclude_label_ids = {int(v) for k, v in getattr(self.config, "classes", {}).items() if str(k) in self.config.eval_exclude_classes}
 
-        self.background_label_id = int(self.config.classes["Background"])
+        background_id = self.config.classes.get("Background")
+        self.background_label_id = int(background_id) if background_id is not None else None
 
         if self.config.val_detect_vis_ratio < 0:
             raise ValueError("--val_detect_vis_ratio must be >= 0")
@@ -76,6 +78,9 @@ class Trainer:
 
         self.checkpoint_path = config.checkpoint_path
 
+        if self.config.run_mode == "infer" and not self.checkpoint_path:
+            raise ValueError("Inference requires --checkpoint_path")
+
         if self.checkpoint_path:
             ckpt = load_training_checkpoint(
                 model=self.classifier,
@@ -85,12 +90,15 @@ class Trainer:
                 scheduler=self.scheduler,
                 logger=self.logger,
                 load_optimizer=(self.config.run_mode == "train"),
+                expected_classes=self.config.classes,
             )
             if isinstance(ckpt, dict) and "best_val_acc" in ckpt:
                 try:
                     self.best_val_acc = float(ckpt["best_val_acc"])
                 except Exception:
                     pass
+            if self.config.run_mode == "train" and isinstance(ckpt, dict):
+                self.start_epoch = int(ckpt.get("epoch", -1)) + 1
         else:
             self.logger.info("No checkpoint path provided, training from scratch.")
 
@@ -156,6 +164,30 @@ class Trainer:
         if groups is None or len(groups) == 0:
             return None
         return max(groups, key=lambda g: float(g.get("score", 0.0)))
+
+    def _select_training_group(self, groups, target):
+        """Use the known frequency label when available to avoid wrong labels."""
+        if not groups:
+            return None
+        if not target.get("has_frequency_label", True):
+            return self._select_main_group(groups)
+        target_freq = float(target["center_freq"])
+        if not np.isfinite(target_freq):
+            return self._select_main_group(groups)
+        target_bw = float(target.get("bandwidth", 0.0))
+        candidates = []
+        for group in groups:
+            freq_diff = abs(float(group["center_freq"]) - target_freq)
+            bw_diff = abs(float(group.get("bandwidth", 0.0)) - target_bw)
+            if bool(self.config.skip_unmatched) and freq_diff > float(self.config.match_freq_thresh):
+                continue
+            if bool(self.config.match_use_bandwidth) and bw_diff > float(self.config.match_bw_thresh):
+                continue
+            cost = freq_diff
+            if bool(self.config.match_use_bandwidth):
+                cost += float(self.config.match_bandwidth_weight) * bw_diff
+            candidates.append((cost, -float(group.get("score", 0.0)), group))
+        return min(candidates, key=lambda item: item[:2])[2] if candidates else None
 
     def _pixel_y_to_freq_mhz(self, y, img_h):
         if img_h <= 1:
@@ -381,7 +413,14 @@ class Trainer:
             for gi in range(n_g):
                 freq_diff = abs(target_freqs[ti] - group_freqs[gi])
                 bw_diff = abs(target_bws[ti] - group_bws[gi])
-                cost[ti, gi] = float(freq_diff + self.config.match_bandwidth_weight * bw_diff)
+                cost[ti, gi] = float(freq_diff + (
+                    self.config.match_bandwidth_weight * bw_diff
+                    if self.config.match_use_bandwidth else 0.0
+                ))
+                if self.config.skip_unmatched and freq_diff > self.config.match_freq_thresh:
+                    cost[ti, gi] = 1e9
+                if self.config.match_use_bandwidth and bw_diff > self.config.match_bw_thresh:
+                    cost[ti, gi] = 1e9
 
         if linear_sum_assignment is not None:
             rows, cols = linear_sum_assignment(cost)
@@ -408,6 +447,9 @@ class Trainer:
         for ti, gi in pairs:
             freq_diff = abs(target_freqs[ti] - group_freqs[gi])
             if self.config.skip_unmatched and freq_diff > self.config.match_freq_thresh:
+                continue
+            bw_diff = abs(target_bws[ti] - group_bws[gi])
+            if self.config.match_use_bandwidth and bw_diff > self.config.match_bw_thresh:
                 continue
 
             g = groups[gi]
@@ -468,7 +510,7 @@ class Trainer:
             yolo_boxes = self._detect_boxes(spec, fp)
 
             groups = self._extract_groups(yolo_boxes, spec)
-            main_group = self._select_main_group(groups)
+            main_group = self._select_training_group(groups, targets[0])
 
             image_info = {
                 "fp": fp,
@@ -917,6 +959,9 @@ class Trainer:
 
         self.scheduler.step(epoch + 1)
 
+        if total == 0:
+            raise RuntimeError("No training instances survived YOLO detection and group filtering")
+
         train_loss = loss_meter.avg if total > 0 else 0.0
         train_acc = 100.0 * correct / max(total, 1)
         train_match_recall = float(matched_total) / max(float(target_total), 1.0)
@@ -1043,6 +1088,9 @@ class Trainer:
                 acc=f"{acc:.2f}",
                 match=f"{match_recall:.3f}",
             )
+
+        if total == 0:
+            raise RuntimeError("No validation instances survived YOLO detection and group filtering")
 
         if len(all_preds) > 0:
             all_preds = np.concatenate(all_preds, axis=0)
@@ -1254,7 +1302,7 @@ class Trainer:
         if self.train_loader is None or self.val_loader is None:
             raise RuntimeError("train_loader / val_loader is None.")
 
-        for epoch in range(self.config.epochs):
+        for epoch in range(self.start_epoch, self.config.epochs):
             self.logger.info(f"===== Epoch {epoch + 1}/{self.config.epochs} =====")
 
             train_loss, train_acc, train_match_recall = self.train_one_epoch(epoch)
