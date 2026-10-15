@@ -38,3 +38,26 @@ jobs:
         with:
           name: frontend-diagnostics
           path: work/frontend-diagnostics
+  actual-yolo-input:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/checkout@v4
+        with:
+          repository: WuJiaqiii/yolov5
+          ref: 88af13e3e25602344aab68d44f9d0b666dacf695
+          path: yolov5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU YOLO dependencies
+        run: |
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r yolov5/requirements.txt
+          python -m pip install scikit-learn
+      - name: Compare real YOLO training and inference tensors
+        env:
+          UAV_TEST_REAL_YOLO: "1"
+        run: python -m unittest discover -s tests -p test_yolo_native_contract.py -v

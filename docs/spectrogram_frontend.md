@@ -157,3 +157,6 @@ python scripts/evaluate_frontend.py --output_dir work/frontend-diagnostics
 一 MAT 一原生 PNG、像素重建、模型几何及分组标注检查。
 诊断图使用合成频谱单元，不代表 IQ 实测 SNR、真实检测精度或 mAP。
 真实录音、人工框和 YOLO 权重不在仓库内时，不声称实际训练精度或带权重检查已通过。
+
+CI 另用公开 YOLO 快照 88af13e3e25602344aab68d44f9d0b666dacf695 验证真实训练加载器与真实 AutoShape 的输入张量；
+网络为随机初始化，仅检查预处理。项目原固定子模块不被改写，仍需用你的本地版本和真实权重复核。
