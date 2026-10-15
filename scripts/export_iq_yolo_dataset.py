@@ -21,7 +21,7 @@ import numpy as np
 from scipy.io import loadmat
 from util.spectrogram_frontend import (
     FRONTEND_VERSION, FrontendConfig, add_frontend_arguments,
-    apply_frontend_manifest, iq_to_db, render_tiles,
+    apply_frontend_manifest, iq_to_db, render_tiles, read_mat_matrix,
 )
 
 
@@ -80,10 +80,7 @@ def source_matrices(path, args):
                 "byte_order": args.iq_byte_order,
             }
     elif args.input_type == "mat":
-        mat = loadmat(path, variable_names=[args.mat_key])
-        if args.mat_key not in mat:
-            raise KeyError(str(path) + ": missing " + args.mat_key)
-        yield mat[args.mat_key], args.mat_spec_domain, {}
+        yield read_mat_matrix(path, args.mat_key, args.mat_spec_domain), args.mat_spec_domain, {}
     else:
         image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if image is None:

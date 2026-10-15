@@ -298,3 +298,19 @@ def apply_frontend_manifest(args):
                  "mat_key", "mat_spec_domain", "frequency_axis", "iq_byte_order"):
         if name in source:
             setattr(args, name, source[name])
+
+
+def read_mat_matrix(path, mat_key, domain):
+    """Read the declared MAT representation, honoring provenance when available."""
+    from scipy.io import loadmat
+    mat = loadmat(path, variable_names=[mat_key, "spectrogram_domain"])
+    if mat_key not in mat:
+        raise KeyError(str(path) + ": missing " + mat_key)
+    if "spectrogram_domain" in mat:
+        declared = str(np.asarray(mat["spectrogram_domain"]).squeeze())
+        if declared != domain:
+            raise ValueError("MAT provenance declares " + declared + ", but configured domain is " + domain)
+    x = np.asarray(mat[mat_key])
+    if x.ndim != 2 or x.size == 0:
+        raise ValueError("Expected nonempty 2D MAT spectrum")
+    return x

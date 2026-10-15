@@ -4,7 +4,7 @@ import glob
 import numpy as np
 import torch
 import cv2
-from util.spectrogram_frontend import to_db
+from util.spectrogram_frontend import to_db, read_mat_matrix
 
 from typing import List, Dict, Any, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler, DistributedSampler, Subset
@@ -231,15 +231,8 @@ class UAVDataset(Dataset):
             raise ImportError("scipy is required for mat mode. Please install scipy.")
 
         mat_key = getattr(self.config, "mat_key", "summed_submatrices")
-        mat = loadmat(fp, variable_names=[mat_key])
-        if mat_key not in mat:
-            raise KeyError(f"key '{mat_key}' not found in mat")
-
-        x = np.asarray(mat[mat_key])
-        if x.ndim != 2:
-            raise ValueError(f"data dim != 2, got shape {x.shape}")
-
         domain = str(getattr(self.config, "mat_spec_domain", "power"))
+        x = read_mat_matrix(fp, mat_key, domain)
         if domain == "image":
             if np.iscomplexobj(x) or not np.isfinite(x).all() or x.min() < 0 or x.max() > 255:
                 raise ValueError("MAT image values must be real and in [0,255]")

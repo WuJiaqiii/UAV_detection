@@ -81,6 +81,37 @@ class FrontendTests(unittest.TestCase):
             np.testing.assert_allclose(actual, expected, atol=1e-12)
         self.assertEqual(pixel_height_to_bandwidth_mhz(128, 128, 1e6, "fft"), 1.0)
 
+    def test_detector_maps_tiles_to_full_matrix_before_nms(self):
+        import torch
+        from util.detector import YoloV5Detector
+        cfg = FrontendConfig(image_size=128, tile_width=100, tile_overlap=25)
+        spec = np.zeros((64, 257), dtype=np.float32)
+        tiles = list(render_tiles(spec, cfg, "db"))
+        source_box = np.array([[80, 10, 90, 30]], dtype=np.float32)
+
+        class FakeModel:
+            def __init__(self):
+                self.index = 0
+
+            def __call__(self, image, size):
+                tile = tiles[self.index]
+                self.index += 1
+                np.testing.assert_array_equal(image, tile.image)
+                if tile.x0 <= 80 and tile.x0+tile.width >= 90:
+                    box = tile.from_source(source_box)
+                    det = torch.tensor(np.column_stack([box, [0.9], [0]]))
+                else:
+                    det = torch.zeros((0, 6))
+                return SimpleNamespace(xyxy=[det])
+
+        detector = YoloV5Detector.__new__(YoloV5Detector)
+        detector.frontend = cfg
+        detector.input_domain = "db"
+        detector.imgsz = cfg.image_size
+        detector.config = SimpleNamespace(yolo_max_det=100)
+        detector.model = FakeModel()
+        self.assertEqual(detector.detect(spec), [[80, 10, 90, 30]])
+
 
 class DatasetIntegrationTests(unittest.TestCase):
     def logger(self):
@@ -182,6 +213,10 @@ class DatasetIntegrationTests(unittest.TestCase):
             report = diagnostics(Path(temp))
             self.assertEqual(report["gain_test"], "passed")
             self.assertEqual(len(report["rows"]), 8)
+            for mode in ("global", "frequency"):
+                contrasts = [row["standardized_signal_minus_background"]
+                             for row in report["rows"] if row["mode"] == mode]
+                self.assertGreater(contrasts[-1], contrasts[0])
             self.assertTrue((Path(temp)/"comparison.png").is_file())
 
 

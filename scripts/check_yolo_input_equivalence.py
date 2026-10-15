@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 from scipy.io import loadmat
 from util.spectrogram_frontend import (
-    FrontendConfig, FRONTEND_VERSION, iq_to_db, render_tiles, rgb_to_tensor_array,
+    FrontendConfig, FRONTEND_VERSION, iq_to_db, render_tiles, rgb_to_tensor_array, read_mat_matrix,
 )
 
 
@@ -31,7 +31,7 @@ def restore(root, row, source):
                          byte_order=seg["byte_order"])
         return iq_to_db(iq, source["iq_n_fft"], source["iq_hop_length"])
     if source["input_type"] == "mat":
-        return loadmat(path, variable_names=[source["mat_key"]])[source["mat_key"]]
+        return read_mat_matrix(path, source["mat_key"], source["mat_spec_domain"])
     image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise ValueError("Cannot read " + str(path))
