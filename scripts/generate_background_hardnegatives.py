@@ -40,6 +40,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from util.detector import YoloV5Detector
 from util.preprocess import SignalPreprocessor
+from util.spectrogram_frontend import FrontendConfig, render_gray
 
 
 class SimpleLogger:
@@ -128,23 +129,9 @@ def make_background_from_image(img_u8: np.ndarray, valid_boxes, mode="median", n
     return np.clip(bg, 0, 255).astype(np.uint8)
 
 
-def spec_to_uint8_vis_log(spec: np.ndarray, p_low=1.0, p_high=99.5, log_gain=9.0) -> np.ndarray:
-    x = np.asarray(spec, dtype=np.float32)
-    finite_mask = np.isfinite(x)
-    if not finite_mask.any():
-        return np.zeros_like(x, dtype=np.uint8)
-
-    valid = x[finite_mask]
-    lo = float(np.percentile(valid, p_low))
-    hi = float(np.percentile(valid, p_high))
-    if hi <= lo:
-        return np.zeros_like(x, dtype=np.uint8)
-
-    x = np.clip(x, lo, hi)
-    x = (x - lo) / (hi - lo)
-    x = np.log1p(log_gain * x) / np.log1p(log_gain)
-    return np.clip(x * 255.0, 0, 255).astype(np.uint8)
-
+def spec_to_uint8_vis_log(spec, **unused):
+    """Compatibility preview: these sources are already rendered grayscale."""
+    return render_gray(spec, FrontendConfig(), domain="image")
 
 def draw_boxes_rgb(gray_u8: np.ndarray, boxes, color=(255, 0, 0), thickness=2):
     from PIL import Image, ImageDraw
@@ -208,6 +195,7 @@ class BackgroundHardNegativeGenerator:
 
         self.cfg = SimpleNamespace(
             run_mode="infer",
+            detector_spec_domain="image",
             train_signal_mode="single",
             sampling_rate=args.sampling_rate,
             n_fft=args.n_fft,
@@ -346,13 +334,14 @@ class BackgroundHardNegativeGenerator:
         snrspace = src_info["snrspace"]
 
         fname = (
-            f"Background-[0,{center:.1f},1000,{upper:.1f}]"
+            f"Background-[0,{center:.1f},1000,{float(group['bandwidth']):.1f}]"
             f"-SNR-{snr:g}-SNRSPACE{snrspace:.6e}-Figure-{sample_idx}.mat"
         )
         mat_path = self.mat_dir / fname
 
         savemat(str(mat_path), {
-            "summed_submatrices": np.asarray(bg_u8, dtype=np.uint8)
+            "summed_submatrices": np.asarray(bg_u8, dtype=np.uint8),
+            "spectrogram_domain": np.array("image")
         })
 
         vis_base = self.png_dir / mat_path.stem

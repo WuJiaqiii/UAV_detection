@@ -4,6 +4,7 @@ import glob
 import numpy as np
 import torch
 import cv2
+from util.spectrogram_frontend import to_db
 
 from typing import List, Dict, Any, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler, DistributedSampler, Subset
@@ -238,8 +239,13 @@ class UAVDataset(Dataset):
         if x.ndim != 2:
             raise ValueError(f"data dim != 2, got shape {x.shape}")
 
-        x = np.asarray(x, dtype=np.float32)
-        x = np.ascontiguousarray(x)
+        domain = str(getattr(self.config, "mat_spec_domain", "power"))
+        if domain == "image":
+            if np.iscomplexobj(x) or not np.isfinite(x).all() or x.min() < 0 or x.max() > 255:
+                raise ValueError("MAT image values must be real and in [0,255]")
+            x = np.ascontiguousarray(x, dtype=np.float32)
+        else:
+            x = to_db(x, domain)
         return torch.from_numpy(x)
 
     def __len__(self):

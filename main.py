@@ -13,12 +13,15 @@ from util.detector import YoloV5Detector
 from util.utils import create_logger, set_seed, _path_is_set
 from util.config import Config
 from util.bboxcache import BBoxCache, detector_signature_from_config
+from util.spectrogram_frontend import add_frontend_arguments, FrontendConfig, apply_frontend_manifest
 
 def get_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description="Single-signal training + multi-signal inference: STFT spectrogram -> YOLO detection -> preprocess -> CNN classification"
     )
+
+    add_frontend_arguments(parser)
 
     # Runtime / Mode
     g_run = parser.add_argument_group("Runtime")
@@ -47,13 +50,7 @@ def get_parser():
     g_yolo.add_argument("--yolo_half", action=argparse.BooleanOptionalAction, default=False)
     g_yolo.add_argument("--yolo_warmup", action=argparse.BooleanOptionalAction, default=True)
 
-    g_yolo.add_argument("--yolo_db_min", type=float, default=-80.0)
-    g_yolo.add_argument("--yolo_db_max", type=float, default=0.0)
-    g_yolo.add_argument("--yolo_db_eps", type=float, default=1e-12)
 
-    g_yolo.add_argument("--yolo_input_norm", type=str, default="percentile", choices=["max", "percentile"])
-    g_yolo.add_argument("--yolo_input_p_low", type=float, default=1.0)
-    g_yolo.add_argument("--yolo_input_p_high", type=float, default=99.5)
 
     # Preprocessor
     g_pre = parser.add_argument_group("Preprocess")
@@ -98,8 +95,9 @@ def get_parser():
     g_data.add_argument("--input_type", type=str, default="mat", choices=["mat", "png", "iq_dat"])
     g_data.add_argument("--iq_sample_rate", type=int, default=100_000_000, help="Complex samples per second in each .dat recording.")
     g_data.add_argument("--iq_segment_ms", type=float, default=10.0, help="Length of each IQ crop converted to a spectrogram.")
+    g_data.add_argument("--iq_byte_order", choices=["<", ">"], default="<")
     g_data.add_argument("--iq_n_fft", type=int, default=512)
-    g_data.add_argument("--iq_hop_length", type=int, default=1024)
+    g_data.add_argument("--iq_hop_length", type=int, default=256)
     g_data.add_argument("--val_ratio", type=float, default=0.2)
     g_data.add_argument("--batch_size", type=int, default=32)
     g_data.add_argument("--num_workers", type=int, default=4)
@@ -320,9 +318,17 @@ def main(args):
 
     rank, local_rank, world_size = 0, 0, 1
 
+    apply_frontend_manifest(args)
     config = Config(args)
+    FrontendConfig.from_config(config)  # validate before initializing datasets/models
+    config.detector_spec_domain = ("image" if config.input_type == "png" or
+                                  (config.input_type == "mat" and config.mat_spec_domain == "image")
+                                  else "db")
     if config.input_type == "iq_dat":
         config.sampling_rate = config.iq_sample_rate
+        config.frequency_axis = "fft"
+        if not 1 <= config.iq_hop_length <= config.iq_n_fft:
+            raise ValueError("Require iq_hop_length <= iq_n_fft; gapped FFT windows are not supported")
         iq_paths = (config.dataset_path or []) + (config.train_dataset_path or []) + (config.val_dataset_path or [])
         config.classes = discover_iq_classes(iq_paths)
     config.rank, config.world_size, config.local_rank = rank, world_size, local_rank

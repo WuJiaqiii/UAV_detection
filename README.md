@@ -1,3 +1,5 @@
+> 当前频谱处理与 YOLO 数据集生成方式已统一，使用方法、数据域声明及迁移说明见 [统一频谱前端](docs/spectrogram_frontend.md)。下文保留的旧流程介绍不代表当前归一化实现。
+
 # UAV_detection 项目整体逻辑说明 (ChatGPT)
 
 ## 1. 项目目标

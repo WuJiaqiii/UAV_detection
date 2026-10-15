@@ -1,0 +1,40 @@
+name: Spectrogram frontend checks
+on:
+  push:
+    branches: ["codex/unified-spectrogram-frontend"]
+  pull_request:
+    paths:
+      - "util/**"
+      - "data/**"
+      - "scripts/**"
+      - "tests/**"
+      - "main.py"
+      - ".github/workflows/spectrogram-frontend.yml"
+permissions:
+  contents: read
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy scipy opencv-python-headless scikit-learn
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Compile project Python
+        run: python -m compileall -q main.py util data scripts tests
+      - name: Frontend and dataset integration tests
+        run: python -m unittest discover -s tests -v
+      - name: Gain and SNR diagnostics
+        run: python scripts/evaluate_frontend.py --output_dir work/frontend-diagnostics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-diagnostics
+          path: work/frontend-diagnostics

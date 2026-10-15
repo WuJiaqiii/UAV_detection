@@ -17,6 +17,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, Subset
 
 from data.data_loader import create_dataloader
+from util.spectrogram_frontend import iq_to_db
 
 
 DEFAULT_SAMPLE_RATE = 100_000_000
@@ -92,24 +93,15 @@ def read_iq_dat(path, start_sample=0, num_samples: Optional[int] = None,
     return iq
 
 
-def iq_to_spectrogram(iq, n_fft=512, hop_length=1024, db_floor=-100.0):
-    """Return a centered [frequency, time] relative-power dB image."""
-    iq = np.asarray(iq, dtype=np.complex64)
-    n_fft, hop_length = int(n_fft), int(hop_length)
-    if iq.ndim != 1 or n_fft < 2 or hop_length < 1 or iq.size < n_fft:
-        raise ValueError("Need a 1D IQ array with at least n_fft samples")
-    frames = np.lib.stride_tricks.sliding_window_view(iq, n_fft)[::hop_length]
-    window = np.hanning(n_fft).astype(np.float32)
-    spectrum = np.fft.fftshift(np.fft.fft(frames * window, axis=1), axes=1)
-    power = np.abs(spectrum) ** 2
-    db = 10.0 * np.log10(np.maximum(power, 1e-12))
-    db -= db.max()
-    return np.ascontiguousarray(np.clip(db.T, float(db_floor), 0.0), dtype=np.float32)
-
+def iq_to_spectrogram(iq, n_fft=512, hop_length=256, db_floor=None):
+    """Canonical absolute log-power matrix; no peak subtraction or clipping."""
+    if db_floor is not None:
+        raise ValueError("db_floor clipping was removed; configure the shared render range instead")
+    return iq_to_db(iq, n_fft=n_fft, hop_length=hop_length)
 
 def read_iq_spectrogram(path, start_ms=0.0, duration_ms=10.0,
                         sample_rate=DEFAULT_SAMPLE_RATE, n_fft=512,
-                        hop_length=1024, db_floor=-100.0, byte_order="<"):
+                        hop_length=256, db_floor=None, byte_order="<"):
     """Read a time slice and return (spectrogram, time_ms, freq_offset_mhz).
 
     The frequency axis is relative to the unknown RF recording center.
@@ -122,7 +114,7 @@ def read_iq_spectrogram(path, start_ms=0.0, duration_ms=10.0,
     iq = read_iq_dat(path, start_sample, num_samples, byte_order=byte_order)
     spec = iq_to_spectrogram(iq, n_fft=n_fft, hop_length=hop_length,
                              db_floor=db_floor)
-    time_ms = (start_sample + int(n_fft) / 2.0
+    time_ms = (start_sample + (int(n_fft) - 1) / 2.0
                + np.arange(spec.shape[1]) * int(hop_length)) / sample_rate * 1000.0
     freq_mhz = np.fft.fftshift(np.fft.fftfreq(int(n_fft), d=1.0 / sample_rate)) / 1e6
     return spec, time_ms, freq_mhz
@@ -144,11 +136,12 @@ class RawIQDataset(Dataset):
         self.split_name = str(split_name).lower()
         self.sample_rate = int(getattr(config, "sampling_rate", DEFAULT_SAMPLE_RATE))
         self.n_fft = int(getattr(config, "iq_n_fft", 512))
-        self.hop_length = int(getattr(config, "iq_hop_length", 1024))
+        self.hop_length = int(getattr(config, "iq_hop_length", 256))
         self.segment_ms = float(getattr(config, "iq_segment_ms", 10.0))
         self.segment_samples = round(self.sample_rate * self.segment_ms / 1000.0)
         if self.segment_samples < self.n_fft:
             raise ValueError("iq_segment_ms must contain at least iq_n_fft samples")
+        self.byte_order = str(getattr(config, "iq_byte_order", "<"))
         self.random_crop = self.split_name == "train"
         paths = dataset_path if dataset_path is not None else getattr(config, "dataset_path", None)
         class_map = dict(config.classes)
@@ -184,7 +177,8 @@ class RawIQDataset(Dataset):
         sample = self.samples[index]
         remaining = sample["num_samples"] - self.segment_samples
         start = int(np.random.randint(0, remaining + 1)) if self.random_crop else remaining // 2
-        iq = read_iq_dat(sample["fp"], start_sample=start, num_samples=self.segment_samples)
+        iq = read_iq_dat(sample["fp"], start_sample=start, num_samples=self.segment_samples,
+                         byte_order=self.byte_order)
         spec = iq_to_spectrogram(iq, n_fft=self.n_fft, hop_length=self.hop_length)
         target = {"label": sample["label"], "class_name": sample["class_name"],
                   "center_freq": 0.0, "bandwidth": self.sample_rate / 1e6,

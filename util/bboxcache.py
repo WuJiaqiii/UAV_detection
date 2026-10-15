@@ -4,6 +4,7 @@ import json
 from collections import OrderedDict
 from pathlib import Path
 import torch
+from util.spectrogram_frontend import FrontendConfig, FRONTEND_VERSION
 
 
 def detector_signature_from_config(config) -> str:
@@ -19,9 +20,10 @@ def detector_signature_from_config(config) -> str:
         "iou": config.yolo_iou_thres,
         "classes": config.yolo_classes,
         "max_det": config.yolo_max_det,
-        "normalization": [config.yolo_input_norm, config.yolo_input_p_low,
-                          config.yolo_input_p_high],
-        "db_compat": [config.yolo_db_min, config.yolo_db_max, config.yolo_db_eps],
+        "frontend": FrontendConfig.from_config(config).fingerprint(),
+        "frontend_version": FRONTEND_VERSION,
+        "input_domain": getattr(config, "detector_spec_domain", "power"),
+        "mat_domain": getattr(config, "mat_spec_domain", "power"),
     }
     return hashlib.sha256(json.dumps(settings, sort_keys=True).encode("utf-8")).hexdigest()
 

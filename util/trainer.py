@@ -14,6 +14,7 @@ except Exception:
     linear_sum_assignment = None
 
 from util.vis import DetectionVisualizer
+from util.spectrogram_frontend import pixel_y_to_freq_mhz
 from util.checkpoint import save_training_checkpoint, load_training_checkpoint
 from util.utils import _make_pbar, AverageMeter, save_confusion_matrix, save_eval_summary, save_instance_csv
 
@@ -190,11 +191,8 @@ class Trainer:
         return min(candidates, key=lambda item: item[:2])[2] if candidates else None
 
     def _pixel_y_to_freq_mhz(self, y, img_h):
-        if img_h <= 1:
-            return 0.0
-        rel = float(y) / float(img_h - 1) - 0.5
-        sr = float(getattr(self.config, "sampling_rate", 122.88e6))
-        return rel * sr / 1e6
+        return pixel_y_to_freq_mhz(y, img_h, self.config.sampling_rate,
+                                   getattr(self.config, "frequency_axis", "legacy"))
 
     def _group_center_freq_mhz(self, group, spec_shape):
         if isinstance(group, dict) and "center_freq" in group:

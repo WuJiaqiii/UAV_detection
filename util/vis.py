@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from util.utils import spectrogram_to_yolo_uint8
+from util.spectrogram_frontend import FrontendConfig, render_gray
 
 class DetectionVisualizer:
     def __init__(self, config, logger=None):
@@ -12,17 +12,13 @@ class DetectionVisualizer:
         self.logger = logger
         
         self.result_dir = Path(self.config.result_dir)
-        self.yolo_db_min = float(self.config.yolo_db_min)
-        self.yolo_db_max = float(self.config.yolo_db_max)
-        self.yolo_db_eps = float(self.config.yolo_db_eps)
-        
+        self.frontend = FrontendConfig.from_config(config)
+        self.input_domain = getattr(config, "detector_spec_domain", "power")
+
     def _spec_to_u8(self, spec):
-        return spectrogram_to_yolo_uint8(
-            data=spec,
-            db_min=self.yolo_db_min,
-            db_max=self.yolo_db_max,
-            eps=self.yolo_db_eps,
-        )
+        # Whole-image visualization only. Exact per-tile model rasters are
+        # exported by export_iq_yolo_dataset.py / checked by the equivalence tool.
+        return render_gray(spec, self.frontend, self.input_domain)
 
     def _log_warning(self, msg):
         if self.logger is not None:
