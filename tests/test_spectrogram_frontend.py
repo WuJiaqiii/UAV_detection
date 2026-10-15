@@ -212,6 +212,49 @@ class DatasetIntegrationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     export(args)
 
+    def test_single_group_preview_exports_and_rebuilds_without_training_split(self):
+        from scripts.export_iq_yolo_dataset import parser, export, finalize
+        from scripts.check_yolo_input_equivalence import check
+        for file_count in (1, 2):
+            with self.subTest(file_count=file_count), tempfile.TemporaryDirectory() as temp:
+                root, output = Path(temp)/"source", Path(temp)/"preview"
+                root.mkdir()
+                for index in range(file_count):
+                    savemat(root/f"record-SNR-{index}-Figure-{index+1}.mat",
+                            {"summed_submatrices": np.linspace(.01, 1, 64*80).reshape(64, 80)})
+                args = parser().parse_args([
+                    "--input_dir", str(root), "--output_dir", str(output),
+                    "--input_type", "mat", "--split_mode", "none", "--val_ratio", "0",
+                    "--yolo_imgsz_h", "64", "--yolo_imgsz_w", "64",
+                ])
+                export(args)
+                rows = [json.loads(line) for line in (output/"metadata.jsonl").read_text().splitlines()]
+                self.assertEqual(len(rows), file_count)
+                self.assertEqual({row["split"] for row in rows}, {"unassigned"})
+                self.assertEqual(len({row["group"] for row in rows}), 1)
+                self.assertTrue((output/"images"/"unassigned").is_dir())
+                self.assertFalse((output/"images"/"train").exists())
+                self.assertFalse((output/"images"/"val").exists())
+                self.assertFalse((output/"data.yaml").exists())
+                self.assertTrue(check(output, root, limit=0)["pixel_equal"])
+                with self.assertRaisesRegex(ValueError, "Unassigned"):
+                    finalize(output)
+
+    def test_training_split_still_rejects_one_source_group_before_writing(self):
+        from scripts.export_iq_yolo_dataset import parser, export
+        with tempfile.TemporaryDirectory() as temp:
+            root, output = Path(temp)/"source", Path(temp)/"export"
+            root.mkdir()
+            for index in range(2):
+                savemat(root/f"record-SNR-{index}-Figure-{index+1}.mat",
+                        {"summed_submatrices": np.ones((64, 80))})
+            args = parser().parse_args([
+                "--input_dir", str(root), "--output_dir", str(output), "--input_type", "mat",
+            ])
+            with self.assertRaisesRegex(ValueError, "only 1 independent group"):
+                export(args)
+            self.assertFalse(output.exists())
+
     def test_synthetic_gain_snr_report(self):
         from scripts.evaluate_frontend import diagnostics
         with tempfile.TemporaryDirectory() as temp:

@@ -37,6 +37,8 @@ def parser():
     p.add_argument("--iq_byte_order", choices=["<", ">"], default="<")
     p.add_argument("--segments_per_file", type=int, default=3)
     p.add_argument("--mat_key", default="summed_submatrices")
+    p.add_argument("--split_mode", choices=["group", "none"], default="group",
+                   help="group: split independent source groups; none: export unassigned annotation/preview images")
     p.add_argument("--val_ratio", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--groups_json", type=Path,
@@ -95,6 +97,9 @@ def finalize(output):
     counts = {"train": 0, "val": 0}
     for line in meta.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
+        if row.get("split") not in counts:
+            raise ValueError("Unassigned preview exports cannot be finalized as a training dataset. "
+                             "Export with --split_mode group after collecting at least two independent groups.")
         image = output / row["image"]
         label = output / row["label"]
         if not image.is_file() or not label.is_file():
@@ -131,8 +136,10 @@ def export(args):
         raise ValueError("Output must be outside the source tree")
     if output.exists() and any(output.iterdir()):
         raise ValueError("Use an empty output directory; existing annotations are never overwritten")
-    if not 0 < args.val_ratio < 1 or args.segments_per_file < 1:
-        raise ValueError("Need 0 < val_ratio < 1 and segments_per_file >= 1")
+    if args.segments_per_file < 1:
+        raise ValueError("Need segments_per_file >= 1")
+    if args.split_mode == "group" and not 0 < args.val_ratio < 1:
+        raise ValueError("Group splitting requires 0 < val_ratio < 1")
     if args.iq_sample_rate <= 0 or args.iq_segment_ms <= 0:
         raise ValueError("Invalid IQ sample rate or segment duration")
     suffix = {"iq_dat": ".dat", "mat": ".mat", "png": ".png"}[args.input_type]
@@ -142,12 +149,23 @@ def export(args):
     groups = json.loads(args.groups_json.read_text()) if args.groups_json else None
     group_ids = {p: source_group(p, root, groups) for p in paths}
     unique = sorted(set(group_ids.values()))
-    if len(unique) < 2:
-        raise ValueError("Need at least two independent recordings/groups before splitting")
-    shuffled = np.random.default_rng(args.seed).permutation(unique)
-    n_val = min(len(unique)-1, max(1, round(len(unique)*args.val_ratio)))
-    val_groups = set(shuffled[:n_val].tolist())
-    for split in ("train", "val"):
+    print(f"Found {len(paths)} source file(s) in {len(unique)} independent group(s).")
+    if args.split_mode == "group":
+        if len(unique) < 2:
+            raise ValueError(
+                f"Found {len(paths)} source file(s), but only {len(unique)} independent group(s). "
+                "Figure slices and SNR variants of the same source are grouped together. "
+                "Use --split_mode none to export preview/annotation images without train/val splitting. "
+                "For training, provide at least two genuinely independent recording groups."
+            )
+        shuffled = np.random.default_rng(args.seed).permutation(unique)
+        n_val = min(len(unique)-1, max(1, round(len(unique)*args.val_ratio)))
+        val_groups = set(shuffled[:n_val].tolist())
+        splits = ("train", "val")
+    else:
+        val_groups = set()
+        splits = ("unassigned",)
+    for split in splits:
         (output / "images" / split).mkdir(parents=True)
         (output / "labels" / split).mkdir(parents=True)
     source = {name: getattr(args, name) for name in (
@@ -158,12 +176,13 @@ def export(args):
     source["segments_per_file"] = args.segments_per_file
     source["frequency_axis"] = "fft" if args.input_type == "iq_dat" else args.frequency_axis
     manifest = {"version": FRONTEND_VERSION, "frontend": asdict(cfg),
-                "source": source, "seed": args.seed}
+                "source": source, "seed": args.seed, "split_mode": args.split_mode}
     (output / "frontend_config.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     with (output / "metadata.jsonl").open("w", encoding="utf-8") as metadata:
         for path in paths:
             rel = path.relative_to(root).as_posix()
-            split = "val" if group_ids[path] in val_groups else "train"
+            split = ("unassigned" if args.split_mode == "none" else
+                     ("val" if group_ids[path] in val_groups else "train"))
             for matrix, domain, segment in source_matrices(path, args):
                 for tile in render_tiles(matrix, cfg, domain):
                     identity = json.dumps([rel, segment, tile.x0, cfg.fingerprint()], sort_keys=True)
@@ -178,7 +197,10 @@ def export(args):
                            "transform": tile.metadata(), "frontend": cfg.fingerprint(),
                            "pixel_sha256": hashlib.sha256(tile.image.tobytes()).hexdigest()}
                     metadata.write(json.dumps(row) + "\n")
-    print("Images exported. Annotate every image, then run this command with --finalize.")
+    if args.split_mode == "none":
+        print("Preview/annotation images exported under images/unassigned; no training split was created.")
+    else:
+        print("Images exported. Annotate every image, then run this command with --finalize.")
     print("No data.yaml or implicit background labels were created.")
 
 

@@ -53,6 +53,29 @@ IQ 默认 hop 从 1024 改为 256（FFT 512），消除原来窗之间的盲区�
 分块改善检测分辨率，不会减少完整频谱本身的存储开销。按内存继续调整 batch/workers。
 IQ 频率坐标按真实 FFT bin 计算；旧 MAT/PNG 默认保留原来的端点映射，若原数据确为 FFT 网格可选 `--frequency_axis fft`。
 
+## 单文件或少量样本：只导出图片
+
+用 `--split_mode none` 可以先检查归一化效果，不要求两个独立采集组：
+```bash
+python scripts/export_iq_yolo_dataset.py \
+  --input_dir /data/test_signal \
+  --output_dir /data/mat_preview \
+  --input_type mat --mat_spec_domain power \
+  --frontend_mode global --split_mode none
+```
+
+图片保存到 `images/unassigned/`，像素重建检查照常使用。不会生成训练/验证集或 data.yaml，
+`--finalize` 会明确拒绝将该预览目录当作正式训练集。
+默认 `--split_mode group` 仍要求至少两个独立组。同一录音的 Figure 切片、SNR 变体可能有多个
+文件，却仍然只属于一个组；不要为绕过限制将它们随机分入训练和验证集。
+日志会显示源文件数与独立组数。
+
+`--input_type mat` 直接读取现有二维频谱，不重新执行 IQ 读取、STFT 或按毫秒切片；
+`--iq_sample_rate`、`--iq_segment_ms`、`--iq_n_fft`、`--iq_hop_length`、
+`--iq_byte_order` 和 `--segments_per_file` 都不会改变 MAT 的时频分辨率。
+请确认 `--mat_spec_domain`：线性功率用 power、幅度用 amplitude、已取对数用 db、
+已有显示灰度用 image。
+
 ## 从 IQ 导出用于人工标注的图片
 
 先导出少量独立录音，检查信号和背景，再批量标注。输出目录必须为空且在源目录之外。
