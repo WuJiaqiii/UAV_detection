@@ -162,5 +162,21 @@ python scripts/evaluate_frontend.py --output_dir work/frontend-diagnostics
 诊断图使用合成频谱单元，不代表 IQ 实测 SNR、真实检测精度或 mAP。
 真实录音、人工框和 YOLO 权重不在仓库内时，不声称实际训练精度或带权重检查已通过。
 
-CI 另用公开 YOLO 快照 88af13e3e25602344aab68d44f9d0b666dacf695 验证真实训练加载器与真实 AutoShape 的输入张量；
-网络为随机初始化，仅检查预处理。项目原固定子模块不被改写，仍需用你的本地版本和真实权重复核。
+项目将 YOLO 子模块固定为可获取的提交 88af13e3e25602344aab68d44f9d0b666dacf695，
+与用户本机确认的版本一致；替代远端无法获取的历史指针 4530dab2b996acda5605207672a73206259a8e49。
+CI 直接递归初始化主仓库记录的子模块，核对实际 HEAD 与 gitlink 相等，再验证真实训练加载器与
+真实 AutoShape 的输入张量，不再另行检出独立快照。网络为随机初始化，仅检查预处理；
+实际精度仍需用真实录音、标注和权重复核。子模块内部源码未修改。
+
+## 子模块同步
+
+本修复位于 codex/unified-spectrogram-frontend 分支；未合并的 main/uav-match 仍可能记录旧指针。
+更新主仓库到包含修复的提交后，执行：
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
+git submodule status yolov5
+```
+预期 yolov5 提交为 88af13e3e25602344aab68d44f9d0b666dacf695，状态前没有 +。
+只修改 .gitmodules 的 branch 或 URL 不能修复失效的提交指针；update 默认读取主仓库暂存区的 gitlink。
+子模块如有本地修改或暂存删除，先核对并保留需要的内容；不要使用 --force 或 reset --hard 覆盖。

@@ -10,6 +10,8 @@ on:
       - "tests/**"
       - "main.py"
       - ".github/workflows/spectrogram-frontend.yml"
+      - ".gitmodules"
+      - "yolov5"
 permissions:
   contents: read
 jobs:
@@ -43,12 +45,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: false
-      - uses: actions/checkout@v4
-        with:
-          repository: WuJiaqiii/yolov5
-          ref: 88af13e3e25602344aab68d44f9d0b666dacf695
-          path: yolov5
+          submodules: recursive
+      - name: Verify recorded YOLO submodule checkout
+        run: |
+          git submodule update --init --recursive
+          expected_yolo_sha=$(git rev-parse HEAD:yolov5)
+          actual_yolo_sha=$(git -C yolov5 rev-parse HEAD)
+          test "$expected_yolo_sha" = "$actual_yolo_sha"
+          git submodule status --recursive
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
