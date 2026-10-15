@@ -13,7 +13,7 @@ class DetectionVisualizer:
         
         self.result_dir = Path(self.config.result_dir)
         self.frontend = FrontendConfig.from_config(config)
-        self.input_domain = getattr(config, "detector_spec_domain", "power")
+        self.input_domain = getattr(config, "detector_spec_domain", "amplitude")
 
     def _spec_to_u8(self, spec):
         # Whole-image visualization only. Exact per-tile model rasters are

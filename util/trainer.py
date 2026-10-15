@@ -298,7 +298,7 @@ class Trainer:
 
     def _to_uint8_gray_for_vis(self, img):
         return render_gray(np.squeeze(np.asarray(img)), FrontendConfig.from_config(self.config),
-                           getattr(self.config, "detector_spec_domain", "power"))
+                           getattr(self.config, "detector_spec_domain", "amplitude"))
 
     def _save_classifier_input_mask_vis(
         self,

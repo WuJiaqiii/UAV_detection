@@ -1,183 +1,159 @@
-# 统一频谱前端与 YOLO 数据集迁移
+# V2：MAT / IQ 共用 512×750 幅度谱与原生 PNG
 
-## 数据边界
+## 固定契约
 
-两套数据集继续独立组织、解析标签：
-- `data/data_loader.py`：MAT/PNG，标签取自原有文件名，支持单/多目标。
-- `data/iq_dat_loader.py`：类别目录中的交错 int16 I/Q DAT，训练随机裁剪、验证中心裁剪，类别取目录名；没有真实频率标签。
+- 输出频谱：512 行频率 × 750 列时间，50 ms，目标频谱采样率 122.88 MHz。
+- 读取器输出：float32 相对幅度 [0,1]，按 MATLAB 的最大值归一化和 uint16 量化规则统一。
+- PNG：**原生 512×750** 三通道等值灰度，不加坐标轴、颜色条、不 resize、不补边、不切块。
+- 网络输入：由公共函数单独按 --imgsz 缩放/补边；该图不用于人工标注。
+- 行 0 是最低频率，不上下翻转。频率 bin 为 -61.44 到 +61.20 MHz，间隔 0.24 MHz。
+- 时间列间隔 8192/122880000 秒，约 66.67 微秒。不能将 FFT hop 简单设为 8192 替代聚合。
 
-公共科学表示为 [频率, 时间] 的未截断对数功率矩阵。行 0 是最低频率，不做上下翻转。
-IQ 使用 Hann 窗、无隐式补零、无中心 padding、按窗能量归一化的周期图；FFT 分批计算。
-不再减整图最大值，不再截断到 [-100,0]，不再重复做分位数或 log1p 增强。
-PNG 已经是显示域，只保留像素，不宣称可以从 PNG 恢复功率或 SNR。
+## 两套数据集
 
-MAT 必须声明单位：`--mat_spec_domain power|amplitude|db|image`。
-默认 power 不能用于负值 dB 矩阵。未知来源的数据必须先确认单位；不要靠值域猜测。
-已有渲染灰度存于 MAT 时使用 image；hardnegative 图片域 MAT 也使用 image。
-旧 PNG 已经过有损动态范围映射，更新算法需要从原始 MAT/IQ 重新导出。
+MAT/PNG 继续使用 data/data_loader.py，保留原文件名类别、频率、带宽、SNR 解析。
+IQ 继续使用 data/iq_dat_loader.py，按目录取类别，不用伪造频率真值进行端到端评估。
 
-## 背景标准化
+已有 MATLAB MAT 的 summed_submatrices 是归一化后的幅度、uint16 0..65535，默认：
+--mat_spec_domain amplitude。power / db 仍支持，但必须按真实含义声明。
+读取 MAT 不重做 STFT，不重采样，不再直接转换为 dB；先进入公共幅度表示。
+不是 512×750 的科学矩阵会报错，不通过图片 resize 掩盖算法不一致。
+已有 0..255 PNG 可按 image 接入，只有几何验证，不再做背景增强；无法恢复其原始功率。
+YOLO 导出 PNG 的哈希文件名供框标注使用，不应当作主分类数据集的协议文件名标签。
 
-`util/spectrogram_frontend.py` 是唯一的科学处理与栅格生成实现。
+IQ 的原始采样率默认 **100 MHz**，与输出网格采样率分开保存：
+1. 从交错 int16 I/Q DAT 截取 50 ms，即 5,000,000 个复采样点。
+2. scipy.signal.resample_poly 按 768/625、Kaiser(5)、constant padding 重采样到 6,144,000 点。
+3. 周期 Hamming 窗，512 点 FFT、hop=512，不重叠、不留盲区，fftshift。
+4. 每 16 个连续复数 FFT 求和，再取 abs，得到 512×750。
+5. 最大幅度归一化、16 位量化，再转 float32 相对幅度。
+这是所提供 MATLAB 的核心表示，不是功率平均或普通 STFT 后缩放。
+另一支持的真实源采样率 122.88 MHz 会跳过重采样，仍必须读取恰好 50 ms。
+--iq_segment_ms=50、--iq_n_fft=512、--iq_hop_length=512 是固定兼容参数，不接受旧 10/100 ms、hop=256。
 
-- global（默认）：每个检测块减中位数，除以 max(1.4826×MAD, 1 dB)。
-- frequency（实验选项）：先按频率取时间 20% 分位背景并沿频率做 9-bin 中值平滑，再执行稳健标准化。
-- none：不做背景标准化；使用固定 dB 显示范围。必须显式设置例如
-  `--frontend_z_min -100 --frontend_z_max 0`，默认 [-2,8] 是标准化尺度，不是 dB 范围。
+不同 FFT 库可能有浮点/量化末位差异，不承诺与 MATLAB 跨语言逐位相等；
+Python 导出与主干则调用同一实现，要求逐像素相等。
+此处不复现 MATLAB 的随机搬频、混合和加噪，已有 MAT 中这些改变本来就属于不同信号内容。
 
-最终固定 [-2,8] 标准化范围映射 uint8。该统计量不是经标定的 SNR 或 CFAR 虚警概率。
-默认 global 不依赖每个频率一定有静默时间，但高信号占用仍会污染估计。
-frequency 可以补偿有色背景，也可能减掉持续宽带信号。必须检查持续信号和高占用场景。
-固定数值下限、int16 量化和接收机饱和限制了极端增益不变性；归一化不能恢复低 SNR 丢失的信息。
+## 一次公共归一化
 
-旧 `--yolo_input_norm`、`--yolo_input_p_low/high`、`--yolo_db_min/max/eps` 已从主入口移除。
-兼容 Python 转换函数仅转调公共实现，分位数/log_gain 参数会明确报错。
-旧 YOLO 权重不应直接作为新前端的精度结论；需要重新微调与验证。
+公共幅度 -> 20log10 -> 稳健背景标准化 -> 固定范围 uint8 映射。
+对数幅度下限统一为 1/65535（约 -96.33 dB 相对幅度），不再用不同单位的 epsilon。
+不再有双遍 percentile/log1p，也不在 detector 或导出器再次增强。
 
-## 分块和坐标
+默认 global：用参考区中位数和 max(1.4826×MAD,1 dB)。
+默认参考区为中央 ±50 MHz，**对 MAT 和 IQ 使用同一个掩码**。
+100 MHz IQ 的重采样不会创造 ±50 MHz 之外的真实接收带宽，所以不把插值带外低值用于背景估计。
+掩码只选背景统计，不裁掉或抹掉 MAT 外侧频率行；不同采集带宽的物理差异仍然存在。
+frequency 为实验选项，可能削弱持续宽带信号；none 不做背景标准化，需显式设置 dB 范围
+（例如 --frontend_z_min -96.33 --frontend_z_max 0），默认 [-2,8] 是标准化尺度。
+背景标准化不是标定 SNR，也不能恢复量化或相干相消丢失的信息。
 
-默认时间块宽 768 列、重叠 192 列；频率轴完整保留。每块在自身有效区域计算背景统计，
-之后等比例缩放并以 114 补边到 640×640，三个通道内容相同。所有最终输入尺寸是 32 的倍数。
-导出 PNG 就是这个最终 RGB 栅格；运行时调用同一个 render_tiles()，不再从头增强它。
+## MAT：一文件一张图
 
-每块保存精确的横纵缩放比例（考虑整数 resize 尺寸）、补边和原始起始列。
-检测框先映射回完整频谱，裁去 padding，再按类别做全局 IoU NMS。
-后续归组和分类仍使用完整频谱坐标与完整观察时长。
-
-跨边界帧依赖重叠区域获得完整框；长于重叠区/检测块的帧可能仍被切断。
-当前不盲目拼接相邻框，以免合并不同帧；应按最长目标帧校准块宽/重叠。
-`--detector_tile_width 0` 可禁用分块，但极宽谱图整图缩放会损失细节。
-
-IQ 默认 hop 从 1024 改为 256（FFT 512），消除原来窗之间的盲区。
-100 MHz、100 ms 对应约 512×39061，增加计算与内存；训练脚本 batch 从 128 降至 4。
-分块改善检测分辨率，不会减少完整频谱本身的存储开销。按内存继续调整 batch/workers。
-IQ 频率坐标按真实 FFT bin 计算；旧 MAT/PNG 默认保留原来的端点映射，若原数据确为 FFT 网格可选 `--frequency_axis fft`。
-
-## 单文件或少量样本：只导出图片
-
-用 `--split_mode none` 可以先检查归一化效果，不要求两个独立采集组：
+在项目根目录执行，输出目录必须为空、位于源目录之外：
 ```bash
 python scripts/export_iq_yolo_dataset.py \
-  --input_dir /data/test_signal \
-  --output_dir /data/mat_preview \
-  --input_type mat --mat_spec_domain power \
-  --frontend_mode global --split_mode none
+  --input_dir ./data/test_signal \
+  --output_dir ./data/mat_png_v2 \
+  --input_type mat \
+  --mat_spec_domain amplitude \
+  --frontend_mode global \
+  --split_mode none
 ```
+每个 MAT 生成一张 512×750 PNG，位于 images/unassigned。MAT 输入不使用 --iq_* 参数。
+这适合先核对效果或人工标注，不生成训练配置。
+scripts/plot_mat_to_png.py 是同一导出流程的 MAT 默认入口。
 
-图片保存到 `images/unassigned/`，像素重建检查照常使用。不会生成训练/验证集或 data.yaml，
-`--finalize` 会明确拒绝将该预览目录当作正式训练集。
-默认 `--split_mode group` 仍要求至少两个独立组。同一录音的 Figure 切片、SNR 变体可能有多个
-文件，却仍然只属于一个组；不要为绕过限制将它们随机分入训练和验证集。
-日志会显示源文件数与独立组数。
-
-`--input_type mat` 直接读取现有二维频谱，不重新执行 IQ 读取、STFT 或按毫秒切片；
-`--iq_sample_rate`、`--iq_segment_ms`、`--iq_n_fft`、`--iq_hop_length`、
-`--iq_byte_order` 和 `--segments_per_file` 都不会改变 MAT 的时频分辨率。
-请确认 `--mat_spec_domain`：线性功率用 power、幅度用 amplitude、已取对数用 db、
-已有显示灰度用 image。
-
-## 从 IQ 导出用于人工标注的图片
-
-先导出少量独立录音，检查信号和背景，再批量标注。输出目录必须为空且在源目录之外。
-下面的采样率、字节序必须与采集设备一致。
+## IQ：裁剪、重采样、一片段一张图
 
 ```bash
 python scripts/export_iq_yolo_dataset.py \
   --input_dir /data/iq \
-  --output_dir /data/yolo_frontend \
+  --output_dir /data/iq_png_v2 \
   --input_type iq_dat \
   --iq_sample_rate 100000000 \
-  --iq_segment_ms 100 \
-  --iq_n_fft 512 \
-  --iq_hop_length 256 \
-  --iq_byte_order '<' \
+  --iq_segment_ms 50 \
+  --iq_n_fft 512 --iq_hop_length 512 \
   --segments_per_file 1 \
-  --frontend_mode global
+  --frontend_mode global \
+  --split_mode none
 ```
+默认一份录音取一个中心片段；--segments_per_file N 在录音内均匀选 N 段，每段一张图。
+所有切片按源录音分组，不把同一录音的相邻切片分到训练与验证两边。
 
-默认按源文件分组后划分 train/val，再裁剪、切块。1 段时取中心，多段时在文件内均匀取样。
-MAT 的 Figure 切片、文件名 SNR 变体尽可能归同组。对同一次采集拆成多个文件的情况，
-使用 `--groups_json` 指定相同采集会话 ID，避免数据泄漏：
-`{"DeviceA/a.dat": "session-01", "DeviceA/b.dat": "session-01", "DeviceB/c.dat": "session-02"}`。
-该划分不承诺类别分层；小数据集需检查每类是否有足够独立录音。
+## 正式划分与标注
 
-输出：
-- images/train、images/val：无坐标轴、无 colormap、无 JPEG 损失的最终检测输入。
-- labels/train、labels/val：留给人工标注，不生成假的空标签。
-- metadata.jsonl：源路径、采样位置、组 ID、坐标变换、像素 SHA256。
-- frontend_config.json：冻结前端、STFT 和源数据格式配置。
+正式数据用 --split_mode group --val_ratio 0.2，至少两个真正独立来源组。
+--groups_json 可传“相对源路径 -> 采集会话 ID”的 JSON，已有 Figure/SNR 名称会保守分组。
+来源信息不充分时不要仅凭仿真 Task/Sample 编号假定独立原始采集。
+单组预览模式不能通过 --finalize 伪装成正式训练集。
 
-标注工具应导出 YOLO txt，单类 0 = signal_frame。显式确认的纯背景图使用空 txt；
-未审阅图片不要通过创建空 txt 批量标成背景。
-所有图片标注完成后执行：
+输出保留 metadata.jsonl 和 frontend_config.json：
+前者记录源路径、组 ID、IQ 起始采样点/长度、原生形状和 RGB 像素 SHA256；
+后者记录源采样率、完整频谱算法、背景参数和模型尺寸。
+人工标注在 **512×750 PNG 坐标**上进行，单类 0=signal_frame，导出对应 YOLO txt；
+无信号图片需人工确认后保存空 txt，不默认把未标注图当背景。
+全部完成后：
 ```bash
-python scripts/export_iq_yolo_dataset.py \
-  --output_dir /data/yolo_frontend --finalize
+python scripts/export_iq_yolo_dataset.py --output_dir /data/yolo_v2 --finalize
 ```
-该操作验证所有标签存在、类别为 0、框为合法归一化坐标后才创建 data.yaml。
+生成 data.yaml。旧 v1 的方形图片、标注、manifest 不能混用，需重新导出并转换/复核标注。
 
-## MAT/PNG 数据集
-
-```bash
-python scripts/export_iq_yolo_dataset.py \
-  --input_dir /data/mat \
-  --output_dir /data/yolo_mat \
-  --input_type mat --mat_spec_domain power --mat_key summed_submatrices
-```
-
-`scripts/plot_mat_to_png.py` 现为相同导出流程的 MAT 默认入口。
-PNG 源使用 `--input_type png`；只进行必要的分块/几何变换，不再增强像素。
-不同采样带宽的 MAT 和 IQ 不能假设拥有相同的频率物理尺度。
-
-## 一致性检查
+## 像素与模型张量一致性
 
 ```bash
 python scripts/check_yolo_input_equivalence.py \
-  --dataset /data/yolo_frontend --source_root /data/iq --limit 20
+  --dataset ./data/mat_png_v2 --source_root ./data/test_signal --limit 0
 ```
+从原始 MAT 或同一段 IQ 重新读取，调用实际适配器，核对：
+- native PNG 512×750 像素、哈希与主干渲染相等；
+- 网络 resize/letterbox 结果相等；
+- 模型坐标到原生坐标的往返。
 
-该命令从元数据读取完全相同的 IQ 片段/原始矩阵，重新渲染，核对 PNG 像素、SHA256、
-CHW/255 转换及坐标往返。默认不加载模型，会明确报告实际 YOLO 张量检查未运行。
-
-有真实权重和完整 YOLO 子模块时：
+实际本地 YOLO 子模块和权重具备时：
 ```bash
 python scripts/check_yolo_input_equivalence.py \
-  --dataset /data/yolo_frontend --source_root /data/iq --limit 20 \
-  --yolo_weights /models/best.pt --device cpu
+  --dataset /data/yolo_v2 --source_root /data/mat \
+  --yolo_weights /models/new_best.pt --device cpu --limit 20
 ```
+会安装与训练入口相同的内存适配器（不写入 YOLO 子模块），比较真实训练加载器张量与
+框架实际 AutoShape 后端张量，再比较矩阵/PNG 路径预测。缺少权重时明确报告未运行。
+直接调用未经适配的 AutoShape(native_png) 或普通 YOLO train.py 不保证逐位一致：
+它们的 AREA/LINEAR、ceil/round、矩形补边可能不同。
 
-它调用实际 YOLO 训练加载器（augment=False、rect=False）核对 PNG 的 CHW/255 张量，
-并在真实 AutoShape 后端入口挂 hook，核对矩阵路径与 PNG 路径的输入张量完全一致，再比较预测结果。该检查验证预处理一致性，不代表检测精度。
-基础输入不应二次缩放；训练基线关闭 multi-scale、mosaic、mixup、HSV、几何增强、
-翻转及 Albumentations，再检查训练加载器的最终 CHW/255 张量与同一 PNG 对齐。
-检查必须在你实际使用的 YOLO 子模块和依赖环境中运行；无法加载该环境时会报错，不会假装通过。
+## YOLO 训练使用公共入口
 
-## 训练接入
+```bash
+python scripts/train_yolo_frontend.py \
+  --dataset /data/yolo_v2 \
+  --weights /models/yolov5s.pt \
+  --epochs 100 --batch_size 16
+```
+此基线禁用随机增强、multi-scale 和 rect batching，并让实际训练加载器使用公共 resize。
+--imgsz 从 manifest 读取，默认 640；输入网络时才变为 640×640。
+后续有意增加增强时，要区分基础预处理一致性与随机训练增强，重新验证基础契约。
 
-IQ 分类训练使用导出的同类型配置，避免 STFT 或增强参数漂移：
+## 框架训练
+
+MAT 数据：
+main.py --input_type mat --mat_spec_domain amplitude --frontend_config /data/yolo_v2/frontend_config.json ...
+IQ 数据：
 ```bash
 UAV_IQ_DATASET_PATH=/data/iq \
 UAV_YOLO_WEIGHTS=/models/new_best.pt \
-UAV_FRONTEND_CONFIG=/data/yolo_frontend/frontend_config.json \
+UAV_FRONTEND_CONFIG=/data/yolo_v2/frontend_config.json \
 bash run_train_iq.sh
 ```
+MAT manifest 可用于 IQ，因为公共频谱/归一化契约相同；不会把 MAT 导出的无关源采样率覆盖到 IQ。
+--sampling_rate 恒指输出网格 122.88 MHz；--iq_sample_rate 是真实采集速率。
+缓存包含 v2 指纹；随机 IQ 裁剪仍禁用文件级框缓存。旧权重需要重新微调/评估。
 
-MAT/PNG 的原有入口与标签解析保持不变；主入口可用同源数据导出的
-`--frontend_config /data/yolo_mat/frontend_config.json`。
-配置拒绝把 IQ manifest 用到 PNG 数据集，防止把科学域和已渲染域混用。
-现有 IQ infer 入口仍拒绝无频率真值的端到端评估；直接 detector.detect() 可检测，
-但本次不将占位频率伪装成真值，也未新增部署服务。
+## 验证范围
 
-缓存签名包含前端版本、完整渲染参数和数据域；随机 IQ 裁剪继续禁用文件级缓存。
-切换前端后也需重新评估/训练后端分类器，因为检测框几何分布发生变化。
-
-## 验证与实验范围
-
-```bash
 python -m unittest discover -s tests -v
 python scripts/evaluate_frontend.py --output_dir work/frontend-diagnostics
-```
-
-诊断覆盖同一合成场景不同整体增益、不同 active-sample SNR、持续信号案例。
-报告与对照图不等同于真实 IQ 的 mAP、召回率或误检率。
-实际录音、人工框、训练权重未包含在仓库，最终参数应依据留出的真实标注数据选择。
+测试覆盖完整 50 ms 重采样、与独立 MATLAB reshape 公式对照、MAT/IQ 适配器、
+一 MAT 一原生 PNG、像素重建、模型几何及分组标注检查。
+诊断图使用合成频谱单元，不代表 IQ 实测 SNR、真实检测精度或 mAP。
+真实录音、人工框和 YOLO 权重不在仓库内时，不声称实际训练精度或带权重检查已通过。

@@ -13,7 +13,7 @@ from util.detector import YoloV5Detector
 from util.utils import create_logger, set_seed, _path_is_set
 from util.config import Config
 from util.bboxcache import BBoxCache, detector_signature_from_config
-from util.spectrogram_frontend import add_frontend_arguments, FrontendConfig, apply_frontend_manifest
+from util.spectrogram_frontend import add_frontend_arguments, FrontendConfig, apply_frontend_manifest, TARGET_SAMPLE_RATE, validate_iq_settings
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -94,10 +94,10 @@ def get_parser():
     g_data.add_argument("--val_dataset_path", type=str, nargs="+", default=None, help="Optional explicit validation dataset path(s).")
     g_data.add_argument("--input_type", type=str, default="mat", choices=["mat", "png", "iq_dat"])
     g_data.add_argument("--iq_sample_rate", type=int, default=100_000_000, help="Complex samples per second in each .dat recording.")
-    g_data.add_argument("--iq_segment_ms", type=float, default=10.0, help="Length of each IQ crop converted to a spectrogram.")
+    g_data.add_argument("--iq_segment_ms", type=float, default=50.0, help="Length of each IQ crop converted to a spectrogram.")
     g_data.add_argument("--iq_byte_order", choices=["<", ">"], default="<")
     g_data.add_argument("--iq_n_fft", type=int, default=512)
-    g_data.add_argument("--iq_hop_length", type=int, default=256)
+    g_data.add_argument("--iq_hop_length", type=int, default=512)
     g_data.add_argument("--val_ratio", type=float, default=0.2)
     g_data.add_argument("--batch_size", type=int, default=32)
     g_data.add_argument("--num_workers", type=int, default=4)
@@ -321,14 +321,15 @@ def main(args):
     apply_frontend_manifest(args)
     config = Config(args)
     FrontendConfig.from_config(config)  # validate before initializing datasets/models
+    if config.sampling_rate != TARGET_SAMPLE_RATE:
+        raise ValueError("--sampling_rate describes the 122.88 MHz output grid; use --iq_sample_rate for capture rate")
+    config.frequency_axis = "fft"
     config.detector_spec_domain = ("image" if config.input_type == "png" or
                                   (config.input_type == "mat" and config.mat_spec_domain == "image")
-                                  else "db")
+                                  else "amplitude")
     if config.input_type == "iq_dat":
-        config.sampling_rate = config.iq_sample_rate
-        config.frequency_axis = "fft"
-        if not 1 <= config.iq_hop_length <= config.iq_n_fft:
-            raise ValueError("Require iq_hop_length <= iq_n_fft; gapped FFT windows are not supported")
+        validate_iq_settings(config.iq_sample_rate, config.iq_segment_ms,
+                             config.iq_n_fft, config.iq_hop_length)
         iq_paths = (config.dataset_path or []) + (config.train_dataset_path or []) + (config.val_dataset_path or [])
         config.classes = discover_iq_classes(iq_paths)
     config.rank, config.world_size, config.local_rank = rank, world_size, local_rank

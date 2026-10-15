@@ -4,7 +4,7 @@ import glob
 import numpy as np
 import torch
 import cv2
-from util.spectrogram_frontend import to_db, read_mat_matrix
+from util.spectrogram_frontend import read_mat_spectrum, require_shape
 
 from typing import List, Dict, Any, Tuple
 from torch.utils.data import Dataset, DataLoader, Sampler, DistributedSampler, Subset
@@ -224,22 +224,15 @@ class UAVDataset(Dataset):
             x = cv2.imread(fp, cv2.IMREAD_GRAYSCALE)
             if x is None:
                 raise RuntimeError(f"Failed to read png: {fp}")
-            x = np.ascontiguousarray(x)
+            x = np.ascontiguousarray(require_shape(x))
             return torch.from_numpy(x)
 
         if loadmat is None:
             raise ImportError("scipy is required for mat mode. Please install scipy.")
 
         mat_key = getattr(self.config, "mat_key", "summed_submatrices")
-        domain = str(getattr(self.config, "mat_spec_domain", "power"))
-        x = read_mat_matrix(fp, mat_key, domain)
-        if domain == "image":
-            if np.iscomplexobj(x) or not np.isfinite(x).all() or x.min() < 0 or x.max() > 255:
-                raise ValueError("MAT image values must be real and in [0,255]")
-            x = np.ascontiguousarray(x, dtype=np.float32)
-        else:
-            x = to_db(x, domain)
-        return torch.from_numpy(x)
+        domain = str(getattr(self.config, "mat_spec_domain", "amplitude"))
+        return torch.from_numpy(read_mat_spectrum(fp, mat_key, domain))
 
     def __len__(self):
         return len(self.samples)

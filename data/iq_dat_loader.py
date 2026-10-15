@@ -2,7 +2,7 @@
 
 The public functions also work independently of the training pipeline::
 
-    spec, time_ms, freq_mhz = read_iq_spectrogram(path, duration_ms=10)
+    spec, time_ms, freq_mhz = read_iq_spectrogram(path, duration_ms=50)
     # plt.pcolormesh(time_ms, freq_mhz, spec, shading="auto")
 
 Frequency coordinates are offsets from the recording's unknown RF center.
@@ -17,7 +17,9 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, Subset
 
 from data.data_loader import create_dataloader
-from util.spectrogram_frontend import iq_to_db
+from util.spectrogram_frontend import (
+    iq_to_amplitude, validate_iq_settings, TARGET_SAMPLE_RATE, N_FFT, FRAMES_PER_COLUMN,
+)
 
 
 DEFAULT_SAMPLE_RATE = 100_000_000
@@ -93,30 +95,29 @@ def read_iq_dat(path, start_sample=0, num_samples: Optional[int] = None,
     return iq
 
 
-def iq_to_spectrogram(iq, n_fft=512, hop_length=256, db_floor=None):
-    """Canonical absolute log-power matrix; no peak subtraction or clipping."""
+def iq_to_spectrogram(iq, n_fft=512, hop_length=512, db_floor=None,
+                      sample_rate=DEFAULT_SAMPLE_RATE):
+    """50 ms IQ -> canonical 512x750 relative amplitude, not dB."""
     if db_floor is not None:
-        raise ValueError("db_floor clipping was removed; configure the shared render range instead")
-    return iq_to_db(iq, n_fft=n_fft, hop_length=hop_length)
+        raise ValueError("db_floor is not part of the amplitude profile")
+    validate_iq_settings(sample_rate, 50.0, n_fft, hop_length)
+    return iq_to_amplitude(iq, sample_rate)
 
-def read_iq_spectrogram(path, start_ms=0.0, duration_ms=10.0,
+
+def read_iq_spectrogram(path, start_ms=0.0, duration_ms=50.0,
                         sample_rate=DEFAULT_SAMPLE_RATE, n_fft=512,
-                        hop_length=256, db_floor=None, byte_order="<"):
-    """Read a time slice and return (spectrogram, time_ms, freq_offset_mhz).
-
-    The frequency axis is relative to the unknown RF recording center.
-    """
-    sample_rate = int(sample_rate)
-    if sample_rate <= 0 or start_ms < 0 or duration_ms <= 0:
-        raise ValueError("sample_rate and duration_ms must be positive; start_ms >= 0")
-    start_sample = round(float(start_ms) * sample_rate / 1000.0)
-    num_samples = round(float(duration_ms) * sample_rate / 1000.0)
-    iq = read_iq_dat(path, start_sample, num_samples, byte_order=byte_order)
-    spec = iq_to_spectrogram(iq, n_fft=n_fft, hop_length=hop_length,
-                             db_floor=db_floor)
-    time_ms = (start_sample + (int(n_fft) - 1) / 2.0
-               + np.arange(spec.shape[1]) * int(hop_length)) / sample_rate * 1000.0
-    freq_mhz = np.fft.fftshift(np.fft.fftfreq(int(n_fft), d=1.0 / sample_rate)) / 1e6
+                        hop_length=512, db_floor=None, byte_order="<"):
+    """Return amplitude, aggregated-column times and target FFT-bin frequencies."""
+    count = validate_iq_settings(sample_rate, duration_ms, n_fft, hop_length)
+    if start_ms < 0:
+        raise ValueError("start_ms must be nonnegative")
+    start_sample = round(float(start_ms)*sample_rate/1000)
+    iq = read_iq_dat(path, start_sample, count, byte_order=byte_order)
+    spec = iq_to_spectrogram(iq, n_fft, hop_length, db_floor, sample_rate)
+    step = N_FFT * FRAMES_PER_COLUMN
+    time_ms = (start_sample/sample_rate +
+               (np.arange(spec.shape[1])*step + (step-1)/2)/TARGET_SAMPLE_RATE)*1000
+    freq_mhz = np.fft.fftshift(np.fft.fftfreq(N_FFT, 1/TARGET_SAMPLE_RATE))/1e6
     return spec, time_ms, freq_mhz
 
 
@@ -134,13 +135,12 @@ class RawIQDataset(Dataset):
         self.config = config
         self.logger = logger
         self.split_name = str(split_name).lower()
-        self.sample_rate = int(getattr(config, "sampling_rate", DEFAULT_SAMPLE_RATE))
+        self.sample_rate = int(getattr(config, "iq_sample_rate", DEFAULT_SAMPLE_RATE))
         self.n_fft = int(getattr(config, "iq_n_fft", 512))
-        self.hop_length = int(getattr(config, "iq_hop_length", 256))
-        self.segment_ms = float(getattr(config, "iq_segment_ms", 10.0))
-        self.segment_samples = round(self.sample_rate * self.segment_ms / 1000.0)
-        if self.segment_samples < self.n_fft:
-            raise ValueError("iq_segment_ms must contain at least iq_n_fft samples")
+        self.hop_length = int(getattr(config, "iq_hop_length", 512))
+        self.segment_ms = float(getattr(config, "iq_segment_ms", 50.0))
+        self.segment_samples = validate_iq_settings(
+            self.sample_rate, self.segment_ms, self.n_fft, self.hop_length)
         self.byte_order = str(getattr(config, "iq_byte_order", "<"))
         self.random_crop = self.split_name == "train"
         paths = dataset_path if dataset_path is not None else getattr(config, "dataset_path", None)
@@ -179,7 +179,8 @@ class RawIQDataset(Dataset):
         start = int(np.random.randint(0, remaining + 1)) if self.random_crop else remaining // 2
         iq = read_iq_dat(sample["fp"], start_sample=start, num_samples=self.segment_samples,
                          byte_order=self.byte_order)
-        spec = iq_to_spectrogram(iq, n_fft=self.n_fft, hop_length=self.hop_length)
+        spec = iq_to_spectrogram(iq, n_fft=self.n_fft, hop_length=self.hop_length,
+                                 sample_rate=self.sample_rate)
         target = {"label": sample["label"], "class_name": sample["class_name"],
                   "center_freq": 0.0, "bandwidth": self.sample_rate / 1e6,
                   "has_frequency_label": False}

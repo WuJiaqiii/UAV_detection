@@ -65,7 +65,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from util.detector import YoloV5Detector
 from util.preprocess import SignalPreprocessor
-from util.spectrogram_frontend import add_frontend_arguments, to_db
+from util.spectrogram_frontend import add_frontend_arguments, canonical_amplitude
 
 try:
     from util.bboxcache import BBoxCache, detector_signature_from_config
@@ -455,7 +455,7 @@ def build_config(args) -> SimpleNamespace:
 
     cfg = SimpleNamespace(**vars(args))
     cfg.classes = classes
-    cfg.detector_spec_domain = "image" if args.mat_spec_domain == "image" else "db"
+    cfg.detector_spec_domain = "image" if args.mat_spec_domain == "image" else "amplitude"
 
     # Current detector/main compatibility
     if args.yolo_classes:
@@ -507,7 +507,7 @@ def process_input_dir(
 
             source_spec = load_mat_array(fp, cfg.mat_key)
             spec = (source_spec if cfg.mat_spec_domain == "image"
-                    else to_db(source_spec, cfg.mat_spec_domain))
+                    else canonical_amplitude(source_spec, cfg.mat_spec_domain))
 
             yolo_boxes = detect_with_optional_cache(
                 detector=detector,

@@ -22,8 +22,8 @@ def detector_signature_from_config(config) -> str:
         "max_det": config.yolo_max_det,
         "frontend": FrontendConfig.from_config(config).fingerprint(),
         "frontend_version": FRONTEND_VERSION,
-        "input_domain": getattr(config, "detector_spec_domain", "power"),
-        "mat_domain": getattr(config, "mat_spec_domain", "power"),
+        "input_domain": getattr(config, "detector_spec_domain", "amplitude"),
+        "mat_domain": getattr(config, "mat_spec_domain", "amplitude"),
     }
     return hashlib.sha256(json.dumps(settings, sort_keys=True).encode("utf-8")).hexdigest()
 

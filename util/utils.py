@@ -155,7 +155,7 @@ def save_instance_csv(result_dir, split_name, epoch, instance_rows):
 
 def spectrogram_to_yolo_float(data, db_min=None, db_max=None, eps=None,
                               p_low=None, p_high=None, log_gain=None,
-                              *, input_domain="power", frontend_config=None):
+                              *, input_domain="amplitude", frontend_config=None):
     """Compatibility entry point; scientific preprocessing has one implementation.
 
     Old percentile/log arguments are rejected rather than silently applied twice.
@@ -163,7 +163,7 @@ def spectrogram_to_yolo_float(data, db_min=None, db_max=None, eps=None,
     """
     import warnings
     from dataclasses import replace
-    from util.spectrogram_frontend import FrontendConfig, render_gray
+    from util.spectrogram_frontend import FrontendConfig, render_gray, canonical_amplitude
     if any(v is not None for v in (p_low, p_high, log_gain)):
         raise ValueError("Percentile/log enhancement was removed; use FrontendConfig")
     cfg = frontend_config or FrontendConfig()
@@ -173,7 +173,8 @@ def spectrogram_to_yolo_float(data, db_min=None, db_max=None, eps=None,
         if cfg.mode == "none":
             cfg = replace(cfg, z_min=cfg.z_min if db_min is None else db_min,
                           z_max=cfg.z_max if db_max is None else db_max)
-    return render_gray(data, cfg, input_domain).astype(np.float32) / 255.0
+    source = data if input_domain == "image" else canonical_amplitude(data, input_domain)
+    return render_gray(source, cfg, "image" if input_domain == "image" else "amplitude").astype(np.float32) / 255.0
 
 
 def spectrogram_to_yolo_uint8(data, db_min=None, db_max=None, eps=None,

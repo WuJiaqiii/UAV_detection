@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Export deterministic, lossless detector inputs from IQ, MAT or grayscale PNG.
 
+Each MAT becomes one native 512x750 PNG; each selected 50 ms IQ segment also
+becomes one PNG after rational resampling and coherent FFT aggregation.
 No labels are invented. Run --finalize after manual annotation to validate every
 label file and write data.yaml. Split original recordings BEFORE slicing.
 """
@@ -21,7 +23,8 @@ import numpy as np
 from scipy.io import loadmat
 from util.spectrogram_frontend import (
     FRONTEND_VERSION, FrontendConfig, add_frontend_arguments,
-    apply_frontend_manifest, iq_to_db, render_tiles, read_mat_matrix,
+    apply_frontend_manifest, iq_to_amplitude, render_rgb, read_mat_spectrum,
+    validate_iq_settings, spectrogram_contract,
 )
 
 
@@ -31,11 +34,11 @@ def parser():
     p.add_argument("--output_dir", type=Path, required=True)
     p.add_argument("--input_type", choices=["iq_dat", "mat", "png"], default="iq_dat")
     p.add_argument("--iq_sample_rate", type=int, default=100_000_000)
-    p.add_argument("--iq_segment_ms", type=float, default=100.0)
+    p.add_argument("--iq_segment_ms", type=float, default=50.0)
     p.add_argument("--iq_n_fft", type=int, default=512)
-    p.add_argument("--iq_hop_length", type=int, default=256)
+    p.add_argument("--iq_hop_length", type=int, default=512)
     p.add_argument("--iq_byte_order", choices=["<", ">"], default="<")
-    p.add_argument("--segments_per_file", type=int, default=3)
+    p.add_argument("--segments_per_file", type=int, default=1)
     p.add_argument("--mat_key", default="summed_submatrices")
     p.add_argument("--split_mode", choices=["group", "none"], default="group",
                    help="group: split independent source groups; none: export unassigned annotation/preview images")
@@ -68,7 +71,8 @@ def source_matrices(path, args):
         size = path.stat().st_size
         if size % 4:
             raise ValueError("Incomplete int16 IQ pair: " + str(path))
-        count = round(args.iq_sample_rate * args.iq_segment_ms / 1000)
+        count = validate_iq_settings(args.iq_sample_rate, args.iq_segment_ms,
+                                     args.iq_n_fft, args.iq_hop_length)
         available = size // 4
         if count < args.iq_n_fft or available < count:
             raise ValueError("Recording shorter than configured segment: " + str(path))
@@ -77,12 +81,13 @@ def source_matrices(path, args):
                       0, available-count, args.segments_per_file)).astype(np.int64).tolist())))
         for start in starts:
             iq = read_iq_dat(path, start, count, byte_order=args.iq_byte_order)
-            yield iq_to_db(iq, args.iq_n_fft, args.iq_hop_length), "db", {
+            yield iq_to_amplitude(iq, args.iq_sample_rate), "amplitude", {
                 "start_sample": start, "num_samples": count,
                 "byte_order": args.iq_byte_order,
             }
     elif args.input_type == "mat":
-        yield read_mat_matrix(path, args.mat_key, args.mat_spec_domain), args.mat_spec_domain, {}
+        domain = "image" if args.mat_spec_domain == "image" else "amplitude"
+        yield read_mat_spectrum(path, args.mat_key, args.mat_spec_domain), domain, {}
     else:
         image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if image is None:
@@ -176,6 +181,7 @@ def export(args):
     source["segments_per_file"] = args.segments_per_file
     source["frequency_axis"] = "fft" if args.input_type == "iq_dat" else args.frequency_axis
     manifest = {"version": FRONTEND_VERSION, "frontend": asdict(cfg),
+                "spectrogram": spectrogram_contract(),
                 "source": source, "seed": args.seed, "split_mode": args.split_mode}
     (output / "frontend_config.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     with (output / "metadata.jsonl").open("w", encoding="utf-8") as metadata:
@@ -184,19 +190,19 @@ def export(args):
             split = ("unassigned" if args.split_mode == "none" else
                      ("val" if group_ids[path] in val_groups else "train"))
             for matrix, domain, segment in source_matrices(path, args):
-                for tile in render_tiles(matrix, cfg, domain):
-                    identity = json.dumps([rel, segment, tile.x0, cfg.fingerprint()], sort_keys=True)
-                    name = hashlib.sha256(identity.encode()).hexdigest()[:24] + ".png"
-                    image_rel = (Path("images") / split / name).as_posix()
-                    label_rel = (Path("labels") / split / Path(name).with_suffix(".txt")).as_posix()
-                    if not cv2.imwrite(str(output / image_rel), tile.image[:, :, ::-1]):
-                        raise IOError("PNG write failed: " + image_rel)
-                    row = {"image": image_rel, "label": label_rel, "split": split,
-                           "source": rel, "group": group_ids[path], "segment": segment,
-                           "domain": domain, "matrix_shape": list(matrix.shape),
-                           "transform": tile.metadata(), "frontend": cfg.fingerprint(),
-                           "pixel_sha256": hashlib.sha256(tile.image.tobytes()).hexdigest()}
-                    metadata.write(json.dumps(row) + "\n")
+                rgb = render_rgb(matrix, cfg, domain)
+                identity = json.dumps([rel, segment, cfg.fingerprint()], sort_keys=True)
+                name = hashlib.sha256(identity.encode()).hexdigest()[:24] + ".png"
+                image_rel = (Path("images") / split / name).as_posix()
+                label_rel = (Path("labels") / split / Path(name).with_suffix(".txt")).as_posix()
+                if not cv2.imwrite(str(output / image_rel), rgb[:, :, ::-1]):
+                    raise IOError("PNG write failed: " + image_rel)
+                row = {"image": image_rel, "label": label_rel, "split": split,
+                       "source": rel, "group": group_ids[path], "segment": segment,
+                       "domain": domain, "matrix_shape": list(matrix.shape),
+                       "png_shape": list(rgb.shape[:2]), "frontend": cfg.fingerprint(),
+                       "pixel_sha256": hashlib.sha256(rgb.tobytes()).hexdigest()}
+                metadata.write(json.dumps(row) + "\n")
     if args.split_mode == "none":
         print("Preview/annotation images exported under images/unassigned; no training split was created.")
     else:
