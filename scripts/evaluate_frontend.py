@@ -56,10 +56,16 @@ def diagnostics(output):
     persistent = (noise + np.exp(2j*np.pi*tone_bin*time/n_fft)).astype(np.complex64)
     persistent_db = iq_to_db(persistent, n_fft, hop)
     occupancy = {}
+    wide_tone = sum(np.exp(2j*np.pi*k*time/n_fft) for k in range(8, 29)) / np.sqrt(21)
+    wide_db = iq_to_db((noise + wide_tone).astype(np.complex64), n_fft, hop)
     for mode in ("global", "frequency"):
-        z = background_standardize(persistent_db, FrontendConfig(mode=mode))
+        narrow_z = background_standardize(persistent_db, FrontendConfig(mode=mode))
+        wide_z = background_standardize(wide_db, FrontendConfig(mode=mode))
         row = n_fft//2 + tone_bin
-        occupancy[mode] = float(z[row-1:row+2].mean())
+        occupancy[mode] = {
+            "narrowband": float(narrow_z[row-1:row+2].mean()),
+            "wideband": float(wide_z[n_fft//2+10:n_fft//2+26].mean()),
+        }
     result = {"synthetic_only": True, "gain_test": "passed", "rows": report,
               "persistent_signal_mean_z": occupancy,
               "interpretation": "SNR is at active IQ samples; STFT processing gain differs. "

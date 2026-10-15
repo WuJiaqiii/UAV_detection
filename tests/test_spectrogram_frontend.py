@@ -143,6 +143,11 @@ class DatasetIntegrationTests(unittest.TestCase):
             savemat(root / (name+".mat"), {"summed_submatrices": to_db(raw, "power")})
             x, _, _, _ = UAVDataset(cfg, self.logger())[0]
             np.testing.assert_array_equal(x.numpy(), to_db(raw, "power"))
+            savemat(root / (name+".mat"), {"summed_submatrices": to_db(raw, "power"),
+                                           "spectrogram_domain": np.array("db")})
+            cfg.mat_spec_domain = "power"
+            with self.assertRaises(RuntimeError):
+                UAVDataset(cfg, self.logger())[0]
 
     def test_iq_class_folder_dataset_byte_order_crop_and_units(self):
         from data.iq_dat_loader import RawIQDataset, read_iq_dat
