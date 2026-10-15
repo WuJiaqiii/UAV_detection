@@ -19,7 +19,9 @@ IQ 继续使用 data/iq_dat_loader.py，按目录取类别，不用伪造频率�
 读取 MAT 不重做 STFT，不重采样，不再直接转换为 dB；先进入公共幅度表示。
 不是 512×750 的科学矩阵会报错，不通过图片 resize 掩盖算法不一致。
 已有 0..255 PNG 可按 image 接入，只有几何验证，不再做背景增强；无法恢复其原始功率。
-YOLO 导出 PNG 的哈希文件名供框标注使用，不应当作主分类数据集的协议文件名标签。
+MAT 导出的 PNG 保留原文件名，只将扩展名改为 .png；同时保留相对于输入目录的子目录，避免不同目录下同名文件互相覆盖。
+对应 YOLO 标签保留相同相对路径，扩展名为 .txt。若源文件仅扩展名或大小写不同并导致目标路径冲突，会在写入前报错。
+IQ 和 PNG 输入继续使用原有哈希命名规则。导出图的处理参数与来源以 frontend_config.json 和 metadata.jsonl 为准。
 
 IQ 的原始采样率默认 **100 MHz**，与输出网格采样率分开保存：
 1. 从交错 int16 I/Q DAT 截取 50 ms，即 5,000,000 个复采样点。
@@ -61,7 +63,9 @@ python scripts/export_iq_yolo_dataset.py \
   --frontend_mode global \
   --split_mode none
 ```
-每个 MAT 生成一张 512×750 PNG，位于 images/unassigned。MAT 输入不使用 --iq_* 参数。
+每个 MAT 生成一张 512×750 PNG，位于 images/unassigned，文件名保留不变（仅更换扩展名）。
+例如输入 DeviceA/example.mat，输出 images/unassigned/DeviceA/example.png，标签对应 labels/unassigned/DeviceA/example.txt。
+正式划分时将 unassigned 替换为 train 或 val，其余命名规则相同。MAT 输入不使用 --iq_* 参数。
 这适合先核对效果或人工标注，不生成训练配置。
 scripts/plot_mat_to_png.py 是同一导出流程的 MAT 默认入口。
 

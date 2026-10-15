@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import tempfile
@@ -225,19 +226,48 @@ class DatasetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root, out = Path(temp)/"source", Path(temp)/"output"
             root.mkdir()
-            for index in range(2):
-                savemat(root/f"record-SNR-{index}-Figure-{index+1}.mat",
-                        {"summed_submatrices": np.rint(amplitude_fixture()*65535).astype(np.uint16)})
+            sources = [
+                "record-SNR-0-Figure-1.mat",
+                "DeviceA/record-SNR-1-Figure-2.mat",
+                "DeviceB/record-SNR-1-Figure-2.mat",
+                "DeviceA/设备 [0,1,1000,2]-v1.2.MAT",
+            ]
+            for source in sources:
+                path = root/source
+                path.parent.mkdir(parents=True, exist_ok=True)
+                savemat(path, {"summed_submatrices":
+                        np.rint(amplitude_fixture()*65535).astype(np.uint16)})
             args = parser().parse_args(["--input_dir",str(root),"--output_dir",str(out),
                                        "--input_type","mat","--split_mode","none"])
             export(args)
             rows = [json.loads(line) for line in (out/"metadata.jsonl").read_text().splitlines()]
-            self.assertEqual(len(rows), 2)
+            self.assertEqual(len(rows), len(sources))
+            self.assertEqual({row["source"] for row in rows}, set(sources))
+            for row in rows:
+                name = Path(row["source"]).with_suffix(".png")
+                self.assertEqual(row["image"], (Path("images/unassigned")/name).as_posix())
+                self.assertEqual(row["label"],
+                                 (Path("labels/unassigned")/name.with_suffix(".txt")).as_posix())
+                self.assertTrue((out/row["image"]).is_file())
+                self.assertTrue((out/row["label"]).parent.is_dir())
             self.assertTrue(all(row["png_shape"] == [512,750] for row in rows))
             self.assertTrue(check(out, root, limit=0)["native_pixels_equal"])
             self.assertFalse((out/"data.yaml").exists())
             with self.assertRaisesRegex(ValueError, "Unassigned"):
                 finalize(out)
+
+    def test_mat_name_collision_rejected_before_creating_output(self):
+        from scripts.export_iq_yolo_dataset import parser, export
+        with tempfile.TemporaryDirectory() as temp:
+            root, out = Path(temp)/"source", Path(temp)/"output"
+            root.mkdir()
+            for name in ("record.mat", "record.MAT"):
+                savemat(root/name, {"summed_submatrices": amplitude_fixture()})
+            args = parser().parse_args(["--input_dir",str(root),"--output_dir",str(out),
+                                       "--input_type","mat","--split_mode","none"])
+            with self.assertRaisesRegex(ValueError, "filename collision"):
+                export(args)
+            self.assertFalse(out.exists())
 
     def test_iq_export_matches_runtime_adapter_without_padding_png(self):
         from scripts.export_iq_yolo_dataset import parser, export
@@ -253,6 +283,10 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["segment"]["num_samples"], 5_000_000)
             self.assertEqual(rows[0]["segment"]["start_sample"], 100)
+            identity = json.dumps([rows[0]["source"], rows[0]["segment"],
+                                   FrontendConfig().fingerprint()], sort_keys=True)
+            expected_name = hashlib.sha256(identity.encode()).hexdigest()[:24]+".png"
+            self.assertEqual(Path(rows[0]["image"]).name, expected_name)
             result = check(out, root, limit=0)
             self.assertTrue(result["native_pixels_equal"])
             self.assertEqual(result["native_png_shape"], [512,750])

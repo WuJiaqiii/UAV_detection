@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Export deterministic, lossless detector inputs from IQ, MAT or grayscale PNG.
 
-Each MAT becomes one native 512x750 PNG; each selected 50 ms IQ segment also
+Each MAT keeps its source basename and relative directory, with a .png suffix,
+and becomes one native 512x750 PNG; each selected 50 ms IQ segment also
 becomes one PNG after rational resampling and coherent FFT aggregation.
 No labels are invented. Run --finalize after manual annotation to validate every
 label file and write data.yaml. Split original recordings BEFORE slicing.
@@ -170,6 +171,20 @@ def export(args):
     else:
         val_groups = set()
         splits = ("unassigned",)
+    if args.input_type == "mat":
+        # Preserve source names and directories instead of flattening collisions.
+        # Reject ambiguous extension/case variants before creating any output.
+        destinations = {}
+        for path in paths:
+            name = path.relative_to(root).with_suffix(".png").as_posix()
+            key = name.casefold()
+            if key in destinations:
+                raise ValueError(
+                    "MAT output filename collision: "
+                    + str(destinations[key].relative_to(root)) + " and "
+                    + str(path.relative_to(root)) + " -> " + name
+                )
+            destinations[key] = path
     for split in splits:
         (output / "images" / split).mkdir(parents=True)
         (output / "labels" / split).mkdir(parents=True)
@@ -191,10 +206,15 @@ def export(args):
                      ("val" if group_ids[path] in val_groups else "train"))
             for matrix, domain, segment in source_matrices(path, args):
                 rgb = render_rgb(matrix, cfg, domain)
-                identity = json.dumps([rel, segment, cfg.fingerprint()], sort_keys=True)
-                name = hashlib.sha256(identity.encode()).hexdigest()[:24] + ".png"
+                if args.input_type == "mat":
+                    name = path.relative_to(root).with_suffix(".png")
+                else:
+                    identity = json.dumps([rel, segment, cfg.fingerprint()], sort_keys=True)
+                    name = Path(hashlib.sha256(identity.encode()).hexdigest()[:24] + ".png")
                 image_rel = (Path("images") / split / name).as_posix()
                 label_rel = (Path("labels") / split / Path(name).with_suffix(".txt")).as_posix()
+                (output / image_rel).parent.mkdir(parents=True, exist_ok=True)
+                (output / label_rel).parent.mkdir(parents=True, exist_ok=True)
                 if not cv2.imwrite(str(output / image_rel), rgb[:, :, ::-1]):
                     raise IOError("PNG write failed: " + image_rel)
                 row = {"image": image_rel, "label": label_rel, "split": split,
