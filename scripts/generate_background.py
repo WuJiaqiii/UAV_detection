@@ -65,9 +65,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from util.detector import YoloV5Detector
 from util.preprocess import SignalPreprocessor
+from util.spectrogram_frontend import add_frontend_arguments, canonical_amplitude
 
 try:
-    from util.bboxcache import BBoxCache
+    from util.bboxcache import BBoxCache, detector_signature_from_config
 except Exception:
     BBoxCache = None
 
@@ -231,6 +232,7 @@ def group_to_mat_fullsize(
     boxes,
     mode: str = "raw_in_boxes",
     mask_value: float = 1.0,
+    outside_value: float = 0.0,
 ) -> np.ndarray:
     """
     Convert one group to a full-size matrix.
@@ -252,7 +254,7 @@ def group_to_mat_fullsize(
     if mode not in {"raw_in_boxes", "mask"}:
         raise ValueError(f"Unsupported --output_mat_mode={mode}")
 
-    out = np.zeros_like(spec, dtype=np.float32)
+    out = np.full_like(spec, outside_value, dtype=np.float32)
 
     for b in boxes:
         x1, y1, x2, y2 = [int(v) for v in b]
@@ -332,11 +334,13 @@ def save_background_mat(
     bg_bandwidth: float,
     group_idx: int,
     boxes,
+    spectrogram_domain: str = "power",
 ):
     boxes_arr = np.asarray(boxes, dtype=np.int32).reshape(-1, 4)
 
     payload = {
         mat_key: np.asarray(group_mat, dtype=np.float32),
+        "spectrogram_domain": np.array(spectrogram_domain),
 
         # Label metadata for generated sample
         "class_name": np.array("Background"),
@@ -451,6 +455,7 @@ def build_config(args) -> SimpleNamespace:
 
     cfg = SimpleNamespace(**vars(args))
     cfg.classes = classes
+    cfg.detector_spec_domain = "image" if args.mat_spec_domain == "image" else "amplitude"
 
     # Current detector/main compatibility
     if args.yolo_classes:
@@ -500,7 +505,9 @@ def process_input_dir(
                 logger.warning(f"[SkipParse] {os.path.basename(fp)}")
                 continue
 
-            spec = load_mat_array(fp, cfg.mat_key)
+            source_spec = load_mat_array(fp, cfg.mat_key)
+            spec = (source_spec if cfg.mat_spec_domain == "image"
+                    else canonical_amplitude(source_spec, cfg.mat_spec_domain))
 
             yolo_boxes = detect_with_optional_cache(
                 detector=detector,
@@ -550,10 +557,11 @@ def process_input_dir(
                 bg_bandwidth = max(bg_bandwidth, 1e-6)
 
                 group_mat = group_to_mat_fullsize(
-                    spec=spec,
+                    spec=source_spec,
                     boxes=boxes,
                     mode=cfg.output_mat_mode,
                     mask_value=cfg.mask_value,
+                    outside_value=float(np.min(source_spec)) if cfg.mat_spec_domain == "db" else 0.0,
                 )
 
                 out_name = make_background_filename(
@@ -579,6 +587,7 @@ def process_input_dir(
                     bg_bandwidth=bg_bandwidth,
                     group_idx=int(gi),
                     boxes=boxes,
+                    spectrogram_domain="image" if cfg.output_mat_mode == "mask" else cfg.mat_spec_domain,
                 )
 
                 n_bg_saved += 1
@@ -619,6 +628,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Generate Background-only group-level mat samples."
     )
+    add_frontend_arguments(parser)
 
     # I/O
     parser.add_argument(
@@ -787,6 +797,7 @@ def main():
             dataset_root=dataset_root,
             mode=cfg.bbox_cache_mode,
             mem_max=cfg.bbox_cache_mem_max,
+            detector_signature=detector_signature_from_config(cfg),
             logger=logger,
         )
         logger.info(

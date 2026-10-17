@@ -14,6 +14,7 @@ except Exception:
     linear_sum_assignment = None
 
 from util.vis import DetectionVisualizer
+from util.spectrogram_frontend import pixel_y_to_freq_mhz, FrontendConfig, render_gray
 from util.checkpoint import save_training_checkpoint, load_training_checkpoint
 from util.utils import _make_pbar, AverageMeter, save_confusion_matrix, save_eval_summary, save_instance_csv
 
@@ -190,11 +191,8 @@ class Trainer:
         return min(candidates, key=lambda item: item[:2])[2] if candidates else None
 
     def _pixel_y_to_freq_mhz(self, y, img_h):
-        if img_h <= 1:
-            return 0.0
-        rel = float(y) / float(img_h - 1) - 0.5
-        sr = float(getattr(self.config, "sampling_rate", 122.88e6))
-        return rel * sr / 1e6
+        return pixel_y_to_freq_mhz(y, img_h, self.config.sampling_rate,
+                                   getattr(self.config, "frequency_axis", "legacy"))
 
     def _group_center_freq_mhz(self, group, spec_shape):
         if isinstance(group, dict) and "center_freq" in group:
@@ -298,35 +296,9 @@ class Trainer:
         stem = re.sub(r"_+", "_", stem).strip("_")
         return stem if stem else "sample"
 
-    @staticmethod
-    def _to_uint8_gray_for_vis(img):
-        """
-        Robustly convert spectrogram-like data into uint8 grayscale for overlay.
-        This is only for visualization and does not affect model input.
-        """
-        arr = np.asarray(img)
-
-        if arr.ndim == 3:
-            arr = np.squeeze(arr)
-            if arr.ndim == 3:
-                arr = arr[0]
-
-        arr = arr.astype(np.float32)
-        finite = np.isfinite(arr)
-
-        if not finite.any():
-            return np.zeros(arr.shape, dtype=np.uint8)
-
-        valid = arr[finite]
-        lo = float(np.percentile(valid, 1.0))
-        hi = float(np.percentile(valid, 99.5))
-
-        if hi <= lo:
-            return np.zeros(arr.shape, dtype=np.uint8)
-
-        out = (np.clip(arr, lo, hi) - lo) / (hi - lo)
-        out = np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
-        return np.clip(out * 255.0, 0, 255).astype(np.uint8)
+    def _to_uint8_gray_for_vis(self, img):
+        return render_gray(np.squeeze(np.asarray(img)), FrontendConfig.from_config(self.config),
+                           getattr(self.config, "detector_spec_domain", "amplitude"))
 
     def _save_classifier_input_mask_vis(
         self,

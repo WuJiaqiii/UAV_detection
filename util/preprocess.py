@@ -1,5 +1,6 @@
 import numpy as np
 from sklearn.cluster import DBSCAN
+from util.spectrogram_frontend import pixel_y_to_freq_mhz, pixel_height_to_bandwidth_mhz
 
 
 class SignalPreprocessor:
@@ -265,15 +266,12 @@ class SignalPreprocessor:
     # frequency mapping
     # ------------------------------------------------------------------
     def _pixel_y_to_freq_mhz(self, y, img_h):
-        if img_h <= 1:
-            return 0.0
-        rel = float(y) / float(img_h - 1) - 0.5
-        return rel * float(self.config.sampling_rate) / 1e6
+        return pixel_y_to_freq_mhz(y, img_h, self.config.sampling_rate,
+                                   getattr(self.config, "frequency_axis", "legacy"))
 
     def _pixel_bandwidth_to_mhz(self, height_px, img_h):
-        if img_h <= 1:
-            return 0.0
-        return float(abs(height_px) * (self.config.sampling_rate / float(img_h - 1)) / 1e6)
+        return pixel_height_to_bandwidth_mhz(height_px, img_h, self.config.sampling_rate,
+                                             getattr(self.config, "frequency_axis", "legacy"))
 
     # ------------------------------------------------------------------
     # cluster/group construction
