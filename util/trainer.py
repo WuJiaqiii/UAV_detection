@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import re
 from pathlib import Path
+from PIL import Image
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -72,6 +73,10 @@ class Trainer:
             raise ValueError("--val_detect_vis_ratio must be >= 0")
         if self.config.val_detect_vis_ratio > 1:
             raise ValueError("--val_detect_vis_ratio must be <= 1")
+        if int(getattr(self.config, "val_detect_vis_min_per_class", 1)) < 0:
+            raise ValueError("--val_detect_vis_min_per_class must be >= 0")
+        if getattr(self.config, "clear_val_detect_vis_each_epoch", False):
+            self.logger.warning("[Val Vis] clear_val_detect_vis_each_epoch is ignored; epoch directories are retained")
         if self.config.infer_detect_vis_ratio < 0:
             raise ValueError("--infer_detect_vis_ratio must be >= 0")
         if self.config.infer_detect_vis_ratio > 1:
@@ -309,6 +314,8 @@ class Trainer:
         sample_idx,
         group_idx,
         split_name="infer",
+        epoch=None,
+        class_name=None,
     ):
         """
         Save the binary image immediately before the classifier.
@@ -324,14 +331,14 @@ class Trainer:
             *_overlay.png
                 Spectrogram with mask region highlighted for PPT explanation.
         """
-        root = Path(self.config.result_dir) / "classifier_input_masks" / str(split_name)
-        root.mkdir(parents=True, exist_ok=True)
+        root = self.visualizer.output_dir('classifier_input_masks', split_name, epoch, class_name)
 
-        stem = self._safe_stem_for_vis(fp)
+        stem = (self.visualizer.sample_prefix(fp, sample_idx)
+                if epoch is not None or class_name is not None else self._safe_stem_for_vis(fp))
         prefix = f"{stem}_sample-{int(sample_idx):04d}_group-{int(group_idx):03d}"
 
         full_mask = (np.asarray(mask) > 0).astype(np.uint8) * 255
-        cv2.imwrite(str(root / f"{prefix}_binary_full.png"), full_mask)
+        Image.fromarray(full_mask).save(root / f"{prefix}_binary_full.png")
 
         if torch.is_tensor(x_tensor):
             x_np = x_tensor.detach().cpu().numpy()
@@ -340,7 +347,7 @@ class Trainer:
 
         x_np = np.squeeze(x_np)
         input_mask = (x_np > 0.5).astype(np.uint8) * 255
-        cv2.imwrite(str(root / f"{prefix}_binary_input.png"), input_mask)
+        Image.fromarray(input_mask).save(root / f"{prefix}_binary_input.png")
 
         try:
             spec_u8 = self._to_uint8_gray_for_vis(spec)
@@ -353,7 +360,7 @@ class Trainer:
                 + 0.55 * np.array([0, 0, 255], dtype=np.float32)
             ).astype(np.uint8)
 
-            cv2.imwrite(str(root / f"{prefix}_overlay.png"), overlay)
+            Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)).save(root / f"{prefix}_overlay.png")
         except Exception as error:
             if hasattr(self, "logger") and self.logger is not None:
                 self.logger.warning(
@@ -447,6 +454,7 @@ class Trainer:
     # ------------------------------------------------------------------
     def _build_single_instances(self, inputs, targets_list, sample_fps=None,
         save_detect_result=False, max_save_images=8, split_name="val", save_fp_set=None,
+        epoch=None,
     ):
         """
         Used by single-signal train/val.
@@ -495,11 +503,27 @@ class Trainer:
                 "unmatched_groups": list(range(len(groups))),
             }
 
+            final_boxes = np.asarray(
+                main_group.get("boxes", []) if main_group is not None else [],
+                dtype=np.int32,
+            ).reshape(-1, 4)
+            should_save = bool(save_detect_result) and saved_count < int(max_save_images)
+            if save_fp_set is not None:
+                should_save = should_save and (str(fp) in save_fp_set)
+            if should_save:
+                self.visualizer.save_detect_result(
+                    spec=spec, yolo_boxes=yolo_boxes, groups=groups,
+                    matched_boxes=final_boxes.tolist(), fp=fp,
+                    sample_idx=i, split_name=split_name, epoch=epoch,
+                    class_name=self._label_name(label),
+                    diagnostics=getattr(getattr(self, "preprocessor", None), "last_diagnostics", None),
+                )
+                saved_count += 1
+
             if main_group is None:
                 image_infos.append(image_info)
                 continue
 
-            final_boxes = np.asarray(main_group.get("boxes", []), dtype=np.int32).reshape(-1, 4)
             if len(final_boxes) == 0:
                 image_infos.append(image_info)
                 continue
@@ -521,20 +545,7 @@ class Trainer:
                 "target_name": self._label_name(label),
             })
 
-            should_save = bool(save_detect_result) and saved_count < int(max_save_images)
-            if save_fp_set is not None:
-                should_save = should_save and (str(fp) in save_fp_set)
-
             if should_save:
-                self.visualizer.save_detect_result(
-                    spec=spec,
-                    yolo_boxes=yolo_boxes,
-                    groups=groups,
-                    matched_boxes=final_boxes.tolist(),
-                    fp=fp,
-                    sample_idx=i,
-                    split_name=split_name,
-                )
                 self._save_classifier_input_mask_vis(
                     spec=spec,
                     mask=mask,
@@ -543,8 +554,9 @@ class Trainer:
                     sample_idx=i,
                     group_idx=0,
                     split_name=split_name,
+                    epoch=epoch,
+                    class_name=self._label_name(label),
                 )
-                saved_count += 1
 
         if len(batch_images) == 0:
             return None, None, None, matched_total, target_total, image_infos
@@ -606,6 +618,7 @@ class Trainer:
                     fp=fp,
                     sample_idx=i,
                     split_name=split_name,
+                    diagnostics=getattr(getattr(self, "preprocessor", None), "last_diagnostics", None),
                 )
                 saved_count += 1
 
@@ -962,12 +975,11 @@ class Trainer:
 
         if (self.config.save_val_detect_vis and self.config.val_detect_vis_ratio > 0):
             
-            if self.config.clear_val_detect_vis_each_epoch:
-                self.visualizer.clear_split_dir("val")
-
-            val_vis_fp_set = self.visualizer.sample_fps_by_ratio(
+            val_vis_fp_set = self.visualizer.sample_validation_fps(
                 loader,
                 self.config.val_detect_vis_ratio,
+                min_per_class=getattr(self.config, "val_detect_vis_min_per_class", 1),
+                epoch=epoch,
             )
 
             self.logger.info(
@@ -992,6 +1004,7 @@ class Trainer:
                 max_save_images=len(val_vis_fp_set) if val_vis_fp_set is not None else 0,
                 split_name='val',
                 save_fp_set=val_vis_fp_set,
+                epoch=epoch,
             )
 
             matched_total += batch_matched

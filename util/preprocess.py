@@ -17,15 +17,40 @@ class SignalPreprocessor:
       1) basic geometry filtering
       2) pooled-ring energy filtering (with fallback to geometry-only boxes)
       3) DBSCAN on frequency center + bandwidth
-      4) merge nearby clusters with similar shape/energy style
+      4) merge nearby clusters, or associate hopping bursts by timing and shape
       5) lightweight NMS inside each group
       6) compute group statistics and quality scores
-      7) keep all groups passing absolute + relative quality thresholds
+      7) apply final size and temporal quality thresholds
     """
 
     def __init__(self, config, logger):
         self.config = config
         self.logger = logger
+        self.grouping_mode = str(getattr(config, "grouping_mode", "frequency"))
+        if self.grouping_mode not in {"frequency", "hopping"}:
+            raise ValueError("grouping_mode must be frequency or hopping")
+        self.hop_association = str(getattr(config, "hop_association", "shape"))
+        if self.hop_association not in {"shape", "periodic"}:
+            raise ValueError("hop_association must be shape or periodic")
+        for name, default in {
+            "hop_shape_log_tol": 0.35, "hop_contrast_delta": 3.0,
+            "hop_period_rel_tol": 0.15, "hop_max_overlap_ratio": 0.2,
+            "hop_min_timing_consistency": 0.85,
+            "hop_max_conflict_fraction": 0.2,
+            "hop_min_time_extent_ratio": 0.15, "hop_min_time_coverage_ratio": 0.02,
+        }.items():
+            value = float(getattr(config, name, default))
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+            if name not in {"hop_shape_log_tol", "hop_contrast_delta"} and value > 1:
+                raise ValueError(f"{name} must be <= 1")
+        if not 0 < float(getattr(config, "hop_period_rel_tol", 0.15)) < 0.5:
+            raise ValueError("hop_period_rel_tol must be in (0, 0.5)")
+        if int(getattr(config, "hop_max_missing_pulses", 2)) < 0:
+            raise ValueError("hop_max_missing_pulses must be nonnegative")
+        if int(getattr(config, "hop_min_pulses", 3)) < 3:
+            raise ValueError("hop_min_pulses must be >= 3")
+        self.last_diagnostics = {}
 
     # ------------------------------------------------------------------
     # basic helpers
@@ -378,6 +403,7 @@ class SignalPreprocessor:
 
         # time_span_ratio = float((cx.max() - cx.min()) / max(float(W), 1.0))
         time_span_ratio = self._covered_x_ratio(boxes, W)
+        time_extent_ratio = float((x2.max() - x1.min()) / max(float(W), 1.0))
 
         # frequency stats in MHz for trainer-side matching
         freq_centers_mhz = np.array([self._pixel_y_to_freq_mhz(v, H) for v in cy], dtype=np.float32)
@@ -388,6 +414,8 @@ class SignalPreprocessor:
         if group_bandwidth <= 0:
             # fallback to average box height mapped to MHz
             group_bandwidth = float(np.mean([self._pixel_bandwidth_to_mhz(v, H) for v in h]))
+        freq_edge_min = self._pixel_y_to_freq_mhz(float(y1.min()), H)
+        freq_edge_max = self._pixel_y_to_freq_mhz(float(y2.max()), H)
 
         mean_w = float(np.mean(w))
         mean_h = float(np.mean(h))
@@ -417,10 +445,15 @@ class SignalPreprocessor:
             "stats": stats,
             "n_boxes": int(n),
             "time_span_ratio": time_span_ratio,
+            # Keep the legacy alias above unchanged for frequency-mode experiments.
+            "time_coverage_ratio": time_span_ratio,
+            "time_extent_ratio": time_extent_ratio,
             "center_freq": group_center_freq,
             "freq_min": group_freq_min,
             "freq_max": group_freq_max,
             "bandwidth": float(group_bandwidth),
+            "freq_edge_min": float(freq_edge_min),
+            "freq_edge_max": float(freq_edge_max),
             "mean_w": mean_w,
             "mean_h": mean_h,
             "std_log_w": std_log_w,
@@ -429,7 +462,207 @@ class SignalPreprocessor:
             "mean_contrast_z": mean_contrast,
             "std_contrast_z": std_contrast,
             "score": float(score),
+            "group_type": "frequency",
+            "frequency_cluster_count": 1,
         }
+
+    def _pulse_period(self, boxes):
+        """Estimate burst cadence from repeated short within-group intervals.
+
+        At least two direct intervals must support the estimate. This does not
+        infer unobserved subharmonics when each carrier has only return intervals.
+        """
+        boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
+        centers = np.sort((boxes[:, 0] + boxes[:, 2]) / 2.0)
+        gaps = np.diff(centers)
+        widths = boxes[:, 2] - boxes[:, 0]
+        gaps = gaps[gaps >= max(1.0, 0.5 * float(np.median(widths)))]
+        if len(gaps) < 2:
+            return None
+        short = gaps[gaps <= np.median(gaps) * 1.25]
+        period = float(np.median(short))
+        tolerance = float(getattr(self.config, "hop_period_rel_tol", 0.15))
+        direct = np.abs(gaps - period) <= tolerance * period
+        return period if np.count_nonzero(direct) >= 2 else None
+
+    def _hopping_components(self, group):
+        return group.get("hop_components") or [{
+            "width": float(np.median(group["boxes"][:, 2] - group["boxes"][:, 0])),
+            "height": float(np.median(group["boxes"][:, 3] - group["boxes"][:, 1])),
+            "contrast": group["mean_contrast_z"],
+            "period": self._pulse_period(group["boxes"]),
+        }]
+
+    def _reject_hop(self, reason):
+        self._hop_rejection_reason = reason
+        return None
+
+    def _time_conflict_fraction(self, boxes):
+        """Fraction of pulses involved in a substantial time overlap.
+
+        Check all pairs in the union, so adding more carriers cannot hide a
+        conflict inside an already merged group. Only temporal overlap matters;
+        spatial duplicates have already been handled by per-carrier NMS.
+        """
+        boxes = np.asarray(boxes)
+        conflicted = np.zeros(len(boxes), dtype=bool)
+        order = np.argsort(boxes[:, 0], kind="stable")
+        widths = boxes[:, 2] - boxes[:, 0]
+        threshold = float(getattr(self.config, "hop_max_overlap_ratio", 0.2))
+        for pos, i in enumerate(order):
+            for j in order[pos + 1:]:
+                if boxes[j, 0] >= boxes[i, 2]:
+                    break
+                overlap = min(boxes[i, 2], boxes[j, 2]) - boxes[j, 0]
+                if overlap > threshold * min(widths[i], widths[j]):
+                    conflicted[i] = conflicted[j] = True
+        return float(np.mean(conflicted)) if len(boxes) else 0.0
+
+    def _shape_hopping_evidence(self, first, second):
+        """Associate by shape; missing detections and absent cadence are allowed."""
+        boxes = np.concatenate([first["boxes"], second["boxes"]])
+        if len(boxes) < int(getattr(self.config, "hop_min_pulses", 3)):
+            return self._reject_hop("insufficient_pulses")
+        components = self._hopping_components(first) + self._hopping_components(second)
+        distances = []
+        for key in ("width", "height"):
+            sizes = [component[key] for component in components]
+            distances.append(float(np.log((max(sizes) + 1e-6) / (min(sizes) + 1e-6))))
+        aspects = [component["width"] / component["height"] for component in components]
+        distances.append(float(np.log(max(aspects) / min(aspects))))
+        shape_distance = max(distances)
+        if shape_distance > float(getattr(self.config, "hop_shape_log_tol", 0.35)):
+            return self._reject_hop("incompatible_shape")
+        contrasts = [component["contrast"] for component in components]
+        contrast_delta = float(max(contrasts) - min(contrasts))
+        if (bool(getattr(self.config, "hop_use_contrast_gate", False)) and
+                contrast_delta > float(getattr(self.config, "hop_contrast_delta", 3.0))):
+            return self._reject_hop("contrast_difference")
+        conflict_fraction = self._time_conflict_fraction(boxes)
+        if conflict_fraction > float(getattr(self.config, "hop_max_conflict_fraction", 0.2)):
+            return self._reject_hop("too_many_time_conflicts")
+
+        # Timing is diagnostic/tie-breaking evidence, never a shape-mode veto.
+        periods = [component["period"] for component in components if component["period"] is not None]
+        period, consistency = None, None
+        tolerance = float(getattr(self.config, "hop_period_rel_tol", 0.15))
+        if periods and max(periods) - min(periods) <= tolerance * min(periods):
+            period = float(np.median(periods))
+            centers = np.sort((boxes[:, 0] + boxes[:, 2]) / 2.0)
+            gaps = np.diff(centers)
+            multiples = np.rint(gaps / period)
+            consistency = float(np.mean(
+                (multiples >= 1) & (np.abs(gaps - multiples * period) <= tolerance * period)
+            ))
+        return {
+            "hop_association": "shape", "hop_components": components,
+            "hop_shape_distance": shape_distance, "hop_contrast_difference": contrast_delta,
+            "hop_time_conflict_fraction": conflict_fraction,
+            "hop_period_px": period, "hop_timing_consistency": consistency,
+        }
+
+    def _hopping_evidence(self, first, second):
+        """Evaluate the entire proposed union under the selected association policy."""
+        self._hop_rejection_reason = None
+        if self.hop_association == "shape":
+            return self._shape_hopping_evidence(first, second)
+        return self._periodic_hopping_evidence(first, second)
+
+    def _periodic_hopping_evidence(self, first, second):
+        """Legacy strict cadence policy, retained for comparison/multi-source data."""
+        a, b = first["boxes"], second["boxes"]
+        if len(a) + len(b) < int(getattr(self.config, "hop_min_pulses", 3)):
+            return self._reject_hop("insufficient_pulses")
+        components = self._hopping_components(first) + self._hopping_components(second)
+        shape_tol = float(getattr(self.config, "hop_shape_log_tol", 0.35))
+        for key in ("width", "height"):
+            sizes = [component[key] for component in components]
+            if np.log((max(sizes) + 1e-6) / (min(sizes) + 1e-6)) > shape_tol:
+                return self._reject_hop("incompatible_shape")
+        contrasts = [component["contrast"] for component in components]
+        if max(contrasts) - min(contrasts) > float(getattr(self.config, "hop_contrast_delta", 3.0)):
+            return self._reject_hop("contrast_difference")
+        periods = [component["period"] for component in components]
+        if any(period is None for period in periods):
+            return self._reject_hop("missing_period_evidence")
+        tolerance = float(getattr(self.config, "hop_period_rel_tol", 0.15))
+        if max(periods) - min(periods) > tolerance * min(periods):
+            return self._reject_hop("different_periods")
+        period = float(np.median(periods))
+        boxes = np.concatenate([a, b])
+        sources = np.concatenate([np.zeros(len(a), dtype=int), np.ones(len(b), dtype=int)])
+        centers = (boxes[:, 0] + boxes[:, 2]) / 2.0
+        order = np.argsort(centers, kind="stable")
+        boxes, sources, centers = boxes[order], sources[order], centers[order]
+        # Simultaneous pulses at different frequencies contradict a single track.
+        overlaps = boxes[:-1, 2] - boxes[1:, 0]
+        shorter = np.minimum(boxes[:-1, 2] - boxes[:-1, 0], boxes[1:, 2] - boxes[1:, 0])
+        if np.any(overlaps > float(getattr(self.config, "hop_max_overlap_ratio", 0.2)) * shorter):
+            return self._reject_hop("time_overlap")
+        gaps = np.diff(centers)
+        multiples = np.rint(gaps / period)
+        valid = (
+            (multiples >= 1)
+            & (multiples <= int(getattr(self.config, "hop_max_missing_pulses", 2)) + 1)
+            & (np.abs(gaps - multiples * period) <= tolerance * period)
+        )
+        consistency = float(np.mean(valid))
+        if consistency < float(getattr(self.config, "hop_min_timing_consistency", 0.85)):
+            return self._reject_hop("low_timing_consistency")
+        cross_transitions = int(np.count_nonzero(valid & (sources[:-1] != sources[1:])))
+        # One boundary between two unrelated recordings is not enough evidence.
+        if cross_transitions < 2:
+            return self._reject_hop("insufficient_cross_transitions")
+        return {"hop_association": "periodic", "hop_period_px": period, "hop_timing_consistency": consistency,
+                "hop_cross_transitions": cross_transitions, "hop_components": components}
+
+    def _merge_hopping_groups(self, groups, shape):
+        groups = list(groups)
+        while len(groups) > 1:
+            best = None
+            for i in range(len(groups)):
+                for j in range(i + 1, len(groups)):
+                    evidence = self._hopping_evidence(groups[i], groups[j])
+                    attempts = self.last_diagnostics.setdefault("association_attempts", [])
+                    if len(attempts) < 256:
+                        attempts.append({
+                            "first_center_freq": groups[i]["center_freq"],
+                            "second_center_freq": groups[j]["center_freq"],
+                            "first_n_boxes": groups[i]["n_boxes"],
+                            "second_n_boxes": groups[j]["n_boxes"],
+                            "accepted": evidence is not None,
+                            "rejection_reason": self._hop_rejection_reason,
+                        })
+                    else:
+                        self.last_diagnostics["association_attempts_truncated"] = True
+                    if evidence is None:
+                        continue
+                    if self.hop_association == "shape":
+                        rank = (-evidence["hop_shape_distance"], -evidence["hop_time_conflict_fraction"],
+                                evidence["hop_timing_consistency"] or 0.0)
+                    else:
+                        rank = (evidence["hop_timing_consistency"], evidence["hop_cross_transitions"])
+                    if best is None or rank > best[0]:
+                        best = (rank, i, j, evidence)
+            if best is None:
+                break
+            _, i, j, evidence = best
+            first, second = groups[i], groups[j]
+            boxes = np.concatenate([first["boxes"], second["boxes"]])
+            stats = list(first["stats"] or []) + list(second["stats"] or [])
+            order = np.argsort((boxes[:, 0] + boxes[:, 2]) / 2.0, kind="stable")
+            stats = [stats[int(k)] for k in order] if len(stats) == len(boxes) else None
+            merged = self._build_group_stats(boxes[order], stats, shape)
+            merged.update(evidence)
+            merged["group_type"] = "hopping"
+            merged["frequency_cluster_count"] = (
+                first["frequency_cluster_count"] + second["frequency_cluster_count"]
+            )
+            # Physical envelope, including edge-frame bandwidth; unaffected by dwell counts.
+            merged["center_freq"] = 0.5 * (merged["freq_edge_min"] + merged["freq_edge_max"])
+            merged["bandwidth"] = merged["freq_edge_max"] - merged["freq_edge_min"]
+            groups = [g for k, g in enumerate(groups) if k not in (i, j)] + [merged]
+        return groups
 
     def _should_merge_groups(self, g1, g2):
         if g1 is None or g2 is None:
@@ -471,12 +704,32 @@ class SignalPreprocessor:
             groups = sorted(new_groups, key=lambda g: g["center_freq"])
         return groups
 
-    def _group_passes_thresholds(self, g):
+    def _group_rejection_reasons(self, g):
+        reasons = []
         if g["n_boxes"] < int(self.config.min_group_len):
-            return False
-        if g["time_span_ratio"] < float(self.config.min_group_time_span_ratio):
-            return False
-        return True
+            reasons.append(f"n_boxes={g['n_boxes']} < min_group_len={self.config.min_group_len}")
+        if self.grouping_mode == "hopping":
+            for metric, option, default in (
+                ("time_extent_ratio", "hop_min_time_extent_ratio", 0.15),
+                ("time_coverage_ratio", "hop_min_time_coverage_ratio", 0.02),
+            ):
+                threshold = float(getattr(self.config, option, default))
+                if g[metric] < threshold:
+                    reasons.append(f"{metric}={g[metric]:.4f} < {option}={threshold}")
+        elif g["time_span_ratio"] < float(self.config.min_group_time_span_ratio):
+            reasons.append(
+                f"time_coverage_ratio={g['time_span_ratio']:.4f} < "
+                f"min_group_time_span_ratio={self.config.min_group_time_span_ratio}"
+            )
+        return reasons
+
+    def _group_passes_thresholds(self, g):
+        return not self._group_rejection_reasons(g)
+
+    @staticmethod
+    def _diagnostic_group(group):
+        return {key: value.tolist() if isinstance(value, np.ndarray) else value
+                for key, value in group.items() if key != "stats"}
 
     # ------------------------------------------------------------------
     # public API
@@ -499,19 +752,33 @@ class SignalPreprocessor:
               ...
             ]
         """
+        if spectrogram is None:
+            raise ValueError("select_signal_groups requires the native spectrogram")
         H, W = spectrogram.shape
+        self.last_diagnostics = {
+            "grouping_mode": self.grouping_mode,
+            "hop_association": self.hop_association,
+            "detected_boxes": 0 if det_boxes is None else len(det_boxes),
+            "input_boxes": [] if det_boxes is None else np.asarray(det_boxes).reshape(-1, 4).tolist(),
+            "spectrogram_shape": [int(H), int(W)], "kept_groups": 0,
+            "geometry_boxes": 0, "energy_boxes": 0,
+            "raw_groups": [], "final_candidates": [],
+        }
 
         if det_boxes is None or len(det_boxes) == 0:
             return []
 
         # basic shape filter
         boxes = self._basic_filter(det_boxes)
+        self.last_diagnostics["geometry_boxes"] = len(boxes)
         if boxes.size == 0:
             return []
 
         # pooled-ring energy filter
         if spectrogram is not None:
             e_boxes, e_stats = self._filter_boxes_by_energy(boxes, spectrogram)
+            self.last_diagnostics["energy_boxes"] = len(e_boxes)
+            self.last_diagnostics["energy_fallback"] = not bool(e_boxes.size)
             if e_boxes.size > 0:
                 boxes, stats = e_boxes, e_stats
             else:
@@ -524,12 +791,6 @@ class SignalPreprocessor:
 
         if boxes.size == 0:
             return []
-
-        if boxes.shape[0] == 1:
-            g = self._build_group_stats(boxes, stats, spectrogram.shape if spectrogram is not None else (1, 1))
-            if g is None:
-                return []
-            return [g] if self._group_passes_thresholds(g) else []
 
         # cluster by frequency + bandwidth
         clusters = self._cluster_boxes_by_frequency(boxes, H)
@@ -550,7 +811,9 @@ class SignalPreprocessor:
         if not raw_groups:
             return []
 
-        groups = self._merge_groups(raw_groups, spectrogram.shape if spectrogram is not None else (1, 1))
+        self.last_diagnostics["raw_groups"] = [self._diagnostic_group(g) for g in raw_groups]
+        groups = (raw_groups if self.grouping_mode == "hopping" else
+                  self._merge_groups(raw_groups, spectrogram.shape))
 
         # lightweight NMS inside each group, then recompute stats
         cleaned = []
@@ -580,10 +843,18 @@ class SignalPreprocessor:
         if not cleaned:
             return []
 
+        if self.grouping_mode == "hopping":
+            cleaned = self._merge_hopping_groups(cleaned, spectrogram.shape)
+
         final_groups = []
         for g in cleaned:
-            if self._group_passes_thresholds(g):
+            reasons = self._group_rejection_reasons(g)
+            diagnostic = self._diagnostic_group(g)
+            diagnostic["rejection_reasons"] = reasons
+            self.last_diagnostics["final_candidates"].append(diagnostic)
+            if not reasons:
                 final_groups.append(g)
 
+        self.last_diagnostics["kept_groups"] = len(final_groups)
         final_groups = sorted(final_groups, key=lambda x: x["score"], reverse=True)
         return final_groups
