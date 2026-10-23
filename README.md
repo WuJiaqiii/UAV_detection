@@ -2,7 +2,7 @@
 
 基于无线信号时频谱的无人机协议识别工程：使用 YOLOv5 检测信号帧，通过几何、能量与频率聚类生成候选信号组，再将每组转换为二值几何 mask，由 CNN 识别协议类别。
 
-当前 `main` 支持单信号分类训练、MAT/PNG 多信号推理评估、原始 IQ `.dat` 训练和 LwF（Learning without Forgetting）类别增量学习。YOLO 检测器训练使用独立入口；主框架训练更新的是 CNN 分类器。
+当前 `main` 支持单信号分类训练、MAT/PNG 多信号推理评估、原始 IQ `.dat` 训练和 LwF（Learning without Forgetting）类别增量学习。独立脚本 `scripts/evaluate_single_signal.py` 还支持无需频率真值的 MAT/PNG/DAT 多信号分类、频率位置记录与图示，以及 DAT 候选轨迹内部的多切片投票。YOLO 检测器训练使用独立入口；主框架训练更新的是 CNN 分类器。
 
 ## 目录
 
@@ -223,11 +223,27 @@ python main.py \
   --batch_size 32 --num_workers 4 --epochs 50 --lr 1e-4
 ```
 
-IQ 随机裁剪禁止文件级 bbox 缓存。当前 `infer` 要求频率真值，不支持 `iq_dat`。
+IQ 随机裁剪禁止文件级 bbox 缓存。`main.py --run_mode infer` 要求频率真值，不支持 `iq_dat`；无需频率真值的文件分类使用下述独立脚本。
+
+### 任意文件的多信号分类与频率位置
+
+```bash
+python scripts/evaluate_single_signal.py \
+  --signal_mode multi \
+  --inputs /data/example.mat /data/example.png /data/recording.dat \
+  --checkpoint_path /models/classifier_best.pth \
+  --yolo_weights /models/signal_detector.pt \
+  --output_dir /results/single_signal_eval \
+  --iq_sample_rate 100000000 --iq_stride_ms 50 --vote_method majority
+```
+
+默认 `--signal_mode multi`，逐个有效信号组独立分类，记录类别、置信度、原图检测框、时间位置和频率区间。不要求标签编码在文件名中，也不要求存在 `Background` 类。DAT 按完整的 50 ms 切片评估，通过时间和频带关联候选轨迹，只在每条轨迹内部投票。同类别但不同频段的信号也保留为不同候选轨迹。
+
+默认输出相对采集中心的 MHz 偏移；已知射频中心时传 `--rf_center_mhz 2400`（示例值），或用 `--rf_centers_json` 按文件提供，才会同时输出绝对频率。频率取自 mask 居中前的原生 FFT 网格。输出包含 `signals.csv`、`tracks.csv`、`results.csv/json`、`slices.jsonl`、标注切片 PNG 和可直接打开的 `report.html`。最多保存 24 张均匀选取的预览/文件，`--max_visualizations 0` 保存全部；数据明细不因预览上限丢弃。
+
+详见[多信号文件评估与频率位置](docs/multi_signal_evaluation.md)。原单信号文件级投票通过 `--signal_mode single` 保留，见[单信号模式说明](docs/single_signal_evaluation.md)。
 
 ### 续训与多信号推理评估
-
-> 当前 checkpoint 接口问题会阻断这两项功能，须先修复[当前限制](#当前限制)中的参数不一致。
 
 普通续训在原训练命令中添加 `--checkpoint_path /models/classifier.pth`。程序尝试恢复模型、优化器、调度器、最佳准确率及下一 epoch；`--epochs` 表示总目标轮数。须保持 backbone、mask 参数、类别集合与标签顺序一致，checkpoint 不自动恢复全部命令行配置。
 
@@ -378,9 +394,8 @@ python scripts/check_yolo_input_equivalence.py \
 
 ## 当前限制
 
-- **checkpoint 接口不一致**：`Trainer.__init__()` 调用 `load_training_checkpoint(..., expected_classes=...)`，但 `util/checkpoint.py` 的函数签名没有 `expected_classes`，会报 `TypeError`。普通续训及推理受到影响；应统一接口并验证类别映射。本文仅更新 README，未修改代码。
 - **运行模式**：主框架拒绝多信号训练、DDP（`WORLD_SIZE>1`）、`--use_data_parallel` 及 `--use_amp_autocast`；参数存在不代表已实现。分类器自动选择 CUDA 或 CPU，`--yolo_device` 只控制检测器。
-- **IQ 限制**：目录类别不提供真实中心频率/带宽，不能进入当前端到端推理评估；随机裁剪禁止文件级检测框缓存。
+- **IQ 限制**：目录类别不提供真实中心频率/带宽，不能进入 `main.py` 的频率匹配评估；独立单信号脚本支持文件级分类及有标签时的分类准确率统计。随机裁剪禁止文件级检测框缓存。
 - **脚本路径**：`run_train*.sh`、`run_inference.sh` 含作者本机绝对路径；当前 `run_train_iq.sh` 未接入 `UAV_*` 环境变量，manifest 参数被注释。请使用本文命令或自行修改脚本。
 - **历史文档差异**：`docs/spectrogram_frontend.md` 的算法说明可参考，但末尾关于修复未合并、YOLO 提交 `88af13e...`、IQ 环境变量启动方式的叙述与本文核对的 `main` 不一致。版本和运行行为以实际代码及主仓库 gitlink 为准。
 - **验证范围**：实测录音、人工检测标注和训练权重未随仓库提供，本文不声明模型精度、完整训练运行或所有平台安装已验证。
