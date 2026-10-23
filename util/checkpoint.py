@@ -1,4 +1,6 @@
 import os
+import warnings
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
@@ -16,6 +18,41 @@ def _strip_module_prefix(state_dict):
         str(k).replace("module.", "", 1): v
         for k, v in state_dict.items()
     }
+
+
+def _validate_checkpoint_classes(ckpt, expected_classes, logger=None):
+    """Check label semantics before changing model or optimizer state.
+
+    Dictionary insertion order is irrelevant; each name must retain its ID.
+    Older checkpoints without class metadata remain loadable with a warning.
+    """
+    if expected_classes is None:
+        return
+    if not isinstance(expected_classes, Mapping):
+        raise ValueError("expected_classes must be a mapping of class names to IDs")
+
+    config = ckpt.get("config")
+    saved_classes = config.get("classes") if isinstance(config, Mapping) else None
+    if saved_classes is None:
+        message = (
+            "[ckpt] checkpoint has no config.classes metadata; class names and IDs "
+            "cannot be verified. Ensure the current classes match the original training."
+        )
+        if logger is not None:
+            logger.warning(message)
+        else:
+            warnings.warn(message, UserWarning, stacklevel=3)
+        return
+    if not isinstance(saved_classes, Mapping):
+        raise ValueError("Checkpoint config.classes must be a mapping of class names to IDs")
+    if dict(saved_classes) != dict(expected_classes):
+        raise ValueError(
+            "Checkpoint class mapping mismatch: "
+            f"saved={dict(saved_classes)}, expected={dict(expected_classes)}. "
+            "Use the same class names and label IDs as the original training, "
+            "including exclude_classes and incremental_split_mode settings. "
+            "To add new classes, use the dedicated LwF teacher initialization path."
+        )
 
 
 def save_training_checkpoint(model, optimizer, scheduler, epoch: int, best_val_acc: float, model_dir, config=None, logger=None, is_best: bool = False):
@@ -62,7 +99,13 @@ def load_training_checkpoint(
     logger=None,
     load_optimizer: bool = False,
     skip_mismatch: bool = False,
+    expected_classes=None,
 ):
+    """Load classifier state, optionally restoring training state and checking labels.
+
+    ``expected_classes`` is a name-to-ID mapping, as used by ``Config.classes``.
+    ``skip_mismatch`` only controls tensor shapes, not class mapping validation.
+    """
     checkpoint_path = str(checkpoint_path or "").strip()
     if not checkpoint_path:
         return None
@@ -85,6 +128,7 @@ def load_training_checkpoint(
             f"No model_state_dict found in checkpoint: {checkpoint_path}"
         )
 
+    _validate_checkpoint_classes(ckpt, expected_classes, logger=logger)
     state_dict = _strip_module_prefix(ckpt["model_state_dict"])
 
     if skip_mismatch:
