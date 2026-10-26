@@ -140,5 +140,25 @@ class MaskImageClassifier(nn.Module):
             for p in self.net.classifier.parameters():
                 p.requires_grad = True
 
-    def forward(self, x):
-        return self.net(x)
+    def forward_features(self, x):
+        """Penultimate representation; no new parameters or checkpoint keys.
+
+        In eval mode the accompanying logits are identical to the normal path.
+        ResNets expose pooled features; MobileNet exposes its 1024-D hidden head.
+        """
+        if self.backbone_name.startswith("resnet"):
+            net = self.net
+            x = net.maxpool(net.relu(net.bn1(net.conv1(x))))
+            x = net.layer4(net.layer3(net.layer2(net.layer1(x))))
+            return torch.flatten(net.avgpool(x), 1)
+        x = torch.flatten(self.net.avgpool(self.net.features(x)), 1)
+        for layer in list(self.net.classifier.children())[:-1]:
+            x = layer(x)
+        return x
+
+    def forward(self, x, return_features=False):
+        if not return_features:
+            return self.net(x)
+        features = self.forward_features(x)
+        head = self.net.fc if self.backbone_name.startswith("resnet") else self.net.classifier[-1]
+        return head(features), features

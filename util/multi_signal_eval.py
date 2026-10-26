@@ -77,11 +77,12 @@ def group_geometry(boxes, shape, sample_rate, slice_start_ms=0., duration_ms=50.
 
 
 class MultiSignalPredictor(SingleSignalPredictor):
-    def __init__(self, classifier, detector, preprocessor, config, device="cpu", batch_size=32):
+    def __init__(self, classifier, detector, preprocessor, config, device="cpu", batch_size=32, return_features=False):
         super().__init__(classifier, detector, preprocessor, config, device, "main")
         if batch_size < 1:
             raise ValueError("classifier_batch_size must be >= 1")
         self.batch_size = batch_size
+        self.return_features = return_features
 
     @torch.inference_mode()
     def predict(self, spectrum, domain):
@@ -97,7 +98,13 @@ class MultiSignalPredictor(SingleSignalPredictor):
         for start in range(0, len(groups), self.batch_size):
             chunk = groups[start:start+self.batch_size]
             tensors = [build_mask_input(spectrum, group["boxes"], self.config)[0] for group in chunk]
-            logits = self.classifier(torch.stack(tensors).to(self.device))
+            batch = torch.stack(tensors).to(self.device)
+            if self.return_features:
+                logits, features = self.classifier(batch, return_features=True)
+                from util.open_set import normalize_features
+                features = normalize_features(features.cpu().numpy())
+            else:
+                logits = self.classifier(batch)
             if tuple(logits.shape) != (len(chunk), self.config.num_classes) or not torch.isfinite(logits).all():
                 raise ValueError("Classifier must return finite [group_count, num_classes] logits")
             for index, (group, probabilities) in enumerate(zip(chunk, logits.softmax(dim=1).cpu().numpy())):
@@ -108,6 +115,8 @@ class MultiSignalPredictor(SingleSignalPredictor):
                     "selected_boxes": np.asarray(group["boxes"]).tolist(),
                     "selected_group_score": float(group.get("score", 0.)),
                     "group_type": group.get("group_type", "frequency")})
+                if self.return_features:
+                    result["groups"][-1]["embedding"] = features[index].tolist()
         return result
 
 
@@ -270,19 +279,29 @@ def resolve_rf_centers(path=None, default=None):
     return centers
 
 
-def load_multi_truth(path, inputs, classes, label_from_parent=False):
+def load_multi_truth(path, inputs, classes, label_from_parent=False, allow_unknown=False, label_from_filename=False):
     truth = read_path_mapping(path) if path else {}
     for name, value in list(truth.items()):
         names = [value] if isinstance(value, str) else value
-        if not isinstance(names, list) or any(not isinstance(item, str) or item not in classes for item in names):
+        if not isinstance(names, list) or any(not isinstance(item, str) or not item or (not allow_unknown and item not in classes) for item in names):
             raise ValueError(f"Truth must be a class name or list of known class names: {name}")
         truth[name] = sorted(set(names))
     if label_from_parent:
         for file in inputs:
             name = file.parent.name
-            if name not in classes or (str(file) in truth and truth[str(file)] != [name]):
+            if (not allow_unknown and name not in classes) or (str(file) in truth and truth[str(file)] != [name]):
                 raise ValueError(f"Invalid or conflicting parent-folder truth: {file}")
             truth[str(file)] = [name]
+    if label_from_filename:
+        from data.data_loader import UAVDataset
+        for file in inputs:
+            prefix = file.stem.split("-SNR-")[0]
+            names = sorted({match.group("protocol") for match in UAVDataset._SIGNAL_RE.finditer(prefix)})
+            if not names or (not allow_unknown and any(name not in classes for name in names)):
+                raise ValueError(f"Filename must contain valid Protocol-[...] blocks: {file}")
+            if str(file) in truth and truth[str(file)] != names:
+                raise ValueError(f"Conflicting filename truth: {file}")
+            truth[str(file)] = names
     return truth
 
 

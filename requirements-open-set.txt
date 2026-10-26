@@ -1,0 +1,2 @@
+# Additional dependency for DCG-Louvain; other dependencies are in requirements.txt.
+networkx>=3.0,<4

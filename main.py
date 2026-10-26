@@ -151,6 +151,13 @@ def get_parser():
     g_train.add_argument("--cosine_annealing_T0", type=int, default=50)
     g_train.add_argument("--cosine_annealing_mult", type=int, default=2)
 
+    g_repr = parser.add_argument_group("Known-class representation learning")
+    g_repr.add_argument("--supcon_weight", type=float, default=0., help="0 keeps legacy CE; positive enables known-only CE + two-view SupCon")
+    g_repr.add_argument("--supcon_temperature", type=float, default=.2)
+    g_repr.add_argument("--supcon_drop_prob", type=float, default=.1, help="Probability of dropping a detected pulse in the second training view")
+    g_repr.add_argument("--supcon_max_drop_fraction", type=float, default=.25, help="Cap dropped pulses; retain at least two")
+    g_repr.add_argument("--supcon_jitter_px", type=int, default=1, help="Native-pixel rectangle translation; preserves width/height")
+
     g_train.add_argument("--trainer_type", type=str, default="normal", choices=["normal", "lwf"])
     g_train.add_argument("--lwf_teacher_checkpoint", type=str, default="")
     g_train.add_argument("--lwf_old_num_classes", type=int, default=0)
@@ -303,6 +310,8 @@ def setup_incremental_class_split(config, logger=None):
 
 def main(args):
     set_seed(seed=42)
+    from model.representation import validate_representation_options
+    validate_representation_options(args)
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
         raise RuntimeError("Distributed training is not implemented for the detection/classification pipeline")
     if args.use_data_parallel or args.use_amp_autocast:

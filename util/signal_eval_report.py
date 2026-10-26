@@ -11,6 +11,10 @@ from util.spectrogram_frontend import FrontendConfig, pixel_y_to_freq_mhz, rende
 COLORS = ["#ff6b6b", "#4dd4ac", "#64b5ff", "#ffc857", "#d597ff", "#ff9f68", "#76e5f2", "#cbe86b"]
 
 
+def signal_label(record):
+    return record.get("display_label") or record.get("class_name") or "uncertain"
+
+
 def signal_color(observation):
     identity = observation.get("track_id", f"G{observation.get('group_id', 0)}")
     number = int(hashlib.sha256(identity.encode()).hexdigest()[:8], 16)
@@ -69,8 +73,9 @@ def save_slice_preview(path, index, spectrum, domain, config, row, output_dir, r
                   stroke_width=1, stroke_fill="black")
         if number < 7:
             y = top+number*69
-            draw.text((sidebar, y), f"{group['track_id']} / G{group['group_id']}  {group['class_name'][:22]}", fill=color, font=regular)
-            draw.text((sidebar, y+23), f"p={group['confidence']:.3f} | fc offset={group['frequency_center_offset_mhz']:.3f}", fill="#e2e8f0", font=small)
+            draw.text((sidebar, y), f"{group['track_id']} / G{group['group_id']}  {signal_label(group)[:22]}", fill=color, font=regular)
+            probability_label = "known p" if "recognition_status" in group else "p"
+            draw.text((sidebar, y+23), f"{probability_label}={group['confidence']:.3f} | fc offset={group['frequency_center_offset_mhz']:.3f}", fill="#e2e8f0", font=small)
             draw.text((sidebar, y+43), frequency_text(group, rf_center_mhz), fill="#cbd5e1", font=small)
     if not row["groups"]:
         draw.text((sidebar, top), "No valid signal groups", fill="#cbd5e1", font=regular)
@@ -107,7 +112,7 @@ def _timeline(result, observations, maximum_boxes=3000):
         svg.append(f'<text x="{at-12}" y="350" fill="#cbd5e1" font-size="12">{time:.1f}</text>')
     for observation, pulse in pulses:
         a, b = pulse["frequency_low_offset_mhz"]+shift, pulse["frequency_high_offset_mhz"]+shift
-        caption = (f"{observation['track_id']} | {observation['class_name']} p={observation['confidence']:.3f} | "
+        caption = (f"{observation['track_id']} | {signal_label(observation)} | known-head p={observation['confidence']:.3f} | "
                    f"{pulse['start_ms']:.3f}-{pulse['end_ms']:.3f} ms | {a:.3f}-{b:.3f} MHz")
         svg.append(f'<rect x="{x(pulse["start_ms"]):.3f}" y="{y(a):.3f}" '
                    f'width="{max(.8, x(pulse["end_ms"])-x(pulse["start_ms"])):.3f}" '
@@ -130,6 +135,13 @@ def write_html_report(output_dir, report, rows_by_file):
         '<p><a href="results.json">Full JSON</a> · <a href="signals.csv">Per-group CSV</a> · <a href="tracks.csv">Track votes CSV</a> · <a href="slices.jsonl">Slice records</a></p>',
         f'<p>{report["metrics"]["total_files"]} files · {report["metrics"]["total_observations"]} group observations · '
         f'{report["metrics"]["total_accepted_tracks"]} accepted tracks</p>']
+    if report.get("discovery"):
+        discovery = report["discovery"]
+        parts += [f'<h2>Unknown discovery — {escape(discovery["method"])}</h2><p>Estimated anonymous classes: <b>{discovery["estimated_unknown_class_count"]}</b> · '
+                  f'{discovery["unknown_candidate_tracks"]} candidate tracks · {discovery["unassigned_unknown_tracks"]} unassigned</p>',
+                  '<p class="muted">These are batch-local feature clusters. No unknown percentage or class count is forced. '
+                  'Uncertain votes and missing detections do not enter the unknown pool. Probabilities below belong to the known classifier head.</p>',
+                  '<p><a href="unknown_clusters.json">Cluster support and representatives</a> · <a href="unknown_prototypes.npz">Normalized prototypes</a></p>']
     for result in report["files"]:
         rows = rows_by_file.get(result["path"], [])
         observations = [group for row in rows for group in row.get("groups", [])]
@@ -137,21 +149,27 @@ def write_html_report(output_dir, report, rows_by_file):
                   f'<p><code>{escape(result["path"])}</code></p>',
                   f'<p>Status: {escape(result["status"])} · Predicted classes: {escape(", ".join(result["predicted_classes"]) or "unknown")} · '
                   f'{result["total_slices"]} slices · {result["track_count"]} candidate tracks</p>']
+        if report.get("discovery"):
+            parts.append(f'<p>Unknown classes: {escape(", ".join(result.get("predicted_unknown_classes", [])) or "none assigned")} · '
+                         f'{result.get("novel_track_count", 0)} novel candidates · {result.get("uncertain_track_count", 0)} uncertain tracks</p>')
         if result.get("error"):
             parts.append(f'<p>{escape(result["error"])}</p>')
         parts.append(_timeline(result, observations))
-        parts.append('<h3>Track vote summaries</h3><div class="scroll"><table><tr><th>Track</th><th>Voted class</th><th>Time (ms)</th><th>Frequency range</th><th>Mean p / vote share</th><th>Valid / observed</th></tr>')
+        parts.append('<h3>Track vote summaries</h3><div class="scroll"><table><tr><th>Track</th><th>Final label / recognition</th><th>Time (ms)</th><th>Frequency range</th><th>Known-head mean p / vote share</th><th>Valid / observed</th><th>OOD score / threshold</th></tr>')
         for track in result["signals"]:
             mean, share = track["mean_probability"], track["vote_share"]
             probability = "unknown" if mean is None else f'{mean:.3f} / {share:.3f}'
-            parts.append(f'<tr><td>{track["track_id"]}</td><td>{escape(track["class_name"] or "unknown")}</td>'
+            score = track.get("ood_score")
+            distance = "—" if score is None else f'{score:.4f} / {track["ood_threshold"]:.4f}'
+            label = signal_label(track) + (" / "+track["recognition_status"] if "recognition_status" in track else "")
+            parts.append(f'<tr><td>{track["track_id"]}</td><td>{escape(label)}</td>'
                          f'<td>{track["start_ms"]:.3f}–{track["end_ms"]:.3f}</td>'
                          f'<td>{escape(frequency_text(track, result.get("rf_center_mhz")))}</td>'
-                         f'<td>{probability}</td><td>{track["valid_votes"]} / {track["observation_count"]}</td></tr>')
-        parts.append('</table></div><details><summary>All per-group predictions and frequency positions</summary><div class="scroll"><table><tr><th>Slice / group</th><th>Track</th><th>Instant class</th><th>p</th><th>Time (ms)</th><th>Frequency range</th><th>Vote</th></tr>')
+                         f'<td>{probability}</td><td>{track["valid_votes"]} / {track["observation_count"]}</td><td>{distance}</td></tr>')
+        parts.append('</table></div><details><summary>All per-group predictions and frequency positions</summary><div class="scroll"><table><tr><th>Slice / group</th><th>Track</th><th>Final label (known-head candidate)</th><th>Known-head p</th><th>Time (ms)</th><th>Frequency range</th><th>Vote</th></tr>')
         for group in observations:
             parts.append(f'<tr><td>{group["slice_index"]} / {group["group_id"]}</td><td>{group["track_id"]}</td>'
-                         f'<td>{escape(group["class_name"])}</td><td>{group["confidence"]:.3f}</td>'
+                         f'<td>{escape(signal_label(group))} ({escape(group["class_name"])})</td><td>{group["confidence"]:.3f}</td>'
                          f'<td>{group["start_ms"]:.3f}–{group["end_ms"]:.3f}</td>'
                          f'<td>{escape(frequency_text(group, result.get("rf_center_mhz")))}</td><td>{escape(group["vote_reason"])}</td></tr>')
         parts.append('</table></div></details><details open><summary>Annotated slices</summary><div class="previews">')

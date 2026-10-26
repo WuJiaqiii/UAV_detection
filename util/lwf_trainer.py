@@ -205,6 +205,7 @@ class LwFTrainer(Trainer):
         loss_meter = AverageMeter()
         ce_meter = AverageMeter()
         kd_meter = AverageMeter()
+        supcon_meter = AverageMeter()
 
         correct = 0
         total = 0
@@ -240,14 +241,13 @@ class LwFTrainer(Trainer):
 
             self.optimizer.zero_grad(set_to_none=True)
 
-            student_logits = self.classifier(images)
+            student_logits, classification_loss, loss_ce, loss_supcon = self._training_objective(images, labels, metas)
 
             with torch.no_grad():
                 teacher_logits = self.teacher(images)
 
-            loss_ce = self.criterion(student_logits, labels)
             loss_kd = self._kd_loss(student_logits, teacher_logits)
-            loss = loss_ce + self.lambda_kd * loss_kd
+            loss = classification_loss + self.lambda_kd * loss_kd
 
             loss.backward()
             self.optimizer.step()
@@ -260,6 +260,7 @@ class LwFTrainer(Trainer):
             loss_meter.update(loss.item(), labels.size(0))
             ce_meter.update(loss_ce.item(), labels.size(0))
             kd_meter.update(loss_kd.item(), labels.size(0))
+            supcon_meter.update(loss_supcon.item(), labels.size(0))
 
             acc = 100.0 * correct / max(total, 1)
             match_recall = float(matched_total) / max(float(target_total), 1.0)
@@ -281,6 +282,7 @@ class LwFTrainer(Trainer):
         self.writer.add_scalar("train/loss", train_loss, epoch)
         self.writer.add_scalar("train/lwf_ce_loss", ce_meter.avg, epoch)
         self.writer.add_scalar("train/lwf_kd_loss", kd_meter.avg, epoch)
+        self.writer.add_scalar("train/supcon_loss", supcon_meter.avg, epoch)
         self.writer.add_scalar("train/acc", train_acc, epoch)
         self.writer.add_scalar("train/match_recall", train_match_recall, epoch)
 

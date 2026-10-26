@@ -49,6 +49,10 @@ class Trainer:
         self.device = config.device
         self.classifier.to(self.device)
 
+        from model.representation import SupervisedContrastiveLoss, validate_representation_options
+        self.supcon_weight = validate_representation_options(config)
+        self.supcon_criterion = SupervisedContrastiveLoss(float(getattr(config, "supcon_temperature", .2)))
+
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = AdamW(self.classifier.parameters(), lr=float(config.lr), weight_decay=float(config.weight_decay))
 
@@ -478,6 +482,8 @@ class Trainer:
                 "group_idx": 0,
                 "label": label,
                 "target_name": self._label_name(label),
+                "boxes": final_boxes.copy(),
+                "spec_shape": tuple(spec.shape),
             })
 
             if should_save:
@@ -823,10 +829,26 @@ class Trainer:
     # ------------------------------------------------------------------
     # Train / validation
     # ------------------------------------------------------------------
+    def _training_objective(self, images, labels, metas):
+        """Known-only CE/SupCon; feature interface has no additional parameters."""
+        if not self.supcon_weight:
+            logits = self.classifier(images)
+            ce = self.criterion(logits, labels)
+            return logits, ce, ce, ce.detach().new_zeros(())
+        from model.representation import contrastive_mask_batch
+        alternative = contrastive_mask_batch(metas, self.config).to(images.device, non_blocking=True)
+        count = len(images)
+        logits, features = self.classifier(torch.cat([images, alternative]), return_features=True)
+        ce = self.criterion(logits, labels.repeat(2))
+        views = torch.stack([features[:count], features[count:]], dim=1)
+        supcon = self.supcon_criterion(views, labels)
+        return logits[:count], ce + self.supcon_weight * supcon, ce, supcon
+
     def train_one_epoch(self, epoch):
         self.classifier.train()
 
         loss_meter = AverageMeter()
+        ce_meter, supcon_meter = AverageMeter(), AverageMeter()
         correct = total = matched_total = target_total = 0
 
         # pbar = tqdm(self.train_loader, desc=f"Train Epoch {epoch + 1}", leave=True)
@@ -855,8 +877,7 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
 
-            logits = self.classifier(images)
-            loss = self.criterion(logits, labels)
+            logits, loss, loss_ce, loss_supcon = self._training_objective(images, labels, metas)
 
             loss.backward()
             self.optimizer.step()
@@ -867,6 +888,8 @@ class Trainer:
             total += int(labels.numel())
 
             loss_meter.update(loss.item(), labels.size(0))
+            ce_meter.update(loss_ce.item(), labels.size(0))
+            supcon_meter.update(loss_supcon.item(), labels.size(0))
 
             acc = 100.0 * correct / max(total, 1)
             match_recall = float(matched_total) / max(float(target_total), 1.0)
@@ -887,6 +910,8 @@ class Trainer:
         train_match_recall = float(matched_total) / max(float(target_total), 1.0)
 
         self.writer.add_scalar("train/loss", train_loss, epoch)
+        self.writer.add_scalar("train/ce_loss", ce_meter.avg, epoch)
+        self.writer.add_scalar("train/supcon_loss", supcon_meter.avg, epoch)
         self.writer.add_scalar("train/acc", train_acc, epoch)
         self.writer.add_scalar("train/match_recall", train_match_recall, epoch)
 

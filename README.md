@@ -1,5 +1,7 @@
 # UAV_detection
 
+新增已知类训练与开集评估流程：训练用 `--supcon_weight 0.1` 启用 CE + 两视图监督对比学习；评估用已知参考/校准特征建立 profile，对混合输入拒识，再以 HDBSCAN 或 DCG-Louvain 聚类未知轨迹，输出匿名类别数、类别 ID 及原有时间/频率位置。未知样本只在最终发现时出现，不参与神经网络训练或拒识阈值校准。运行入口、数据划分和限制见 [开集识别与未知类别发现](docs/open_set_discovery.md)，四步评估可使用 `run_open_set.sh`。`supcon_weight=0` 保留原训练目标，未提供 profile 时保留原评估行为。
+
 基于无线信号时频谱的无人机协议识别工程：使用 YOLOv5 检测信号帧，通过几何、能量与频率聚类生成候选信号组，再将每组转换为二值几何 mask，由 CNN 识别协议类别。
 
 当前 `main` 支持单信号分类训练、MAT/PNG 多信号推理评估、原始 IQ `.dat` 训练和 LwF（Learning without Forgetting）类别增量学习。独立脚本 `scripts/evaluate_single_signal.py` 还支持无需频率真值的 MAT/PNG/DAT 多信号分类、频率位置记录与图示，以及 DAT 候选轨迹内部的多切片投票。YOLO 检测器训练使用独立入口；主框架训练更新的是 CNN 分类器。

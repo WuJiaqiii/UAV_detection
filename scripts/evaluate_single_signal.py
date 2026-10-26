@@ -51,7 +51,14 @@ def build_parser():
     p.add_argument("--max_visualizations", type=int, default=24, help="Per file, evenly spaced; 0 saves all slices")
     p.add_argument("--labels_json", type=Path, help="Input-path-to-class-name mapping; multi mode also accepts lists of class names")
     p.add_argument("--label_from_parent", action="store_true", help="Explicitly use parent folder names as truth; never changes model label IDs")
+    p.add_argument("--label_from_filename", action="store_true", help="Multi mode: use existing Protocol-[...] filename blocks as reporting/export truth only")
     p.add_argument("--fail_fast", action="store_true")
+    p.add_argument("--export_features", action="store_true", help="Multi mode: save one penultimate feature per accepted track to features.npz")
+    p.add_argument("--recording_ids_json", type=Path, help="Input-path-to-original-recording-ID mapping; required for crops/slices sharing a recording")
+    p.add_argument("--open_set_profile", type=Path, help="Frozen known-only profile; enables rejection and global unknown discovery in multi mode")
+    p.add_argument("--min_novel_observation_share", type=float, default=.6, help="Consistency guard in addition to calibrated track distance")
+    from util.unknown_discovery import add_discovery_arguments
+    add_discovery_arguments(p)
     return p
 
 
@@ -91,6 +98,32 @@ def run(args, predictor=None):
             overrides[key] = getattr(args, key)
     logger = logging.getLogger("single_signal_eval")
     cfg = resolve_config(checkpoint, classes, overrides, args.frontend_config, logger)
+    feature_mode = args.export_features or args.open_set_profile is not None
+    if feature_mode and args.signal_mode != "multi":
+        raise ValueError("Open-set profiles and feature export require --signal_mode multi")
+    if args.label_from_filename and args.signal_mode != "multi":
+        raise ValueError("label_from_filename requires --signal_mode multi")
+    if args.export_features and args.open_set_profile:
+        raise ValueError("Export reference/calibration features without open-set rejection")
+    if not 0 <= args.min_novel_observation_share <= 1:
+        raise ValueError("min_novel_observation_share must be in [0, 1]")
+    if args.unknown_min_cluster_size < 2 or args.unknown_min_samples < 1 or args.unknown_min_recordings < 1:
+        raise ValueError("Invalid unknown clustering support counts")
+    signature, profile, recording_ids = None, None, {}
+    if feature_mode:
+        from util.open_set import inference_signature, OpenSetProfile
+        from util.multi_signal_eval import read_path_mapping
+        signature = inference_signature(args, cfg)
+        if args.open_set_profile:
+            profile = OpenSetProfile(args.open_set_profile, signature, cfg.classes)
+            from util.unknown_discovery import validate_discovery_options, discovery_kwargs
+            cluster_options = discovery_kwargs(args)
+            validate_discovery_options(cluster_options["backend"], cluster_options["min_cluster_size"],
+                cluster_options["min_samples"], cluster_options["min_recordings"], cluster_options["dcg_options"])
+        if args.recording_ids_json:
+            recording_ids = read_path_mapping(args.recording_ids_json)
+            if any(not isinstance(value, str) or not value.strip() for value in recording_ids.values()):
+                raise ValueError("Recording IDs must be nonempty strings")
     if args.signal_mode == "multi" and args.group_policy not in (None, "all"):
         raise ValueError("Multi mode classifies every group; main/union require --signal_mode single")
     if args.signal_mode == "single" and args.group_policy == "all":
@@ -107,7 +140,8 @@ def run(args, predictor=None):
         from util.multi_signal_eval import FrequencyTracker, load_multi_truth, resolve_rf_centers
         FrequencyTracker(args.track_freq_tolerance_mhz, args.track_min_band_iou, args.track_max_gap_ms)
         resolve_rf_centers(args.rf_centers_json, args.rf_center_mhz)
-        truth = load_multi_truth(args.labels_json, inputs, cfg.classes, args.label_from_parent)
+        truth = load_multi_truth(args.labels_json, inputs, cfg.classes, args.label_from_parent,
+                                allow_unknown=args.open_set_profile is not None, label_from_filename=args.label_from_filename)
     else:
         if args.rf_center_mhz is not None or args.rf_centers_json:
             raise ValueError("Frequency reporting requires --signal_mode multi")
@@ -133,14 +167,14 @@ def run(args, predictor=None):
         if args.signal_mode == "multi":
             from util.multi_signal_eval import MultiSignalPredictor
             predictor = MultiSignalPredictor(model, YoloV5Detector(cfg, yolo_device),
-                SignalPreprocessor(cfg, logger), cfg, device, args.classifier_batch_size)
+                SignalPreprocessor(cfg, logger), cfg, device, args.classifier_batch_size, return_features=feature_mode)
         else:
             predictor = SingleSignalPredictor(model, YoloV5Detector(cfg, yolo_device),
                 SignalPreprocessor(cfg, logger), cfg, device, args.group_policy or "main")
     del checkpoint
     output.mkdir(parents=True, exist_ok=True)
     if args.signal_mode == "multi":
-        return run_multi(args, predictor, cfg, inputs, output, options, truth, logger)
+        return run_multi(args, predictor, cfg, inputs, output, options, truth, logger, signature, profile, recording_ids)
     results = []
     with (output / "slices.jsonl").open("w", encoding="utf-8") as stream:
         for path in inputs:
@@ -177,50 +211,149 @@ def run(args, predictor=None):
     return report
 
 
-def run_multi(args, predictor, cfg, inputs, output, options, truth, logger):
+def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, signature=None, profile=None, recording_ids=None):
     from util.multi_signal_eval import evaluate_multi_file, multi_evaluation_metrics, resolve_rf_centers
     from util.signal_eval_report import frequency_text, write_html_report
 
     centers = resolve_rf_centers(args.rf_centers_json, args.rf_center_mhz)
     track_options = dict(frequency_tolerance_mhz=args.track_freq_tolerance_mhz,
                          min_band_iou=args.track_min_band_iou, max_gap_ms=args.track_max_gap_ms)
-    results, rows_by_file = [], {}
-    with (output/"slices.jsonl").open("w", encoding="utf-8") as stream:
-        for path in inputs:
-            rf = centers.get(str(path), args.rf_center_mhz)
-            try:
-                result, rows = evaluate_multi_file(path, predictor, cfg, options, args.iq_stride_ms,
-                    args.tail_policy, args.max_slices, args.fail_fast, rf, track_options,
-                    output/"visualizations" if args.save_visuals else None, args.max_visualizations)
-            except Exception as exc:
-                if args.fail_fast:
-                    raise
-                result = {"path": str(path), "input_type": path.suffix.lower()[1:], "status": "error",
-                    "error": f"{type(exc).__name__}: {exc}", "predicted_classes": [], "signals": [],
-                    "total_slices": 0, "observation_count": 0, "track_count": 0, "accepted_track_count": 0,
-                    "error_slices": 0, "visualization_errors": 0, "rf_center_mhz": rf}
-                rows = []
+    results, rows_by_file, candidates = [], {}, []
+    for path in inputs:
+        rf = centers.get(str(path), args.rf_center_mhz)
+        try:
+            result, rows = evaluate_multi_file(path, predictor, cfg, options, args.iq_stride_ms,
+                args.tail_policy, args.max_slices, args.fail_fast, rf, track_options,
+                output/"visualizations" if args.save_visuals else None, args.max_visualizations)
+        except Exception as exc:
+            if args.fail_fast:
+                raise
+            result = {"path": str(path), "input_type": path.suffix.lower()[1:], "status": "error",
+                "error": f"{type(exc).__name__}: {exc}", "predicted_classes": [], "signals": [],
+                "total_slices": 0, "observation_count": 0, "track_count": 0, "accepted_track_count": 0,
+                "error_slices": 0, "visualization_errors": 0, "rf_center_mhz": rf}
+            rows = []
+        for row in rows:
+            if row.get("visualization"):
+                row["visualization"] = Path(row["visualization"]).relative_to(output).as_posix()
+        result["true_class_names"] = truth.get(str(path))
+        result["class_set_correct"] = (result["status"] != "error" and set(result["predicted_classes"]) == set(result["true_class_names"])
+                                        if result["true_class_names"] is not None else None)
+        results.append(result)
+        rows_by_file[str(path)] = rows
+        if profile:
+            from util.open_set import apply_open_set
+            candidates.extend(apply_open_set(profile, [result], {str(path): rows}, args.min_novel_observation_share))
             for row in rows:
-                if row.get("visualization"):
-                    row["visualization"] = Path(row["visualization"]).relative_to(output).as_posix()
+                for group in row.get("groups", []):
+                    group.pop("embedding", None)
+        elif args.export_features:
+            from util.open_set import cache_track_features
+            cache_track_features([result], {str(path): rows})
+        logger.info("%s | %s | %s observations, %s tracks", path.name, result["status"],
+                    result["observation_count"], result["track_count"])
+
+    feature_archive, discovery = None, None
+    if args.export_features:
+        from util.open_set import export_feature_archive
+        feature_archive = export_feature_archive(output/"features.npz", signature, cfg.classes,
+                                                  results, rows_by_file, recording_ids)
+    if profile:
+        from util.open_set import FEATURE_VERSION, refresh_open_set_results, file_sha256, recording_identity, save_npz
+        from util.unknown_discovery import discover_unknown, discovery_kwargs, save_unknown_prototypes
+        identities = {}
+        for candidate in candidates:
+            path = candidate["path"]
+            if path not in identities:
+                identities[path] = recording_identity(path, file_sha256(path), recording_ids)
+            candidate["recording_id"] = identities[path]
+        discovery = discover_unknown(candidates, **discovery_kwargs(args))
+        save_unknown_prototypes(output/"unknown_prototypes.npz", discovery, signature, profile.reference.shape[1])
+        discovery["prototype_archive"] = "unknown_prototypes.npz"
+        import numpy as np
+        positions = ["start_ms", "end_ms", "known_candidate_class", "ood_score", "ood_threshold",
+            "frequency_center_offset_mhz", "frequency_low_offset_mhz", "frequency_high_offset_mhz",
+            "frequency_bands_offset_mhz", "rf_center_mhz", "frequency_center_absolute_mhz",
+            "frequency_low_absolute_mhz", "frequency_high_absolute_mhz", "frequency_bands_absolute_mhz"]
+        candidate_records = [{"path": candidate["path"], "recording_id": candidate["recording_id"],
+                              "track_id": candidate["track"]["track_id"],
+                              "unknown_cluster_id": candidate["track"]["unknown_cluster_id"],
+                              **{key: candidate["track"].get(key) for key in positions}} for candidate in candidates]
+        candidate_features = (np.stack([candidate["feature"] for candidate in candidates]) if candidates
+                              else np.empty((0, profile.reference.shape[1]), dtype=np.float32))
+        save_npz(output/"unknown_features.npz", {"kind": "unknown_candidates", "schema_version": 1,
+                 "feature_version": FEATURE_VERSION, "signature": signature, "records": candidate_records},
+                 features=candidate_features)
+        refresh_open_set_results(results, rows_by_file)
+        # Re-render only previously selected previews with FINAL track decisions.
+        # The original slice predictions remain in class_name/known_candidate_class.
+        from util.single_signal_eval import load_spectrum
+        from util.signal_eval_report import save_slice_preview
+        for result in results:
+            for row in rows_by_file[result["path"]]:
+                if not row.get("visualization"):
+                    continue
+                try:
+                    spectrum, domain = load_spectrum(Path(result["path"]), cfg,
+                        row if result["input_type"] == "dat" else None)
+                    save_slice_preview(result["path"], row["slice_index"], spectrum, domain, cfg, row,
+                                       output/"visualizations", result["rf_center_mhz"])
+                except Exception as exc:
+                    if args.fail_fast:
+                        raise
+                    # Never publish an old closed-set preview as an open-set result.
+                    row.pop("visualization", None)
+                    row["visualization_error"] = f"{type(exc).__name__}: {exc}"
+            result["visualization_errors"] = sum("visualization_error" in row for row in rows_by_file[result["path"]])
+        (output/"unknown_clusters.json").write_text(json.dumps(discovery, ensure_ascii=False, indent=2,
+                                                             allow_nan=False)+"\n", encoding="utf-8")
+
+    with (output/"slices.jsonl").open("w", encoding="utf-8") as stream:
+        for rows in rows_by_file.values():
+            for row in rows:
+                for group in row.get("groups", []):
+                    group.pop("embedding", None)  # Keep large vectors in the feature archive only.
                 stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False)+"\n")
-            result["true_class_names"] = truth.get(str(path))
-            result["class_set_correct"] = (result["status"] != "error" and set(result["predicted_classes"]) == set(result["true_class_names"])
-                                            if result["true_class_names"] is not None else None)
-            results.append(result)
-            rows_by_file[str(path)] = rows
-            logger.info("%s | %s | classes=%s | %s observations, %s tracks", path.name, result["status"],
-                        result["predicted_classes"], result["observation_count"], result["track_count"])
-            for track in result["signals"][:10]:
-                logger.info("  %s | %s | %s | %.3f-%.3f ms | votes %s/%s", track["track_id"],
-                    track["class_name"] or "unknown", frequency_text(track, rf), track["start_ms"],
-                    track["end_ms"], track["valid_votes"], track["observation_count"])
-    report = {"schema_version": 2, "signal_mode": "multi", "created_at": datetime.now(timezone.utc).isoformat(),
+    for result in results:
+        for track in result["signals"]:
+            track.pop("_feature", None)
+    metrics = multi_evaluation_metrics(results, cfg.classes)
+    if profile:
+        # Closed-set file-set accuracy would silently ignore anonymous novel IDs.
+        metrics.pop("file_class_set_accuracy", None)
+        metrics.pop("unknown_files", None)  # Legacy vote abstention is not a novel-class count.
+        metrics["known_file_class_presence_metrics"] = metrics.pop("file_class_presence_metrics")
+        labeled = [result for result in results if result.get("true_class_names") is not None]
+        actual_novel = lambda row: bool(set(row["true_class_names"]) - set(cfg.classes))
+        predicted_novel = lambda row: row.get("novel_track_count", 0) > 0
+        tp = sum(actual_novel(row) and predicted_novel(row) for row in labeled)
+        fp = sum(not actual_novel(row) and predicted_novel(row) for row in labeled)
+        fn = sum(actual_novel(row) and not predicted_novel(row) for row in labeled)
+        metrics["file_unknown_presence_metrics"] = {"tp": tp, "fp": fp, "fn": fn,
+            "precision": tp/(tp+fp) if tp+fp else None, "recall": tp/(tp+fn) if tp+fn else None}
+        metrics.update(known_tracks=sum(row.get("known_track_count", 0) for row in results),
+                       files_with_novel_candidates=sum(row.get("novel_track_count", 0) > 0 for row in results),
+                       uncertain_tracks=sum(row.get("uncertain_track_count", 0) for row in results),
+                       no_signal_files=sum(row["status"] == "no_signal" for row in results),
+                       no_detection_slices=sum(row.get("status") == "no_detection" for rows in rows_by_file.values() for row in rows),
+                       no_group_slices=sum(row.get("status") == "no_group" for rows in rows_by_file.values() for row in rows),
+                       uncertain_files=sum(row["status"] == "uncertain" for row in results),
+                       **{key: discovery[key] for key in ("unknown_candidate_tracks", "estimated_unknown_class_count",
+                                                           "clustered_unknown_tracks", "unassigned_unknown_tracks")})
+    report = {"schema_version": 3 if profile or args.export_features else 2, "signal_mode": "multi", "created_at": datetime.now(timezone.utc).isoformat(),
         "checkpoint_path": str(args.checkpoint_path.expanduser().resolve()),
         "yolo_weights": str(args.yolo_weights.expanduser().resolve()),
         "effective_config": {key: value for key, value in vars(cfg).items() if key != "device"},
-        "arguments": vars(args), "device": str(cfg.device), "metrics": multi_evaluation_metrics(results, cfg.classes),
+        "arguments": vars(args), "device": str(cfg.device), "metrics": metrics,
         "files": results}
+    if feature_archive:
+        report["feature_archive"] = feature_archive
+    if profile:
+        report.update(open_set={"profile": str(args.open_set_profile.resolve()),
+                                "profile_sha256": file_sha256(args.open_set_profile),
+                                "threshold": profile.threshold, "k": profile.k,
+                                "calibration": {key: value for key, value in profile.metadata.items() if key != "signature"}},
+                      discovery=discovery)
     (output/"results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str, allow_nan=False)+"\n", encoding="utf-8")
 
     def write_csv(name, records, columns):
@@ -235,13 +368,16 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger):
         "frequency_span_mhz", "occupied_bandwidth_mhz", "frequency_bands_offset_mhz", "rf_center_mhz",
         "frequency_center_absolute_mhz", "frequency_low_absolute_mhz", "frequency_high_absolute_mhz", "frequency_bands_absolute_mhz"]
     observations = (group for rows in rows_by_file.values() for row in rows for group in row.get("groups", []))
+    open_columns = ["recognition_status", "display_label", "known_candidate_class", "ood_score", "ood_threshold",
+        "track_ood_score", "novel_observation_share", "unknown_cluster_id", "cluster_status", "cluster_membership", "cluster_similarity"] if profile else []
     write_csv("signals.csv", observations, ["path", "slice_index", "group_id", "observation_id", "track_id", "class_name",
-        "confidence", "start_ms", "end_ms", *frequency_columns, "vote_accepted", "vote_reason", "selected_boxes", "probabilities"])
+        "confidence", *open_columns, "start_ms", "end_ms", *frequency_columns, "vote_accepted", "vote_reason", "selected_boxes", "probabilities"])
     tracks = ({"path": result["path"], **track} for result in results for track in result["signals"])
     write_csv("tracks.csv", tracks, ["path", "track_id", "status", "class_name", "candidate_class_name", "start_ms", "end_ms",
-        *frequency_columns, "valid_votes", "observation_count", "mean_probability", "vote_share", "vote_counts", "unknown_reason"])
+        *frequency_columns, *open_columns, "valid_votes", "observation_count", "mean_probability", "vote_share", "vote_counts", "unknown_reason"])
     write_csv("results.csv", results, ["path", "input_type", "status", "predicted_classes", "total_slices", "observation_count",
-        "track_count", "accepted_track_count", "rf_center_mhz", "error_slices", "visualization_errors", "true_class_names", "class_set_correct", "error"])
+        "track_count", "accepted_track_count", "rf_center_mhz", "error_slices", "visualization_errors", "true_class_names", "class_set_correct",
+        "predicted_unknown_classes", "known_track_count", "novel_track_count", "uncertain_track_count", "no_signal_reason", "error"])
     write_html_report(output, report, rows_by_file)
     return report
 
