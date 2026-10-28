@@ -1,0 +1,21 @@
+# Class labels come from parent directories. This explicit known-class order
+# excludes novel folders without requiring their names to be present in inputs.
+train:
+  run_mode: train
+  trainer_type: normal
+  input_type: iq_dat
+  train_dataset_path: [/data/uav/iq/known_train]
+  val_dataset_path: [/data/uav/iq/known_val]
+  class_names: [Lightbridge, Ocusync2, Ocusync3, Ocusync4]
+  yolo_weights: /models/detector.pt
+  iq_sample_rate: 100000000
+  iq_segment_ms: 50.0
+  grouping_mode: hopping
+  hop_association: shape
+  epochs: 100
+  batch_size: 32
+  num_workers: 1
+  lr: 0.0001
+  seed: 42
+  supcon_weight: 0.1
+  bbox_cache_mode: "off"

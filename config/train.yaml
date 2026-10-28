@@ -1,0 +1,24 @@
+# Edit paths before running. Relative YAML paths are based on this directory.
+train:
+  run_mode: train
+  trainer_type: normal
+  input_type: png
+  train_dataset_path: [/data/uav/fold1/known_train]
+  val_dataset_path: [/data/uav/fold1/known_val]
+  yolo_weights: /models/detector.pt
+  class_names: [Background, Lightbridge, Ocusync2, Ocusync3, Ocusync4, Skylink1, FPV]
+  exclude_classes: [Background, FPV, Skylink1]
+  incremental_split_mode: normal
+  backbone: resnet18
+  epochs: 100
+  batch_size: 32
+  lr: 0.0001
+  seed: 42
+  grouping_mode: hopping
+  hop_association: shape
+  supcon_weight: 0.1
+  supcon_temperature: 0.2
+  supcon_drop_prob: 0.1
+  supcon_max_drop_fraction: 0.25
+  supcon_jitter_px: 1
+  bbox_cache_mode: "off"

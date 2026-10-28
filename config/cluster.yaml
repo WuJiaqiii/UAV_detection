@@ -1,0 +1,11 @@
+cluster:
+  features: ../experiments/openset_run01/discovery/unknown_features.npz
+  output_dir: ../experiments/recluster_dcg_run01
+  unknown_cluster_backend: dcg
+  unknown_min_cluster_size: 5
+  unknown_min_recordings: 2
+  dcg_topk: 15
+  dcg_cosine_threshold: 0.85
+  dcg_resolution: 1.0
+  dcg_mutual: true
+  dcg_seed: 42

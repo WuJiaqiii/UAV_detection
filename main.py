@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""Unified task entry. Scientific pipelines live in util and the three core scripts."""
+from util.cli import main
+
+
+if __name__ == "__main__":
+    main()
