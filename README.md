@@ -66,7 +66,25 @@ bash run.sh cluster --config config/cluster.yaml --dcg_cosine_threshold 0.9
 
 PNG/MAT 训练读取文件名 `Protocol-[至少4字段]-SNR-...-Figure-N`，解析类别、中心频率及带宽；PNG/MAT 目录只读取第一层，可传多个目录。输入保持原生 512×750，不自行拉伸到 CNN 尺寸。训练只接受单信号样本。
 
-DAT 训练读取类别父目录、随机取 50 ms 片段；验证取中心片段。`class_names` 可显式给出类别顺序；不提供时保留原协议默认映射，IQ 则从目录发现类别。`exclude_classes` 必须属于该映射，类别 ID 与顺序会保存在 checkpoint 中。采集率为 `iq_sample_rate`，与输出频谱的 122.88 MHz 网格区别见 [前端契约](docs/spectrogram_frontend.md)。
+DAT 训练的类别直接取自 `.dat` 文件的父目录，不需要预设协议名称。训练随机取 50 ms 片段，验证取中心片段。例如：
+
+```text
+known_train/                 known_val/
+  Device-A/001.dat             Device-A/101.dat
+  Device-Z/002.dat             Device-Z/102.dat
+```
+
+修改 `config/train_iq.yaml` 中的训练/验证路径、采集率和 YOLO 权重后运行：
+
+```bash
+bash run.sh train --config config/train_iq.yaml
+```
+
+IQ 会从实际使用的训练、验证路径共同发现类别，按名称排序建立统一 ID（上例 `Device-A: 0, Device-Z: 1`），不会自动添加 Background。显式划分需要同时提供 `train_dataset_path` 和 `val_dataset_path`，此时忽略 `dataset_path`；自动划分则只设置 `dataset_path`。输入可为数据根目录、类别目录或文件列表，目录扫描覆盖当前层及下一层，类别名始终是文件的直接父目录名。
+
+IQ 通常应省略 `class_names`；若为恢复旧 checkpoint 指定顺序，列表必须包含发现的全部类别，不能用它隐式过滤数据。需要留出模拟未知类时，用实际目录名设置 `exclude_classes`；排除后重新生成连续 ID。训练和验证共享同一映射，数据中未映射且未明确过滤的类别会报错。PNG/MAT 的 `class_names` 仍可自定义类别空间，不提供时保留原协议默认映射。
+
+最终映射会写入实验 `config.yaml` 和 checkpoint 的 `config.classes`。恢复训练时必须保持类别名称与 ID 一致；预测从 checkpoint 读取类别映射，不根据待测目录重新编号。采集率为 `iq_sample_rate`，与输出频谱的 122.88 MHz 网格区别见 [前端契约](docs/spectrogram_frontend.md)。
 
 `config/train.yaml` 示例将 FPV/Skylink1 留作模拟未知、排除 Background。`supcon_weight=0` 保留原 CE；正值使用有限框丢弃和平移构建第二视图。不要冻结骨干后开启 SupCon。训练存档仍在 `experiments/UAV_时间/models/best.pth`；按已知验证准确率选模型，同时查看匹配召回。
 

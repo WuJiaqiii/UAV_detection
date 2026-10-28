@@ -4,6 +4,8 @@ import torch
 import datetime
 import pytz
 
+from data.iq_dat_loader import resolve_iq_classes
+
 class Config:
     def __setattr__(self, name, value):
         if getattr(self, '_frozen', False) and name in self.__dict__:
@@ -17,7 +19,9 @@ class Config:
             setattr(self, key, value)
             
         names = getattr(args, "class_names", None)
-        if names is not None:
+        if getattr(args, "input_type", "mat") == "iq_dat":
+            self.classes = resolve_iq_classes(self)
+        elif names is not None:
             if not names or len(set(names)) != len(names) or any(not str(n).strip() for n in names):
                 raise ValueError("class_names must be nonempty unique names in checkpoint order")
             self.classes = {name: index for index, name in enumerate(names)}

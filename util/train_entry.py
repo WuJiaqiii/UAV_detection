@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 from data.data_loader import UAVDataset, get_dataloader, create_dataloader
-from data.iq_dat_loader import RawIQDataset, create_iq_train_val_loaders, discover_iq_classes
+from data.iq_dat_loader import RawIQDataset, create_iq_train_val_loaders
 from model.resnet import MaskImageClassifier
 from util.trainer import Trainer
 from util.lwf_trainer import LwFTrainer
@@ -117,7 +117,7 @@ def build_parser():
     g_data.add_argument("--num_workers", type=int, default=4)
     g_data.add_argument("--sample_ratio", type=float, default=1.0)
 
-    g_data.add_argument("--class_names", nargs="+", help="Optional class order, saved in checkpoints; otherwise use protocol defaults or IQ folders")
+    g_data.add_argument("--class_names", nargs="+", help="Optional class order, saved in checkpoints. IQ discovers folder labels automatically; an explicit list must contain all discovered names. MAT/PNG otherwise use protocol defaults.")
     g_data.add_argument("--exclude_classes", type=str, nargs="*", default=[])
     g_data.add_argument("--eval_exclude_classes", type=str, nargs="*", default=[])
     g_data.add_argument(
@@ -334,7 +334,7 @@ def main(args):
         raise ValueError("The current mask builder produces one channel; --mask_in_chans must be 1")
     if args.mask_img_size < 1 or not (1 <= args.mask_fill_value <= 255):
         raise ValueError("mask_img_size must be positive and mask_fill_value must be in [1, 255]")
-    if not (Path(__file__).resolve().parent / "yolov5" / "hubconf.py").is_file():
+    if not (Path(__file__).resolve().parents[1] / "yolov5" / "hubconf.py").is_file():
         raise FileNotFoundError("The yolov5 submodule is empty; initialize it before training")
     if not Path(args.yolo_weights).is_file():
         raise FileNotFoundError(f"YOLO weights not found: {args.yolo_weights}")
@@ -355,9 +355,6 @@ def main(args):
     if config.input_type == "iq_dat":
         validate_iq_settings(config.iq_sample_rate, config.iq_segment_ms,
                              config.iq_n_fft, config.iq_hop_length)
-        iq_paths = (config.dataset_path or []) + (config.train_dataset_path or []) + (config.val_dataset_path or [])
-        if not getattr(config, "class_names", None):
-            config.classes = discover_iq_classes(iq_paths)
     config.rank, config.world_size, config.local_rank = rank, world_size, local_rank
 
     setup_incremental_class_split(config)

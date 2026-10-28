@@ -34,7 +34,7 @@ scripts 仅保留 evaluate_single_signal.py、build_open_set_profile.py、cluste
 
 ## 现有存档和 profile
 
-已有 checkpoint 的权重键和类别映射不变；新增 class_names / seed 是可选训练参数。继续训练时应使用同样类别顺序和原 checkpoint 路径。YAML 不默默覆盖 checkpoint 中的表示设置；predict 使用原解析器的显式覆盖规则。
+已有 checkpoint 的权重键和类别映射不变；新增 class_names / seed 是可选训练参数。IQ/DAT 默认从实际训练/验证路径中的文件父目录发现类别，train_iq.yaml 不预设协议名称；IQ 的 class_names 仅用于显式排列全部已发现类别，排除类使用 exclude_classes。继续训练时应使用同样类别顺序和原 checkpoint 路径。YAML 不默默覆盖 checkpoint 中的表示设置；predict 使用原解析器的显式覆盖规则。
 
 旧 profile 因源码签名变化应重建；旧的参考/校准 features.npz 也有旧签名，需要重新提取。不修改已保存阈值的签名，不关闭检查。新 profile 可继续用于同一模型和有效设置的预测，聚类换后端不需重建。
 

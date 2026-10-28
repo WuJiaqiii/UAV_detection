@@ -1,12 +1,12 @@
-# Class labels come from parent directories. This explicit known-class order
-# excludes novel folders without requiring their names to be present in inputs.
+# Discover class labels from .dat parent directories across train/validation.
+# Do not copy the MAT/PNG protocol list here. Use actual folder names in
+# exclude_classes if you need to hold out classes for an open-set experiment.
 train:
   run_mode: train
   trainer_type: normal
   input_type: iq_dat
   train_dataset_path: [/data/uav/iq/known_train]
   val_dataset_path: [/data/uav/iq/known_val]
-  class_names: [Lightbridge, Ocusync2, Ocusync3, Ocusync4]
   yolo_weights: /models/detector.pt
   iq_sample_rate: 100000000
   iq_segment_ms: 50.0

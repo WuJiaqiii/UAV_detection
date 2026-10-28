@@ -90,6 +90,11 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(task=task, config=name):
                 self.dry([task, "--config", str(ROOT/"config"/name)])
 
+    def test_iq_example_does_not_override_folder_discovery_with_protocol_names(self):
+        args = self.dry(["train", "--config", str(ROOT/"config/train_iq.yaml")])
+        self.assertEqual(args.input_type, "iq_dat")
+        self.assertIsNone(args.class_names)
+
     def test_offline_cluster_dispatch_does_not_import_torch_or_yolo(self):
         code = ("import sys, contextlib, io; from util.cli import main; "
                 "stream=io.StringIO(); "
