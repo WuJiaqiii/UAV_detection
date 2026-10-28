@@ -7,14 +7,14 @@ import sys
 
 import yaml
 
-TASKS = ("train", "predict", "profile", "cluster", "discover")
-SECTIONS = {"train", "evaluation", "predict", "profile", "cluster", "discovery"}
+TASKS = ("train", "predict", "profile", "cluster", "discover", "experiment", "infer")
+SECTIONS = {"train", "evaluation", "predict", "profile", "cluster", "discovery", "experiment", "infer"}
 PATH_OPTIONS = {
     "dataset_path", "train_dataset_path", "val_dataset_path", "yolo_weights", "checkpoint_path",
     "lwf_teacher_checkpoint", "bbox_cache_path", "bbox_cache_dataset_root", "frontend_config",
     "classes_json", "inputs", "output_dir", "features", "reference_inputs", "calibration_inputs",
     "test_inputs", "test_output_dir", "reference_labels_json", "calibration_labels_json",
-    "test_labels_json", "labels_json", "recording_ids_json", "rf_centers_json", "open_set_profile",
+    "test_labels_json", "labels_json", "recording_ids_json", "rf_centers_json", "open_set_profile", "experiment_dir",
 }
 
 
@@ -28,13 +28,11 @@ def load_settings(path, task):
     for key, value in document.items():
         if not isinstance(value, dict):
             raise ValueError(f"Config section {key} must be a mapping")
-    if task == "train":
-        settings = document.get("train", {}).copy()
-    elif task == "cluster":
-        settings = document.get("cluster", {}).copy()
+    if task in {"train", "cluster", "experiment"}:
+        settings = document.get(task, {}).copy()
     else:
         settings = document.get("evaluation", {}).copy()
-        settings.update(document.get("predict" if task == "predict" else "profile", {}))
+        settings.update(document.get(task if task in {"predict", "infer"} else "profile", {}))
         if task == "discover":
             settings.update(document.get("discovery", {}))
     for key, value in list(settings.items()):
@@ -118,12 +116,21 @@ def profile_parser(discover=False):
 
 
 def build_task_parser(task):
+    if task == "experiment":
+        from util.open_set_experiment import build_parser
+        return build_parser()
     if task == "train":
         from util.train_entry import build_parser
         return build_parser()
-    if task == "predict":
+    if task in {"predict", "infer"}:
         from scripts.evaluate_single_signal import build_parser
-        return build_parser()
+        parser = build_parser()
+        if task == "infer":
+            parser.description = "Unlabeled open-set inference and batch unknown clustering; requires a frozen profile"
+            for action in parser._actions:
+                if action.dest == "open_set_profile":
+                    action.required = True
+        return parser
     if task == "cluster":
         from scripts.cluster_unknown_features import build_parser
         return build_parser()
@@ -173,7 +180,19 @@ def run_profile(args, discover=False, predictor=None):
     return run(prediction, predictor)
 
 
+def validate_infer_args(args):
+    if args.signal_mode != "multi" or args.export_features or args.labels_json or args.label_from_parent or args.label_from_filename:
+        raise ValueError("infer requires multi mode and unlabeled inputs; use predict/discover for labeled evaluation")
+
+
 def dispatch(task, args):
+    if task == "experiment":
+        from util.open_set_experiment import run_experiment
+        return run_experiment(args, args._config_path)
+    if task == "infer":
+        validate_infer_args(args)
+        from scripts.evaluate_single_signal import run
+        return run(args)
     if task == "train":
         from util.train_entry import main
         return main(args)
@@ -189,8 +208,8 @@ def dispatch(task, args):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in {"-h", "--help"}:
-        print("Usage: python main.py {train,predict,profile,cluster,discover} [--config FILE] [--dry_run] [options]\n"
-              "Config: train/evaluation/predict/profile/discovery/cluster mappings; CLI values override YAML.\n"
+        print("Usage: python main.py {" + ",".join(TASKS) + "} [--config FILE] [--dry_run] [options]\n"
+              "Config sections follow task names; evaluation is shared. CLI values override YAML.\n"
               "Use TASK --help for the underlying options. Relative YAML paths are based on its directory.")
         return
     task = argv.pop(0)
@@ -209,9 +228,16 @@ def main(argv=None):
         parser.parse_args(["--help"])
     settings, path = load_settings(controls.config, task)
     args = parser.parse_args([*settings_tokens(parser, settings), *explicit])
+    if task == "experiment":
+        from util.open_set_experiment import stage_arguments
+        if controls.dry_run:
+            stage_arguments(args, path)
+        args._config_path = path
+    if task == "infer" and controls.dry_run:
+        validate_infer_args(args)
     if controls.dry_run:
         print(json.dumps({"task": task, "config": str(path) if path else None,
-                          "effective": vars(args)}, default=str, ensure_ascii=False, indent=2, allow_nan=False))
+                          "effective": {k: v for k, v in vars(args).items() if not k.startswith("_")}}, default=str, ensure_ascii=False, indent=2, allow_nan=False))
         return args
     result = dispatch(task, args)
     if isinstance(result, dict):

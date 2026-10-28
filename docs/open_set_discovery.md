@@ -78,4 +78,4 @@ bash run.sh cluster --config config/cluster.yaml
 
 profile 绑定权重、有效设置、表示版本及关键源码。本次整理新增 eval_common.py / group_predictor.py 后，旧 profile 需要重新提取和校准；不关闭签名检查。旧模型参数键保持兼容。仅更换发现后端可直接复用同一候选归档，不重新检测，也不修改原 HTML/图片。
 
-报告的未知 precision/recall 是文件级是否含 novel_candidate。标准 GCD All/Old/New ACC、ARI/NMI 仍需要逐轨迹或可靠单信号真值和整体匹配；本版没有自动补齐这些指标。未知簇不自动注册为永久协议名称。
+原 file_unknown_presence_metrics 的未知 precision/recall 是文件级是否含 novel_candidate。现在额外提供单类别原始记录的主轨迹 All/Known/Unknown ACC、未知匈牙利匹配、ARI/NMI、覆盖率及类别数误差；多信号文件的实例真值仍需额外标注。完整训练/推理入口和指标分母见 [开集实验指南](open_set_experiments.md)。未知簇不自动注册为永久协议名称。

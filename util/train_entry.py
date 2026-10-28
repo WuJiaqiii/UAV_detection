@@ -169,6 +169,7 @@ def build_parser():
 
     g_io = parser.add_argument_group("Checkpoint / Cache")
     g_io.add_argument("--checkpoint_path", type=str, default=None)
+    g_io.add_argument("--experiment_dir", type=str, default=None, help="Optional output directory; defaults to a timestamp under experiments")
     g_io.add_argument("--save_interval", type=int, default=5)
 
     g_cache = parser.add_argument_group("BBox Cache")

@@ -3,6 +3,7 @@ import yaml
 import torch
 import datetime
 import pytz
+from pathlib import Path
 
 from data.iq_dat_loader import resolve_iq_classes
 
@@ -39,7 +40,8 @@ class Config:
         
         log_name = 'UAV_' + str(current_time.strftime("%Y%m%d_%H%M%S"))
         
-        self.cfg_dir = f'{self.base_dir}/{log_name}'
+        experiment_dir = getattr(args, "experiment_dir", None)
+        self.cfg_dir = str(Path(experiment_dir).expanduser().resolve()) if experiment_dir else f'{self.base_dir}/{log_name}'
         self.model_dir = f'{self.cfg_dir}/models'
         self.log_dir = f'{self.cfg_dir}/log'
         self.cache_dir = f'{self.cfg_dir}/cache'

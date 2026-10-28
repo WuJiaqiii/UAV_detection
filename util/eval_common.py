@@ -243,6 +243,30 @@ def vote_predictions(rows, classes, method="majority", min_slice_confidence=0.,
     return result
 
 
+def validate_prediction_options(args, classes):
+    """Validate stateless voting/tracking options before models or training."""
+    if not 0 <= args.min_novel_observation_share <= 1:
+        raise ValueError("min_novel_observation_share must be in [0, 1]")
+    if args.unknown_min_cluster_size < 2 or args.unknown_min_samples < 1 or args.unknown_min_recordings < 1:
+        raise ValueError("Invalid unknown clustering support counts")
+    if args.signal_mode == "multi" and args.group_policy not in (None, "all"):
+        raise ValueError("Multi mode classifies every group; main/union require --signal_mode single")
+    if args.signal_mode == "single" and args.group_policy == "all":
+        raise ValueError("--group_policy all requires --signal_mode multi")
+    options = dict(method=args.vote_method, min_slice_confidence=args.min_slice_confidence,
+                   min_votes=args.min_votes, min_vote_share=args.min_vote_share,
+                   exclude_classes=args.exclude_vote_classes)
+    vote_predictions([], classes, **options)
+    if args.max_slices < 0 or not 0 < args.iq_stride_ms < float("inf"):
+        raise ValueError("Need max_slices >= 0 and finite iq_stride_ms > 0")
+    if args.classifier_batch_size < 1 or args.max_visualizations < 0:
+        raise ValueError("Need classifier_batch_size >= 1 and max_visualizations >= 0")
+    if args.signal_mode == "multi":
+        from util.multi_signal_eval import FrequencyTracker
+        FrequencyTracker(args.track_freq_tolerance_mhz, args.track_min_band_iou, args.track_max_gap_ms)
+    return options
+
+
 def read_path_mapping(path):
     path = Path(path).expanduser().resolve()
     raw = json.loads(path.read_text(encoding="utf-8"))

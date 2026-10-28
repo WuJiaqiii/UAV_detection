@@ -19,6 +19,10 @@ python -m pip install -r requirements.txt
 
 ```bash
 bash run.sh --help
+# 自动类别划分、已知训练、校准与带标签开集测试：
+bash run.sh experiment --config config/experiment_iq.yaml
+# 已有模型/profile 对无标签输入推理与聚类：
+bash run.sh infer --config config/infer_open_set.yaml
 bash run.sh train --config config/train.yaml --dry_run
 bash run.sh train --config config/train.yaml
 bash run.sh predict --config config/predict.yaml
@@ -33,6 +37,8 @@ bash run.sh discover --config config/open_set.yaml
 
 | 任务 | 工作 |
 | --- | --- |
+| experiment | 按原始记录划分已知/未知，训练最佳模型、独立校准并评估；导出无标签推理配置 |
+| infer | 强制使用 profile 的无标签开集推理与未知聚类 |
 | train | 已知类 CE / CE+SupCon，保留可选 LwF |
 | predict | 逐组分类和 DAT 轨迹投票；有 open_set_profile 时启用拒识与未知发现 |
 | profile | 从 reference_inputs / calibration_inputs 提取特征并建立已知 profile |
@@ -41,9 +47,11 @@ bash run.sh discover --config config/open_set.yaml
 
 ## 实验配置
 
-`config/` 中提供 PNG 训练、IQ 训练、普通预测、开集流程、离线重聚类五个示例。支持 `train / evaluation / profile / predict / discovery / cluster` 配置段：
+`config/` 中提供完整实验、无标签开集推理，以及原 PNG/IQ 训练、普通预测、开集流程和离线重聚类示例。支持 `experiment / train / evaluation / profile / predict / discovery / cluster / infer` 配置段：
 
 - train：训练参数、类别顺序和排除项。
+- experiment：数据输入、已知/未知类别选择、按原始记录的划分比例与种子；训练数据路径和最终类别空间由实验生成。
+- infer：无标签输入、profile 和输出目录；覆盖 evaluation 的同名设置。
 - evaluation：profile 提取和 predict 共用的权重、前端、分组、切片和投票参数。
 - profile：参考/校准输入、真值来源和阈值设置。
 - discovery：discover 专用的混合测试输入、标签和后端；不会进入参考/校准标签。
@@ -94,7 +102,7 @@ IQ 通常应省略 `class_names`；若为恢复旧 checkpoint 指定顺序，列
 
 有 profile 时，最终结论读 `tracks.csv` 的 `display_label / recognition_status`；逐组 `class_name` 仍为已知分类头的原始候选。`unknown_clusters.json` 保存估计 K、支持记录和原型；`unknown_features.npz` 可重聚类，`unknown_prototypes.npz` 保存同空间簇中心。图示/HTML 保留原始框的时间和频率；给出 RF 中心后可输出绝对 MHz。
 
-详见 [开集发现说明](docs/open_set_discovery.md) 与 [第一轮清理迁移说明](docs/cleanup_migration.md)。模型权重结构和类别语义保持；本次移动源码后需要重建 profile。
+两种完整运行方式、输出和评分定义见 [开集实验指南](docs/open_set_experiments.md)。底层算法见 [开集发现说明](docs/open_set_discovery.md)，历史整理见 [第一轮清理迁移说明](docs/cleanup_migration.md)。
 
 ## 目录与兼容
 
