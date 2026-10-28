@@ -309,12 +309,15 @@ logging.setLoggerClass(ExpLogger)
 def create_logger(filename: str) -> logging.Logger:
     
     def custom_time(*args):
-        utc_plus_8 = datetime.now(tz=timezone.utc) + timedelta(hours=8)
-        return utc_plus_8.timetuple()
+        from util.run_context import TIMEZONE
+        return datetime.fromtimestamp(args[0], TIMEZONE).timetuple()
         
     logger = logging.getLogger(filename)
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
+    for handler in list(logger.handlers):
+        handler.close()
+        logger.removeHandler(handler)
 
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
@@ -323,9 +326,10 @@ def create_logger(filename: str) -> logging.Logger:
     formatter.converter = custom_time
     ch.setFormatter(formatter)
     
-    fh = logging.FileHandler(filename)
+    fh = logging.FileHandler(filename, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    formatter.converter = custom_time
     fh.setFormatter(formatter)
 
     logger.addHandler(ch)

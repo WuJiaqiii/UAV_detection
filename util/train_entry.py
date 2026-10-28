@@ -1,6 +1,7 @@
 import os
 import argparse
 import logging
+import math
 from pathlib import Path
 
 from data.data_loader import UAVDataset, get_dataloader, create_dataloader
@@ -48,8 +49,6 @@ def build_parser():
     g_yolo.add_argument("--yolo_iou_thres", type=float, default=0.30)
     g_yolo.add_argument("--yolo_max_det", type=int, default=1000)
     g_yolo.add_argument("--yolo_classes", type=int, nargs="*", default=None)
-    g_yolo.add_argument("--yolo_half", action=argparse.BooleanOptionalAction, default=False)
-    g_yolo.add_argument("--yolo_warmup", action=argparse.BooleanOptionalAction, default=True)
 
 
 
@@ -79,7 +78,6 @@ def build_parser():
     g_pre.add_argument("--freq_eps", type=float, default=5.0)
     g_pre.add_argument("--freq_min_samples", type=int, default=1)
     g_pre.add_argument("--merge_freq_thresh", type=float, default=10.0)
-    g_pre.add_argument("--merge_w_log_thresh", type=float, default=0.35)
     g_pre.add_argument("--merge_h_log_thresh", type=float, default=0.35)
     g_pre.add_argument("--merge_energy_thresh", type=float, default=1.0)
     g_pre.add_argument("--min_group_len", type=int, default=2)
@@ -97,7 +95,6 @@ def build_parser():
     g_match.add_argument("--match_freq_thresh", type=float, default=30.0)
     g_match.add_argument("--match_bw_thresh", type=float, default=20.0)
     g_match.add_argument("--match_bandwidth_weight", type=float, default=1.0)
-    g_match.add_argument("--match_size_penalty", type=float, default=1.0)
     g_match.add_argument("--skip_unmatched", action=argparse.BooleanOptionalAction, default=True)
     g_match.add_argument("--match_use_bandwidth", action=argparse.BooleanOptionalAction, default=False)
 
@@ -116,6 +113,7 @@ def build_parser():
     g_data.add_argument("--batch_size", type=int, default=32)
     g_data.add_argument("--num_workers", type=int, default=4)
     g_data.add_argument("--sample_ratio", type=float, default=1.0)
+    g_data.add_argument("--recording_ids_json", type=Path, default=None, help="Optional original-recording IDs for an automatic train/val split")
 
     g_data.add_argument("--class_names", nargs="+", help="Optional class order, saved in checkpoints. IQ discovers folder labels automatically; an explicit list must contain all discovered names. MAT/PNG otherwise use protocol defaults.")
     g_data.add_argument("--exclude_classes", type=str, nargs="*", default=[])
@@ -169,7 +167,6 @@ def build_parser():
 
     g_io = parser.add_argument_group("Checkpoint / Cache")
     g_io.add_argument("--checkpoint_path", type=str, default=None)
-    g_io.add_argument("--experiment_dir", type=str, default=None, help="Optional output directory; defaults to a timestamp under experiments")
     g_io.add_argument("--save_interval", type=int, default=5)
 
     g_cache = parser.add_argument_group("BBox Cache")
@@ -311,7 +308,23 @@ def setup_incremental_class_split(config, logger=None):
             f"{getattr(config, 'lwf_old_num_classes', None)}"
         )
 
+def validate_training_options(args):
+    for name in ("epochs", "batch_size", "save_interval", "early_stop_patience", "cosine_annealing_T0", "cosine_annealing_mult"):
+        if int(getattr(args, name)) < 1:
+            raise ValueError(f"{name} must be >= 1")
+    if args.num_workers < 0 or args.seed < 0:
+        raise ValueError("num_workers and seed must be nonnegative")
+    for name, allow_zero in (("lr", False), ("weight_decay", True), ("lwf_temperature", False), ("lwf_lambda_kd", True)):
+        value = float(getattr(args, name))
+        if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
+            raise ValueError(f"{name} must be finite and {'nonnegative' if allow_zero else 'positive'}")
+
+
 def main(args):
+    if not getattr(args, "_run_dir", None):
+        from util.run_context import execute_run
+        return execute_run("train", args, main)
+    validate_training_options(args)
     set_seed(seed=getattr(args, "seed", 42))
     from model.representation import validate_representation_options
     validate_representation_options(args)
@@ -405,7 +418,7 @@ def main(args):
         backbone=config.backbone,
         num_classes=config.num_classes,
         in_chans=config.mask_in_chans,
-        pretrained=config.mask_pretrained,
+        pretrained=config.mask_pretrained and not config.checkpoint_path and config.trainer_type != "lwf",
         dropout=config.cnn_dropout,
         freeze_backbone=config.freeze_backbone,
     )
@@ -457,10 +470,16 @@ def main(args):
         bbox_cache=bbox_cache,
     )
 
-    if str(config.run_mode).lower() == "train":
-        trainer.train()
-    else:
-        trainer.infer(infer_loader)
+    try:
+        if str(config.run_mode).lower() == "train":
+            trainer.train()
+        else:
+            trainer.infer(infer_loader)
+    finally:
+        trainer.writer.close()
+        for handler in list(logger.handlers):
+            handler.close()
+            logger.removeHandler(handler)
 
 if __name__ == "__main__":
     main(build_parser().parse_args())

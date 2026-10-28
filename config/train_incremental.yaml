@@ -1,0 +1,25 @@
+# IQ LwF example. Use actual folder names; teacher IDs must match the old prefix.
+train:
+  run_mode: train
+  trainer_type: lwf
+  input_type: iq_dat
+  train_dataset_path: [/data/uav/iq/new_train]
+  val_dataset_path: [/data/uav/iq/old_and_new_val]
+  yolo_weights: /models/detector.pt
+  lwf_teacher_checkpoint: /models/base_best.pth
+  incremental_split_mode: incremental
+  incremental_new_classes: [Ocusync3]
+  lwf_old_num_classes: 0  # Infer from discovered old classes; check teacher metadata
+  lwf_temperature: 4.0
+  lwf_lambda_kd: 10.0
+  iq_sample_rate: 100000000
+  grouping_mode: hopping
+  hop_association: shape
+  backbone: resnet18
+  mask_pretrained: false
+  epochs: 100
+  batch_size: 32
+  num_workers: 1
+  lr: 0.0001
+  seed: 42
+  bbox_cache_mode: "off"

@@ -2,6 +2,22 @@
 from util.open_set import FEATURE_VERSION, save_npz, normalize_features
 
 
+def parse_test_args(parser, tokens):
+    """Inject internal stage paths for isolated core tests, never public CLI."""
+    tokens = list(tokens)
+    outputs = {}
+    for flag in ("--output_dir", "--test_output_dir"):
+        if flag in tokens:
+            index = tokens.index(flag)
+            from pathlib import Path
+            outputs[flag[2:]] = Path(tokens[index + 1])
+            del tokens[index:index + 2]
+    args = parser.parse_args(tokens)
+    for key, value in outputs.items():
+        setattr(args, key, value)
+    return args
+
+
 def archive(path, features, labels, split, signature=None, classes=None):
     classes = classes or {"known": 0}
     records = [{"path": f"{split}/{i}.png", "track_id": "T0001", "recording_id": f"{split}_{i}",

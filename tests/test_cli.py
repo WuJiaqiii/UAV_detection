@@ -1,3 +1,4 @@
+from tests.fixtures import parse_test_args
 import contextlib
 import io
 import json
@@ -24,6 +25,9 @@ class ConfigurationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="uav-cli-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.run_root = patch("util.run_context.EXPERIMENT_ROOT", self.root/"runs")
+        self.run_root.start()
+        self.addCleanup(self.run_root.stop)
 
     def config(self, value):
         path = self.root/"experiment.yaml"
@@ -37,7 +41,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_yaml_paths_lists_boolean_and_cli_precedence(self):
         path = self.config({"evaluation": {"checkpoint_path": "weights/model.pth", "yolo_weights": "weights/yolo.pt",
             "recursive": True, "grouping_mode": "hopping"}, "predict": {"inputs": ["captures/*.dat"],
-            "output_dir": "results", "save_visuals": False, "min_votes": 3,
+            "save_visuals": False, "min_votes": 3,
             "settings": {"min_group_len": 1}}})
         args = self.dry(["predict", "--config", str(path), "--min_votes", "2", "--save_visuals", "--no-recursive"])
         self.assertEqual(args.min_votes, 2)
@@ -59,7 +63,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_discovery_and_profile_share_feature_options_without_test_label_leakage(self):
         path = self.config({"evaluation": {"checkpoint_path": "model.pth", "yolo_weights": "yolo.pt",
             "iq_sample_rate": 122880000, "min_votes": 2}, "profile": {"reference_inputs": ["train"],
-            "calibration_inputs": ["cal"], "output_dir": "profile", "label_mode": "parent"},
+            "calibration_inputs": ["cal"], "label_mode": "parent"},
             "discovery": {"test_inputs": ["test"], "test_labels_json": "truth.json", "unknown_cluster_backend": "dcg"}})
         profile = self.dry(["profile", "--config", str(path)])
         discovery = self.dry(["discover", "--config", str(path)])
@@ -84,7 +88,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(train.call_args.args[0].yolo_weights, "legacy.pt")
 
     def test_example_configs_parse_for_every_documented_task(self):
-        for task, name in (("train", "train.yaml"), ("train", "train_iq.yaml"), ("predict", "predict.yaml"),
+        for task, name in (("train", "train.yaml"), ("train", "train_iq.yaml"), ("train", "train_incremental.yaml"), ("predict", "predict.yaml"),
                            ("profile", "open_set.yaml"), ("discover", "open_set.yaml"),
                            ("predict", "open_set.yaml"), ("cluster", "cluster.yaml")):
             with self.subTest(task=task, config=name):
@@ -98,7 +102,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_offline_cluster_dispatch_does_not_import_torch_or_yolo(self):
         code = ("import sys, contextlib, io; from util.cli import main; "
                 "stream=io.StringIO(); "
-                "\nwith contextlib.redirect_stdout(stream): main(['cluster','--features','x.npz','--output_dir','out','--dry_run'])\n"
+                "\nwith contextlib.redirect_stdout(stream): main(['cluster','--features','x.npz','--dry_run'])\n"
                 "assert 'torch' not in sys.modules; assert 'util.detector' not in sys.modules")
         result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -107,11 +111,11 @@ class ConfigurationTests(unittest.TestCase):
         parser = build_task_parser("profile")
         base = ["--reference_inputs", "train", "--calibration_inputs", "cal", "--checkpoint_path", "x.pth",
                 "--yolo_weights", "y.pt", "--output_dir", str(self.root/"output")]
-        args = parser.parse_args([*base, "--label_from_filename"])
+        args = parse_test_args(parser, [*base, "--label_from_filename"])
         with self.assertRaisesRegex(ValueError, "label_mode"):
             run_profile(args)
         self.assertFalse(args.output_dir.exists())
-        args = parser.parse_args(base)
+        args = parse_test_args(parser, base)
         args.output_dir.mkdir()
         (args.output_dir/"existing.txt").write_text("keep")
         with self.assertRaisesRegex(ValueError, "new or empty"):
@@ -133,7 +137,7 @@ class DiscoveryPipelineTests(unittest.TestCase):
             truth = root/"truth.json"
             truth.write_text(json.dumps({str(p): "unseen" for p in (root/"test/known").glob("*.png")}))
             parser = build_task_parser("discover")
-            args = parser.parse_args(["--reference_inputs", str(root/"ref"), "--calibration_inputs", str(root/"cal"),
+            args = parse_test_args(parser, ["--reference_inputs", str(root/"ref"), "--calibration_inputs", str(root/"cal"),
                 "--test_inputs", str(root/"test"), "--recursive", "--label_mode", "parent", "--checkpoint_path", str(checkpoint),
                 "--yolo_weights", str(yolo), "--output_dir", str(root/"report"), "--knn_k", "1",
                 "--min_calibration_per_class", "2", "--unknown_cluster_backend", "dcg", "--unknown_min_cluster_size", "2",

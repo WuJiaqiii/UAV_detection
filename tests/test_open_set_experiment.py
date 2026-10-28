@@ -23,12 +23,15 @@ class ExperimentTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="uav-experiment-", dir=ROOT)
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.run_root = patch("util.run_context.EXPERIMENT_ROOT", self.root/"runs")
+        self.run_root.start()
+        self.addCleanup(self.run_root.stop)
         self.weights = self.root / "detector.pt"
         self.weights.write_bytes(b"synthetic detector path fixture")
 
     def configuration(self, input_type="png", **experiment):
         doc = {"experiment": {"inputs": [str(self.root / "data")], "input_type": input_type,
-                              "known_classes": ["A"], "output_dir": str(self.root / "experiment"), **experiment},
+                              "known_classes": ["A"], **experiment},
                "train": {"yolo_weights": str(self.weights), "epochs": 1, "num_workers": 0,
                          "mask_img_size": 32, "mask_pretrained": False},
                "profile": {"knn_k": 1, "min_calibration_per_class": 1},
@@ -40,7 +43,9 @@ class ExperimentTests(unittest.TestCase):
 
     def args(self, path):
         with contextlib.redirect_stdout(io.StringIO()):
-            return main(["experiment", "--config", str(path), "--dry_run"])
+            args = main(["experiment", "--config", str(path), "--dry_run"])
+        args.output_dir = self.root / "experiment"
+        return args
 
     def png_data(self):
         for name, count, base in (("A", 8, 10), ("B", 4, 200)):
@@ -113,7 +118,7 @@ class ExperimentTests(unittest.TestCase):
         path, _ = self.configuration()
         args = self.args(path)
         def wrong_head(train):
-            destination = Path(train.experiment_dir) / "models/best.pth"
+            destination = Path(train._run_dir) / "models/best.pth"
             destination.parent.mkdir(parents=True)
             torch.save({"config": {"classes": {"B": 0}}, "model_state_dict": {}}, destination)
         with self.assertRaisesRegex(ValueError, "class mapping"):
@@ -204,7 +209,7 @@ class ExperimentTests(unittest.TestCase):
         def train_runner(train):
             self.assertEqual(train.class_names, ["A"])
             self.assertTrue(all(Path(p).name.startswith("A-") for p in train.train_dataset_path + train.val_dataset_path))
-            destination = Path(train.experiment_dir) / "models/best.pth"
+            destination = Path(train._run_dir) / "models/best.pth"
             destination.parent.mkdir(parents=True)
             torch.save({"model_state_dict": {}, "config": {"classes": {"A": 0}, "mask_img_size": 32}}, destination)
         class Predictor:
@@ -214,7 +219,12 @@ class ExperimentTests(unittest.TestCase):
                     "class_name": "A", "class_id": 0, "confidence": 1., "probabilities": [1.],
                     "selected_boxes": [[10, 100, 50, 110], [100, 100, 140, 110]],
                     "selected_group_score": 1., "embedding": embedding}]}
-        report = run_experiment(args, path, train_runner=train_runner, predictor=Predictor())
+        from scripts.evaluate_single_signal import run as actual_run
+        with patch("util.train_entry.main", side_effect=train_runner), \
+             patch("scripts.evaluate_single_signal.run", side_effect=lambda a, predictor=None: actual_run(a, Predictor())), \
+             contextlib.redirect_stdout(io.StringIO()):
+            report = main(["experiment", "--config", str(path)])
+        args.output_dir = Path(report["run_dir"])
         self.assertEqual(report["status"], "complete")
         self.assertEqual(report["metrics"]["open_set_evaluation"]["all_accuracy"], 1.)
         self.assertEqual(report["metrics"]["estimated_unknown_class_count"], 1)
@@ -234,7 +244,7 @@ class ExperimentTests(unittest.TestCase):
         self.assertIsNone(prediction["metrics"]["open_set_evaluation"]["all_accuracy"])
 
     def test_infer_requires_profile_and_rejects_truth_even_in_dry_run(self):
-        base = ["infer", "--inputs", "unlabeled", "--checkpoint_path", "model.pth", "--yolo_weights", "detector.pt", "--output_dir", "out", "--dry_run"]
+        base = ["infer", "--inputs", "unlabeled", "--checkpoint_path", "model.pth", "--yolo_weights", "detector.pt", "--dry_run"]
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             main(base)
         for option in ("--label_from_parent", "--label_from_filename", "--export_features"):

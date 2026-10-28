@@ -6,6 +6,7 @@ venv/
 .coverage
 htmlcov/
 experiments/
+experiment/
 results/
 outputs/
 work/

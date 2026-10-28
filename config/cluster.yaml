@@ -1,6 +1,5 @@
 cluster:
-  features: ../experiments/openset_run01/discovery/unknown_features.npz
-  output_dir: ../experiments/recluster_dcg_run01
+  features: /data/uav/unknown_features.npz  # Candidate archive from an earlier inference/discovery run
   unknown_cluster_backend: dcg
   unknown_min_cluster_size: 5
   unknown_min_recordings: 2

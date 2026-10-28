@@ -14,7 +14,7 @@ bash run.sh profile --config config/open_set.yaml
 bash run.sh predict --config config/open_set.yaml
 ```
 
-以上是两种替代方式。已非空的 profile 输出目录不能再次使用。profile 默认不保存参考/校准图片；discover 的 `save_visuals` 控制最终测试图片。直接使用旧核心 Python 脚本也仍受支持。
+以上是两种替代方式。每次命令自动创建 `experiment/<任务类型>_<北京时间>/`；分步运行时，把 profile 返回的实际 known_profile.npz 路径填入预测配置。profile 默认不保存参考/校准图片；discover 的 `save_visuals` 控制最终测试图片。直接使用核心 Python 脚本也遵循相同目录规则。
 
 配置段 evaluation 对三个特征/推理阶段共用，确保权重、前端、分组、mask、切片、投票和关联一致。profile 段只处理已知参考与校准；discovery 段的 test_labels_json / test_label_mode 只用于混合测试报告，不会进入 profile。
 

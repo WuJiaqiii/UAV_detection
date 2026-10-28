@@ -16,7 +16,6 @@ evaluation:
 profile:
   reference_inputs: [/data/uav/fold1/known_train]
   calibration_inputs: [/data/uav/fold1/known_calibration]
-  output_dir: ../experiments/openset_run01
   label_mode: filename   # parent for class-folder DAT; json for explicit mappings
   knn_k: 5
   known_false_reject_rate: 0.01
@@ -33,8 +32,7 @@ discovery:
   # test_label_mode: filename
 predict:
   inputs: [/data/uav/fold1/test_mixed]
-  output_dir: ../experiments/openset_test_run01
-  open_set_profile: ../experiments/openset_run01/known_profile.npz
+  open_set_profile: /models/known_profile.npz  # Copy the profile path printed by the profile task
   unknown_cluster_backend: hdbscan
   unknown_min_cluster_size: 5
   unknown_min_recordings: 2

@@ -6,7 +6,6 @@ evaluation:
   # Saved effective model/frontend/group settings are used unless overridden.
 predict:
   inputs: [/data/uav/test_mixed]
-  output_dir: ../experiments/predict_run01
   save_visuals: true
   max_visualizations: 24
   # rf_center_mhz: 2400

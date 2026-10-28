@@ -22,6 +22,9 @@ class IQClassTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="uav-iq-labels-", dir=Path(__file__).resolve().parents[1])
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        patcher = patch("util.run_context.EXPERIMENT_ROOT", self.root/"runs")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def recording(self, split, name, index=0):
         path = self.root / split / name / f"capture_{index}.dat"
@@ -29,6 +32,7 @@ class IQClassTests(unittest.TestCase):
         # Index real-length 50 ms files without constructing spectrograms here.
         # Numerical conversion and crop behavior are covered by frontend tests.
         with path.open("wb") as stream:
+            stream.write(f"{split}/{name}/{index}".encode("utf-8"))
             stream.truncate(100_000_000 // 20 * 4)
         return path
 

@@ -4,4 +4,5 @@ from util.cli import main
 
 
 if __name__ == "__main__":
-    main()
+    from util.run_context import command_exit_code
+    raise SystemExit(command_exit_code(main()))

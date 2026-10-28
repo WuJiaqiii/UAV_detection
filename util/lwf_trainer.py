@@ -7,23 +7,29 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 from util.trainer import Trainer
-from util.checkpoint import _strip_module_prefix
+from util.checkpoint import _strip_module_prefix, _validate_checkpoint_classes
 from util.utils import _make_pbar, AverageMeter
 from model.resnet import MaskImageClassifier
 
 
-def load_state_skip_mismatch(model, checkpoint_path, device, logger=None):
+def load_state_skip_mismatch(model, checkpoint_path, device, logger=None, checkpoint=None):
     """
     Load checkpoint weights into model, skipping keys with shape mismatch.
     This is needed when old_num_classes != new_num_classes.
     """
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    ckpt = checkpoint if checkpoint is not None else torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     if "model_state_dict" not in ckpt:
         raise RuntimeError(f"No model_state_dict found in checkpoint: {checkpoint_path}")
 
     state_dict = _strip_module_prefix(ckpt["model_state_dict"])
     model_state = model.state_dict()
+    head_prefix = "net.fc.1." if model.backbone_name.startswith("resnet") else "net.classifier.3."
+    incompatible = [key for key, value in model_state.items() if not key.startswith(head_prefix) and
+                    (key not in state_dict or tuple(state_dict[key].shape) != tuple(value.shape))]
+    unexpected = set(state_dict) - set(model_state)
+    if incompatible or unexpected:
+        raise ValueError(f"LwF backbone mismatch; missing/incompatible={incompatible}, unexpected={sorted(unexpected)}")
 
     filtered = {}
     skipped = []
@@ -60,6 +66,22 @@ class LwFTrainer(Trainer):
     """
 
     def __init__(self, config, dataloaders, logger, detector, preprocessor, classifier, bbox_cache=None):
+        old_count = int(config.lwf_old_num_classes)
+        if not 0 < old_count < int(config.num_classes):
+            raise ValueError("LwF requires 0 < lwf_old_num_classes < num_classes")
+        teacher_ckpt = str(config.lwf_teacher_checkpoint or config.checkpoint_path or "").strip()
+        if not teacher_ckpt:
+            raise ValueError("LwF requires --lwf_teacher_checkpoint or --checkpoint_path")
+        teacher_checkpoint = torch.load(teacher_ckpt, map_location="cpu", weights_only=False)
+        if not isinstance(teacher_checkpoint.get("config", {}).get("classes"), dict):
+            raise ValueError("LwF teacher checkpoint must contain config.classes to verify old class semantics")
+        expected_old = {name: idx for name, idx in config.classes.items() if idx < old_count}
+        _validate_checkpoint_classes(teacher_checkpoint, expected_old, logger)
+        teacher_model = MaskImageClassifier(backbone=config.backbone, num_classes=old_count,
+            in_chans=config.mask_in_chans, pretrained=False, dropout=config.cnn_dropout,
+            freeze_backbone=False).to(config.device)
+        teacher_model.load_state_dict(_strip_module_prefix(teacher_checkpoint["model_state_dict"]), strict=True)
+        load_state_skip_mismatch(classifier, teacher_ckpt, config.device, logger, checkpoint=teacher_checkpoint)
         # Prevent base Trainer from loading checkpoint directly,
         # because old/new classifier heads may have different shapes.
         original_checkpoint_path = config.checkpoint_path
@@ -68,63 +90,20 @@ class LwFTrainer(Trainer):
             config.unfreeze()
         config.checkpoint_path = None
 
-        super().__init__(
-            config=config,
-            dataloaders=dataloaders,
-            logger=logger,
-            detector=detector,
-            preprocessor=preprocessor,
-            classifier=classifier,
-            bbox_cache=bbox_cache,
-        )
-
-        config.checkpoint_path = original_checkpoint_path
-        if was_frozen:
-            config.freeze()
+        try:
+            super().__init__(config=config, dataloaders=dataloaders, logger=logger, detector=detector,
+                             preprocessor=preprocessor, classifier=classifier, bbox_cache=bbox_cache)
+        finally:
+            config.checkpoint_path = original_checkpoint_path
+            if was_frozen:
+                config.freeze()
         self.checkpoint_path = original_checkpoint_path
 
-        self.old_num_classes = int(config.lwf_old_num_classes)
+        self.old_num_classes = old_count
         self.temperature = float(config.lwf_temperature)
         self.lambda_kd = float(config.lwf_lambda_kd)
 
-        if self.old_num_classes <= 0:
-            raise ValueError("--lwf_old_num_classes must be > 0")
-
-        if self.old_num_classes >= int(config.num_classes):
-            raise ValueError(
-                f"LwF expects new classes to be appended. "
-                f"old_num_classes={self.old_num_classes}, "
-                f"num_classes={config.num_classes}"
-            )
-
-        teacher_ckpt = str(config.lwf_teacher_checkpoint or original_checkpoint_path or "").strip()
-        if not teacher_ckpt:
-            raise ValueError("LwF requires --lwf_teacher_checkpoint or --checkpoint_path")
-
-        # Student: load old compatible weights, skip old classifier head mismatch.
-        load_state_skip_mismatch(
-            model=self.classifier,
-            checkpoint_path=teacher_ckpt,
-            device=self.device,
-            logger=self.logger,
-        )
-
-        # Teacher: old model with old_num_classes.
-        self.teacher = MaskImageClassifier(
-            backbone=config.backbone,
-            num_classes=self.old_num_classes,
-            in_chans=config.mask_in_chans,
-            pretrained=False,
-            dropout=config.cnn_dropout,
-            freeze_backbone=False,
-        ).to(self.device)
-
-        load_state_skip_mismatch(
-            model=self.teacher,
-            checkpoint_path=teacher_ckpt,
-            device=self.device,
-            logger=self.logger,
-        )
+        self.teacher = teacher_model
 
         # Copy old classifier rows from teacher to student.
         if self.classifier.backbone_name.startswith("resnet"):

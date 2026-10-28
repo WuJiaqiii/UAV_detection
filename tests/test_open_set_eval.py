@@ -1,3 +1,4 @@
+from tests.fixtures import parse_test_args
 import copy
 import json
 from pathlib import Path
@@ -197,7 +198,7 @@ class OpenSetCliTests(unittest.TestCase):
         return path
 
     def args(self, inputs, output, *extra):
-        return build_parser().parse_args(["--inputs", *map(str, inputs), "--checkpoint_path", str(self.checkpoint),
+        return parse_test_args(build_parser(), ["--inputs", *map(str, inputs), "--checkpoint_path", str(self.checkpoint),
             "--yolo_weights", str(self.weights), "--output_dir", str(self.root/output), "--device", "cpu", *extra])
 
     @staticmethod

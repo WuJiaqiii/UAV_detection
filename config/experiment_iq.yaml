@@ -10,7 +10,6 @@ experiment:
   val_ratio: 0.15
   calibration_ratio: 0.20
   test_ratio: 0.20
-  output_dir: ../experiments/open_set_fold01
   # recording_ids_json: /data/uav/recording_ids.json
   # split_only: true
 train:

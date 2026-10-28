@@ -1,3 +1,4 @@
+from tests.fixtures import parse_test_args
 import copy
 import json
 from pathlib import Path
@@ -248,7 +249,7 @@ class InputAndPipelineTests(unittest.TestCase):
         self._png(second, np.zeros(SPEC_SHAPE, dtype=np.uint8))
         labels = self.root / "labels.json"
         labels.write_text(json.dumps({"first.png": "alpha", "second.png": "beta"}), encoding="utf-8")
-        args = build_parser().parse_args(["--signal_mode", "single", "--inputs", str(first), str(second), "--checkpoint_path", str(ckpt_path),
+        args = parse_test_args(build_parser(), ["--signal_mode", "single", "--inputs", str(first), str(second), "--checkpoint_path", str(ckpt_path),
                                           "--yolo_weights", str(self.root / "fake.pt"), "--output_dir", str(self.root / "reports"),
                                           "--labels_json", str(labels), "--device", "cpu"])
         predictor = Mock()
@@ -263,7 +264,7 @@ class InputAndPipelineTests(unittest.TestCase):
         saved = json.loads((args.output_dir / "results.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["effective_config"]["classes"], CLASSES)
         self.assertEqual(len((args.output_dir / "slices.jsonl").read_text().splitlines()), 2)
-        with self.assertRaisesRegex(ValueError, "empty output_dir"):
+        with self.assertRaisesRegex(ValueError, "new or empty"):
             run(args, predictor=predictor)
 
     def test_slice_errors_are_not_votes(self):
@@ -298,7 +299,7 @@ class InputAndPipelineTests(unittest.TestCase):
         self._png(image, np.zeros(SPEC_SHAPE, dtype=np.uint8))
         weights = self.root / "detector.pt"
         weights.touch()
-        args = build_parser().parse_args(["--signal_mode", "single", "--inputs", str(image), "--checkpoint_path", str(checkpoint_path),
+        args = parse_test_args(build_parser(), ["--signal_mode", "single", "--inputs", str(image), "--checkpoint_path", str(checkpoint_path),
                                           "--yolo_weights", str(weights), "--output_dir", str(self.root/"resnet_result"), "--device", "cpu"])
         boxes = [[10, 100, 70, 110], [150, 100, 210, 110], [300, 100, 360, 110]]
         with patch("util.detector.YoloV5Detector") as detector:

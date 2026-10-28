@@ -11,7 +11,6 @@ evaluation:
   min_votes: 1
 infer:
   inputs: [/data/uav/unlabeled_test]
-  output_dir: ../experiments/unlabeled_open_set_run01
   open_set_profile: /models/known_profile.npz
   unknown_cluster_backend: hdbscan
   unknown_min_cluster_size: 5

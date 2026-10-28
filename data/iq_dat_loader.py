@@ -13,7 +13,6 @@ from typing import Optional
 
 import numpy as np
 import torch
-from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, Subset
 
 from data.data_loader import create_dataloader
@@ -232,10 +231,8 @@ def create_iq_train_val_loaders(config, logger=None):
     val_data = RawIQDataset(config, logger, split_name="val")
     if [s["fp"] for s in train_data.samples] != [s["fp"] for s in val_data.samples]:
         raise ValueError("Automatic split requires identical train/val class filters")
-    indices = np.arange(len(train_data))
-    labels = [s["label"] for s in train_data.samples]
-    train_idx, val_idx = train_test_split(indices, test_size=float(config.val_ratio),
-                                          random_state=42, stratify=labels)
+    from util.recordings import dataset_train_val_indices
+    train_idx, val_idx = dataset_train_val_indices(train_data.samples, config)
     train_loader = create_dataloader(Subset(train_data, train_idx.tolist()), config,
                                      shuffle=True, sample_ratio=float(config.sample_ratio))
     val_loader = create_dataloader(Subset(val_data, val_idx.tolist()), config,

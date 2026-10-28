@@ -12,9 +12,9 @@ SECTIONS = {"train", "evaluation", "predict", "profile", "cluster", "discovery",
 PATH_OPTIONS = {
     "dataset_path", "train_dataset_path", "val_dataset_path", "yolo_weights", "checkpoint_path",
     "lwf_teacher_checkpoint", "bbox_cache_path", "bbox_cache_dataset_root", "frontend_config",
-    "classes_json", "inputs", "output_dir", "features", "reference_inputs", "calibration_inputs",
-    "test_inputs", "test_output_dir", "reference_labels_json", "calibration_labels_json",
-    "test_labels_json", "labels_json", "recording_ids_json", "rf_centers_json", "open_set_profile", "experiment_dir",
+    "classes_json", "inputs", "features", "reference_inputs", "calibration_inputs",
+    "test_inputs", "reference_labels_json", "calibration_labels_json",
+    "test_labels_json", "labels_json", "recording_ids_json", "rf_centers_json", "open_set_profile",
 }
 
 
@@ -54,6 +54,8 @@ def settings_tokens(parser, settings):
     tokens = []
     for key, value in settings.items():
         if key not in actions or key == "help":
+            if key in {"output_dir", "test_output_dir", "experiment_dir"}:
+                raise ValueError(f"Remove {key}: output directories are automatic under the repository's experiment directory")
             raise ValueError(f"Unknown setting for this task: {key}")
         action = actions[key]
         flag = next(option for option in action.option_strings if option.startswith("--") and not option.startswith("--no-"))
@@ -109,7 +111,6 @@ def profile_parser(discover=False):
     if discover:
         parser.description += "; then predict a mixed batch and discover anonymous classes"
         parser.add_argument("--test_inputs", nargs="+", required=True)
-        parser.add_argument("--test_output_dir", type=Path)
         parser.add_argument("--test_labels_json", type=Path)
         parser.add_argument("--test_label_mode", choices=["none", "filename", "parent"], default="none")
     return parser
@@ -134,23 +135,28 @@ def build_task_parser(task):
     if task == "cluster":
         from scripts.cluster_unknown_features import build_parser
         return build_parser()
-    return profile_parser(task == "discover")
+    if task in {"profile", "discover"}:
+        return profile_parser(task == "discover")
+    raise ValueError(f"Unknown task parser: {task}")
 
 
 def run_profile(args, discover=False, predictor=None):
+    if not getattr(args, "output_dir", None):
+        from util.run_context import execute_run
+        return execute_run("discover" if discover else "profile", args,
+                           lambda managed: run_profile(managed, discover, predictor))
     from scripts.evaluate_single_signal import run
     from util.open_set import build_profile
 
-    output = args.output_dir.expanduser().resolve()
-    if output.exists() and (not output.is_dir() or any(output.iterdir())):
-        raise ValueError("Profile output_dir must be new or empty")
+    from util.run_context import check_output_directory
+    output = check_output_directory(args)
     if args.inputs or args.open_set_profile or args.signal_mode != "multi":
         raise ValueError("Profile uses reference_inputs/calibration_inputs and signal_mode multi; do not set inputs/open_set_profile")
     if args.labels_json or args.label_from_parent or args.label_from_filename:
         raise ValueError("Use profile label_mode and the separate reference/calibration label mappings")
     if args.label_mode == "json" and (not args.reference_labels_json or not args.calibration_labels_json):
         raise ValueError("JSON mode requires both reference_labels_json and calibration_labels_json")
-    if discover and args.test_output_dir:
+    if discover and getattr(args, "test_output_dir", None):
         test_output = args.test_output_dir.expanduser().resolve()
         if test_output.exists() and (not test_output.is_dir() or any(test_output.iterdir())):
             raise ValueError("Test output_dir must be new or empty")
@@ -172,7 +178,7 @@ def run_profile(args, discover=False, predictor=None):
         return {"profile": str(target), "threshold": metadata["threshold"]}
     prediction = copy.deepcopy(args)
     prediction.inputs = args.test_inputs
-    prediction.output_dir = args.test_output_dir or output/"discovery"
+    prediction.output_dir = getattr(args, "test_output_dir", None) or output/"discovery"
     prediction.open_set_profile, prediction.export_features = target, False
     prediction.labels_json = args.test_labels_json
     prediction.label_from_filename = args.test_label_mode == "filename"
@@ -186,6 +192,11 @@ def validate_infer_args(args):
 
 
 def dispatch(task, args):
+    from util.run_context import execute_run
+    return execute_run(task, args, lambda managed: _dispatch(task, managed))
+
+
+def _dispatch(task, args):
     if task == "experiment":
         from util.open_set_experiment import run_experiment
         return run_experiment(args, args._config_path)
@@ -216,8 +227,8 @@ def main(argv=None):
     if task not in TASKS:
         # Preserve the original direct training/GT-evaluation CLI during phase 1.
         if task.startswith("-"):
-            from util.train_entry import build_parser, main as legacy
-            return legacy(build_parser().parse_args([task, *argv]))
+            from util.train_entry import build_parser
+            return dispatch("train", build_parser().parse_args([task, *argv]))
         raise ValueError(f"Unknown task {task}; choose {', '.join(TASKS)}")
     wrapper = argparse.ArgumentParser(add_help=False)
     wrapper.add_argument("--config", type=Path)
@@ -228,15 +239,20 @@ def main(argv=None):
         parser.parse_args(["--help"])
     settings, path = load_settings(controls.config, task)
     args = parser.parse_args([*settings_tokens(parser, settings), *explicit])
+    args._config_path = path
     if task == "experiment":
         from util.open_set_experiment import stage_arguments
         if controls.dry_run:
             stage_arguments(args, path)
-        args._config_path = path
     if task == "infer" and controls.dry_run:
         validate_infer_args(args)
     if controls.dry_run:
+        if task == "train":
+            from util.train_entry import validate_training_options
+            validate_training_options(args)
+        from util.run_context import EXPERIMENT_ROOT, run_type
         print(json.dumps({"task": task, "config": str(path) if path else None,
+                          "automatic_output_root": str(EXPERIMENT_ROOT), "experiment_type": run_type(task, args),
                           "effective": {k: v for k, v in vars(args).items() if not k.startswith("_")}}, default=str, ensure_ascii=False, indent=2, allow_nan=False))
         return args
     result = dispatch(task, args)

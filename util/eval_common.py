@@ -36,7 +36,7 @@ INFERENCE_DEFAULTS = {
     "min_area": 4, "min_ratio": 0., "min_width": 2, "min_height": 2,
     "max_width": 0, "max_height": 0, "ring_margin": 5, "min_contrast_z": -2.,
     "freq_eps": 5., "freq_min_samples": 1, "merge_freq_thresh": 10.,
-    "merge_w_log_thresh": .35, "merge_h_log_thresh": .35, "merge_energy_thresh": 1.,
+    "merge_h_log_thresh": .35, "merge_energy_thresh": 1.,
     "min_group_len": 2, "min_group_time_span_ratio": .15, "nms_thresh": .2,
     "score_n_boxes_weight": .5, "score_time_span_weight": 2.,
     "score_contrast_weight": 1., "score_w_std_weight": 1.,

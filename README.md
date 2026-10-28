@@ -35,6 +35,8 @@ bash run.sh discover --config config/open_set.yaml
 
 `--dry_run` 校验并显示参数，不读取数据、构建模型或开始训练。示例中的 `/data`、`/models` 是占位路径，运行前修改。YAML 内相对路径以 YAML 所在目录为基准；直接命令行相对路径以当前工作目录为基准。
 
+所有公共入口自动保存到仓库根目录 `experiment/<实验类型>_<北京时间>/`，不接受 `output_dir`、`test_output_dir` 或 `experiment_dir`。目录与启动工作路径无关，同秒运行自动加编号。开始时打印实际路径，`run.json` 记录参数、时间和状态；异常写入 `error.log`。`--dry_run` 不创建目录。类型、迁移与检查结果见 [目录和代码检查说明](docs/code_audit.md)。
+
 | 任务 | 工作 |
 | --- | --- |
 | experiment | 按原始记录划分已知/未知，训练最佳模型、独立校准并评估；导出无标签推理配置 |
@@ -94,7 +96,7 @@ IQ 通常应省略 `class_names`；若为恢复旧 checkpoint 指定顺序，列
 
 最终映射会写入实验 `config.yaml` 和 checkpoint 的 `config.classes`。恢复训练时必须保持类别名称与 ID 一致；预测从 checkpoint 读取类别映射，不根据待测目录重新编号。采集率为 `iq_sample_rate`，与输出频谱的 122.88 MHz 网格区别见 [前端契约](docs/spectrogram_frontend.md)。
 
-`config/train.yaml` 示例将 FPV/Skylink1 留作模拟未知、排除 Background。`supcon_weight=0` 保留原 CE；正值使用有限框丢弃和平移构建第二视图。不要冻结骨干后开启 SupCon。训练存档仍在 `experiments/UAV_时间/models/best.pth`；按已知验证准确率选模型，同时查看匹配召回。
+`config/train.yaml` 示例将 FPV/Skylink1 留作模拟未知、排除 Background。`supcon_weight=0` 保留原 CE；正值使用有限框丢弃和平移构建第二视图。不要冻结骨干后开启 SupCon。普通训练存档在 `experiment/train_时间/models/best.pth`，完整开集实验则在其 `training/models/` 子目录；按已知验证准确率选模型，同时查看匹配召回。
 
 ## 开集与输出
 

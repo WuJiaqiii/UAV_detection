@@ -5,6 +5,7 @@ import math
 from types import SimpleNamespace
 
 import numpy as np
+from util.recordings import group_recordings as _recording_groups
 
 
 def split_dataset(args, train_args):
@@ -30,7 +31,8 @@ def split_dataset(args, train_args):
     # Reuse the real loaders' metadata validation, without reading spectra or IQ.
     cfg = SimpleNamespace(**vars(train_args))
     cfg.classes = {name: i for i, name in enumerate(labels)}
-    cfg.dataset_path = list(map(str, files))
+    active_files = [p for p in files if truth[str(p)][0] not in excluded]
+    cfg.dataset_path = list(map(str, active_files))
     logger = logging.getLogger("experiment_split")
     if args.input_type == "iq_dat":
         from data.iq_dat_loader import RawIQDataset
@@ -38,7 +40,7 @@ def split_dataset(args, train_args):
     else:
         from data.data_loader import UAVDataset
         dataset = UAVDataset(cfg, logger)
-    if len(dataset.samples) != len(files):
+    if len(dataset.samples) != len(active_files):
         raise ValueError("Some experiment inputs were rejected by the training loader; inspect filenames/labels")
 
     identities = read_path_mapping(args.recording_ids_json) if args.recording_ids_json else {}
@@ -50,7 +52,10 @@ def split_dataset(args, train_args):
         rows.append({"path": str(path), "class_name": truth[str(path)][0],
                      "source_sha256": digest,
                      "recording_id": recording_identity(path, digest, identities)})
-    groups = _recording_groups(rows)
+    groups = _recording_groups([row for row in rows if row["class_name"] not in excluded])
+    for row in rows:
+        if row["class_name"] in excluded:
+            row["split"] = "excluded"
     ratios = (args.val_ratio, args.calibration_ratio, args.test_ratio)
     if any(not math.isfinite(r) or r <= 0 for r in ratios) or sum(ratios) >= 1:
         raise ValueError("val/calibration/test ratios must be positive and sum to less than 1")
@@ -107,27 +112,3 @@ def _class_partition(labels, known, unknown):
     return known, unknown
 
 
-def _recording_groups(rows):
-    # Union by either content OR recording identity, including transitive aliases.
-    parents = list(range(len(rows)))
-    def find(i):
-        while parents[i] != i:
-            parents[i] = parents[parents[i]]
-            i = parents[i]
-        return i
-    seen = {}
-    for i, row in enumerate(rows):
-        for key in (("hash", row["source_sha256"]), ("id", row["recording_id"])):
-            if key in seen:
-                parents[find(i)] = find(seen[key])
-            seen[key] = i
-    groups = defaultdict(list)
-    for i, row in enumerate(rows):
-        groups[find(i)].append(row)
-    for group in groups.values():
-        if len({row["class_name"] for row in group}) != 1:
-            raise ValueError("One recording/content has conflicting class labels: " + str([r["path"] for r in group]))
-        identity = "recording:" + min(row["source_sha256"] for row in group)
-        for row in group:
-            row["recording_id"] = identity
-    return sorted(groups.values(), key=lambda group: min(row["path"] for row in group))

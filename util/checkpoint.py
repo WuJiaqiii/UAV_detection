@@ -150,7 +150,7 @@ def load_training_checkpoint(
                 f"{' ...' if len(skipped) > 20 else ''}"
             )
 
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    missing, unexpected = model.load_state_dict(state_dict, strict=not skip_mismatch)
 
     if logger is not None:
         logger.info(f"[ckpt] loaded model from {checkpoint_path}")
@@ -166,8 +166,7 @@ def load_training_checkpoint(
                 if logger is not None:
                     logger.info("[ckpt] optimizer loaded")
             except Exception as e:
-                if logger is not None:
-                    logger.warning(f"[ckpt] failed to load optimizer: {e}")
+                raise RuntimeError("Checkpoint optimizer state cannot be restored") from e
 
         if scheduler is not None and ckpt.get("scheduler_state_dict") is not None:
             try:
@@ -175,7 +174,6 @@ def load_training_checkpoint(
                 if logger is not None:
                     logger.info("[ckpt] scheduler loaded")
             except Exception as e:
-                if logger is not None:
-                    logger.warning(f"[ckpt] failed to load scheduler: {e}")
+                raise RuntimeError("Checkpoint scheduler state cannot be restored") from e
 
     return ckpt

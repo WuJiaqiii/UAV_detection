@@ -19,7 +19,6 @@ def build_parser():
     parser.add_argument("--test_ratio", type=float, default=.20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--recording_ids_json", type=Path)
-    parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--split_only", action=argparse.BooleanOptionalAction, default=False,
                         help="Write the split manifest and stage configs without training or running models")
     return parser
@@ -28,20 +27,22 @@ def build_parser():
 def stage_arguments(args, config_path):
     """Validate both stages before data indexing or costly training begins."""
     from util.cli import build_task_parser, load_settings, settings_tokens
-    from util.train_entry import build_parser as train_parser
-    output = args.output_dir.expanduser().resolve()
+    from util.train_entry import build_parser as train_parser, validate_training_options
+    from util.run_context import planned_directory, run_type
+    output = (getattr(args, "output_dir", None) or planned_directory(run_type("experiment", args))).resolve()
     train_settings, _ = load_settings(config_path, "train")
     managed_train = {"dataset_path", "train_dataset_path", "val_dataset_path", "class_names", "exclude_classes",
-                     "incremental_new_classes", "incremental_split_mode", "checkpoint_path", "experiment_dir"}
+                     "incremental_new_classes", "incremental_split_mode", "checkpoint_path", "experiment_dir", "recording_ids_json"}
     if managed_train & train_settings.keys():
         raise ValueError("experiment manages training data/classes/checkpoint paths; remove: " + str(sorted(managed_train & train_settings.keys())))
     if train_settings.get("input_type", args.input_type) != args.input_type:
         raise ValueError("train.input_type must agree with experiment.input_type")
     if train_settings.get("run_mode", "train") != "train" or train_settings.get("trainer_type", "normal") != "normal":
         raise ValueError("experiment uses normal known-only training; LwF/resume remain separate train tasks")
-    train_settings.update(input_type=args.input_type, run_mode="train", trainer_type="normal", seed=args.seed,
-                          experiment_dir=str(output / "training"))
+    train_settings.update(input_type=args.input_type, run_mode="train", trainer_type="normal", seed=args.seed)
     train = train_parser().parse_args(settings_tokens(train_parser(), train_settings))
+    validate_training_options(train)
+    train._run_dir = output / "training"
     from util.spectrogram_frontend import apply_frontend_manifest
     apply_frontend_manifest(train)
     if train.epochs < 1 or train.train_signal_mode != "single" or train.sample_ratio != 1:
@@ -58,8 +59,7 @@ def stage_arguments(args, config_path):
         raise ValueError("Experiment training/profile must use the same yolo_weights")
     evaluation.update(checkpoint_path=str(output / "training/models/best.pth"), yolo_weights=train.yolo_weights,
                       reference_inputs=["generated-train-files"], calibration_inputs=["generated-calibration-files"],
-                      test_inputs=["generated-test-files"], output_dir=str(output / "open_set"),
-                      test_output_dir=str(output / "test"), label_mode="json", test_label_mode="none",
+                      test_inputs=["generated-test-files"], label_mode="json", test_label_mode="none",
                       reference_labels_json=str(output / "reference_labels.json"),
                       calibration_labels_json=str(output / "calibration_labels.json"),
                       test_labels_json=str(output / "test_labels.json"),
@@ -71,6 +71,7 @@ def stage_arguments(args, config_path):
         evaluation.setdefault("iq_byte_order", train.iq_byte_order)
     parser = build_task_parser("discover")
     profile = parser.parse_args(settings_tokens(parser, evaluation))
+    profile.output_dir, profile.test_output_dir = output / "open_set", output / "test"
     if profile.signal_mode != "multi" or profile.ignore_classes or profile.exclude_vote_classes:
         raise ValueError("experiment requires multi mode with no ignored/excluded head classes")
     from util.eval_common import validate_prediction_options
@@ -103,17 +104,19 @@ def _write_stage_config(output, train, profile):
     settings = {key: value for key, value in vars(profile).items() if key in allowed - blocked and value is not None}
     settings = json.loads(json.dumps(settings, default=str))
     deployment = {"evaluation": settings, "infer": {
-        "inputs": ["/path/to/unlabeled_test"], "output_dir": str(output / "unlabeled_inference"),
+        "inputs": ["/path/to/unlabeled_test"],
         "open_set_profile": str(output / "open_set/known_profile.npz")}}
     (output / "inference.yaml").write_text(yaml.safe_dump(deployment, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
 def run_experiment(args, config_path=None, train_runner=None, predictor=None):
+    if not getattr(args, "output_dir", None):
+        from util.run_context import execute_run
+        return execute_run("experiment", args, lambda managed: run_experiment(managed, config_path, train_runner, predictor))
     from util.experiment_split import split_dataset
     from util.cli import run_profile
-    output = args.output_dir.expanduser().resolve()
-    if output.exists() and (not output.is_dir() or any(output.iterdir())):
-        raise ValueError("Experiment output_dir must be new or empty")
+    from util.run_context import check_output_directory
+    output = check_output_directory(args)
     train, profile = stage_arguments(args, config_path)
     if not args.split_only and not Path(train.yolo_weights).is_file():
         raise FileNotFoundError(f"YOLO weights not found: {train.yolo_weights}")
@@ -128,6 +131,7 @@ def run_experiment(args, config_path=None, train_runner=None, predictor=None):
     train.dataset_path = None
     train.train_dataset_path, train.val_dataset_path = select("train"), select("val")
     train.class_names = manifest["known_classes"]
+    train.recording_ids_json = output / "recording_ids.json"
     profile.reference_inputs, profile.calibration_inputs = select("train"), select("calibration")
     profile.test_inputs = select("test_known", "test_unknown")
     output.mkdir(parents=True, exist_ok=True)
@@ -161,11 +165,14 @@ def run_experiment(args, config_path=None, train_runner=None, predictor=None):
         state["stage"] = "profile_and_test"
         _write_json(output / "experiment.json", state)
         report = run_profile(profile, discover=True, predictor=predictor)
-        state.update(status="complete", stage="complete", metrics=report["metrics"],
+        from util.run_context import metric_error_count
+        status = "completed_with_errors" if metric_error_count(report["metrics"]) else "complete"
+        state.update(status=status, stage="complete", metrics=report["metrics"],
                      test_report=str(output / "test/results.json"))
         _write_json(output / "experiment.json", state)
         return state
-    except Exception as exc:
-        state.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+    except BaseException as exc:
+        state.update(status="interrupted" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else "failed",
+                     error=f"{type(exc).__name__}: {exc}")
         _write_json(output / "experiment.json", state)
         raise

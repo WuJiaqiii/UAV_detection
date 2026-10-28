@@ -1,11 +1,9 @@
 import os
 import yaml
 import torch
-import datetime
-import pytz
-from pathlib import Path
 
 from data.iq_dat_loader import resolve_iq_classes
+from util.run_context import EXPERIMENT_ROOT, planned_directory, run_type
 
 class Config:
     def __setattr__(self, name, value):
@@ -32,16 +30,8 @@ class Config:
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        self.base_dir = 'experiments'
-        os.makedirs(self.base_dir, exist_ok=True)
-        
-        current_time = datetime.datetime.now(pytz.utc)
-        current_time = current_time.astimezone(pytz.timezone("Asia/Shanghai"))
-        
-        log_name = 'UAV_' + str(current_time.strftime("%Y%m%d_%H%M%S"))
-        
-        experiment_dir = getattr(args, "experiment_dir", None)
-        self.cfg_dir = str(Path(experiment_dir).expanduser().resolve()) if experiment_dir else f'{self.base_dir}/{log_name}'
+        self.base_dir = str(EXPERIMENT_ROOT)
+        self.cfg_dir = str(getattr(args, "_run_dir", None) or planned_directory(run_type("train", args)))
         self.model_dir = f'{self.cfg_dir}/models'
         self.log_dir = f'{self.cfg_dir}/log'
         self.cache_dir = f'{self.cfg_dir}/cache'
@@ -53,7 +43,7 @@ class Config:
     def save_config(self):
         file_path = os.path.join(self.cfg_dir, 'config.yaml')
         config_dict = {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
-        with open(file_path, 'w') as f:
+        with open(file_path, 'w', encoding='utf-8') as f:
             yaml.dump(config_dict, f)
             
     def make_dir(self):

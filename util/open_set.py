@@ -6,12 +6,12 @@ test features are used only for inference/discovery, never to fit this profile.
 import hashlib
 import json
 import math
-import re
 from importlib.metadata import version
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
+from util.recordings import file_sha256, recording_identity
 
 FEATURE_VERSION = "mask-penultimate-l2-accepted-track-mean-l2-v1"
 
@@ -26,23 +26,6 @@ def normalize_features(features):
     return (x / norm).astype(np.float32)
 
 
-def file_sha256(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def recording_identity(path, digest, explicit=None):
-    """Honor explicit capture IDs; recognize the project's -Figure-N exports."""
-    path = Path(path)
-    if str(path) in (explicit or {}):
-        return explicit[str(path)]
-    match = re.fullmatch(r"(.+)-Figure-\d+", path.stem, flags=re.IGNORECASE)
-    return "figure-source:"+match.group(1) if match else digest
-
-
 def inference_signature(args, config):
     """Bind weights, actual feature-producing source and effective settings.
 
@@ -53,7 +36,7 @@ def inference_signature(args, config):
     sources = ["model/resnet.py", "util/mask_input.py", "util/preprocess.py", "util/detector.py",
                "util/spectrogram_frontend.py", "data/iq_dat_loader.py",
                "util/single_signal_eval.py", "util/multi_signal_eval.py", "util/open_set.py",
-               "util/eval_common.py", "util/group_predictor.py"]
+               "util/eval_common.py", "util/group_predictor.py", "util/recordings.py"]
     settings = {key: value for key, value in vars(config).items()
                 if key not in {"device", "yolo_weights", "frontend_config"}}
     options = {key: getattr(args, key) for key in (

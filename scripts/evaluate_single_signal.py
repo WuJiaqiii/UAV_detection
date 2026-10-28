@@ -19,7 +19,6 @@ def build_parser():
     p.add_argument("--recursive", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--checkpoint_path", type=Path, required=True, help="Classifier .pth; effective settings and label IDs are read from config")
     p.add_argument("--yolo_weights", type=Path, required=True)
-    p.add_argument("--output_dir", type=Path, required=True, help="Must be absent or empty")
     p.add_argument("--classes_json", type=Path, help="Name-to-ID mapping for legacy checkpoints; must agree with saved metadata if present")
     p.add_argument("--device", default="auto", help="auto, cpu, cuda or cuda:0")
     p.add_argument("--signal_mode", choices=["multi", "single"], default="multi", help="multi classifies every valid group; single retains the previous file-level voter")
@@ -63,13 +62,15 @@ def build_parser():
 
 
 def run(args, predictor=None):
+    if not getattr(args, "output_dir", None):
+        from util.run_context import execute_run
+        return execute_run("predict", args, lambda managed: run(managed, predictor))
     import torch
     from util.single_signal_eval import SingleSignalPredictor, evaluate_file, load_truth, evaluation_metrics
     from util.eval_common import collect_inputs, resolve_config, validate_prediction_options
 
-    output = args.output_dir.expanduser().resolve()
-    if output.exists() and (not output.is_dir() or any(output.iterdir())):
-        raise ValueError("Use an empty output_dir; existing reports are never overwritten")
+    from util.run_context import check_output_directory
+    output = check_output_directory(args)
     inputs = collect_inputs(args.inputs, args.recursive)
     checkpoint_path = args.checkpoint_path.expanduser().resolve()
     if not checkpoint_path.is_file():
