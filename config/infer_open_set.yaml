@@ -1,0 +1,19 @@
+# Unlabeled inference. Match the model/profile's effective feature settings.
+# A completed experiment also exports an inference.yaml with its exact options.
+evaluation:
+  checkpoint_path: /models/known_best.pth
+  yolo_weights: /models/detector.pt
+  signal_mode: multi
+  recursive: true
+  iq_sample_rate: 100000000
+  iq_stride_ms: 50.0
+  max_slices: 0
+  min_votes: 1
+infer:
+  inputs: [/data/uav/unlabeled_test]
+  open_set_profile: /models/known_profile.npz
+  unknown_cluster_backend: hdbscan
+  unknown_min_cluster_size: 5
+  unknown_min_recordings: 2
+  save_visuals: true
+  # rf_center_mhz: 2400

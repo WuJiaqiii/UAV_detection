@@ -3,7 +3,6 @@ import logging
 import numpy as np
 import random
 from datetime import datetime, timedelta, timezone
-import torch.distributed as dist
 from tqdm import tqdm 
 import sys
 
@@ -12,7 +11,6 @@ import json
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 
 try:
     from sklearn.metrics import confusion_matrix
@@ -153,38 +151,6 @@ def save_instance_csv(result_dir, split_name, epoch, instance_rows):
         for row in instance_rows:
             writer.writerow(row)
 
-def spectrogram_to_yolo_float(data, db_min=None, db_max=None, eps=None,
-                              p_low=None, p_high=None, log_gain=None,
-                              *, input_domain="amplitude", frontend_config=None):
-    """Compatibility entry point; scientific preprocessing has one implementation.
-
-    Old percentile/log arguments are rejected rather than silently applied twice.
-    Fixed dB limits can be used only with mode='none'.
-    """
-    import warnings
-    from dataclasses import replace
-    from util.spectrogram_frontend import FrontendConfig, render_gray, canonical_amplitude
-    if any(v is not None for v in (p_low, p_high, log_gain)):
-        raise ValueError("Percentile/log enhancement was removed; use FrontendConfig")
-    cfg = frontend_config or FrontendConfig()
-    if db_min is not None or db_max is not None or eps is not None:
-        warnings.warn("Legacy yolo_db arguments are deprecated; use the shared frontend",
-                      DeprecationWarning, stacklevel=2)
-        if cfg.mode == "none":
-            cfg = replace(cfg, z_min=cfg.z_min if db_min is None else db_min,
-                          z_max=cfg.z_max if db_max is None else db_max)
-    source = data if input_domain == "image" else canonical_amplitude(data, input_domain)
-    return render_gray(source, cfg, "image" if input_domain == "image" else "amplitude").astype(np.float32) / 255.0
-
-
-def spectrogram_to_yolo_uint8(data, db_min=None, db_max=None, eps=None,
-                              p_low=None, p_high=None, log_gain=None,
-                              *, input_domain="power", frontend_config=None):
-    return np.rint(255 * spectrogram_to_yolo_float(
-        data, db_min, db_max, eps, p_low, p_high, log_gain,
-        input_domain=input_domain, frontend_config=frontend_config,
-    )).astype(np.uint8)
-
 
 def _path_is_set(p):
     if p is None:
@@ -210,30 +176,7 @@ def _make_pbar(iterable, desc: str, leave: bool = False):
         disable=not sys.stdout.isatty(),
     )
 
-def _reduce_scalar(val, device, dtype=torch.float32, op=dist.ReduceOp.SUM):
-    if isinstance(val, torch.Tensor):
-        t = val.detach()
-        if dtype is not None and t.dtype != dtype:
-            t = t.to(dtype)
-        if device is not None and t.device != torch.device(device):
-            t = t.to(device)
-        t = t.clone()   
-    else:
-        t = torch.scalar_tensor(float(val), dtype=dtype, device=device)
 
-    if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(t, op=op)
-        if op == dist.ReduceOp.SUM:
-            ws = dist.get_world_size()
-            if ws > 1:
-                t /= ws
-
-    return t.item()
-
-def _set_epoch_for_loaders(epoch, *loaders):
-    for ld in loaders:
-        if ld is not None and hasattr(ld, "sampler") and hasattr(ld.sampler, "set_epoch"):
-            ld.sampler.set_epoch(epoch)
             
 class ColorFormatter(logging.Formatter):
     # ANSI 颜色表
@@ -366,12 +309,15 @@ logging.setLoggerClass(ExpLogger)
 def create_logger(filename: str) -> logging.Logger:
     
     def custom_time(*args):
-        utc_plus_8 = datetime.now(tz=timezone.utc) + timedelta(hours=8)
-        return utc_plus_8.timetuple()
+        from util.run_context import TIMEZONE
+        return datetime.fromtimestamp(args[0], TIMEZONE).timetuple()
         
     logger = logging.getLogger(filename)
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
+    for handler in list(logger.handlers):
+        handler.close()
+        logger.removeHandler(handler)
 
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
@@ -380,43 +326,13 @@ def create_logger(filename: str) -> logging.Logger:
     formatter.converter = custom_time
     ch.setFormatter(formatter)
     
-    fh = logging.FileHandler(filename)
+    fh = logging.FileHandler(filename, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    formatter.converter = custom_time
     fh.setFormatter(formatter)
 
     logger.addHandler(ch)
     logger.addHandler(fh)
 
     return logger
-
-class EarlyStopping:
-    def __init__(self, logger, patience=10, delta=0):
-        self.patience = patience
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        self.val_loss_min = np.inf
-        self.delta = delta
-        self.logger = logger
-
-    def __call__(self, val_loss, model):
-
-        score = -val_loss
-
-        if self.best_score is None:
-            self.best_score = score
-            self.logger.info(
-                f'--Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).')
-            self.val_loss_min = val_loss
-        elif score < self.best_score + self.delta:
-            self.counter += 1
-            self.logger.info(f'--EarlyStopping counter: {self.counter} out of {self.patience}')
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = score
-            self.logger.info(
-                f'--Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).')
-            self.val_loss_min = val_loss
-            self.counter = 0

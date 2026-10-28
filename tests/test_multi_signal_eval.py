@@ -1,3 +1,4 @@
+from tests.fixtures import parse_test_args
 import copy
 import json
 from pathlib import Path
@@ -170,7 +171,7 @@ class MultiSignalIntegrationTests(unittest.TestCase):
         torch.save(self.checkpoint, model)
         truth = self.root/"labels.json"
         truth.write_text(json.dumps({image.name: ["alpha", "beta"]}, ensure_ascii=False), encoding="utf-8")
-        args = build_parser().parse_args(["--inputs", str(image), "--checkpoint_path", str(model),
+        args = parse_test_args(build_parser(), ["--inputs", str(image), "--checkpoint_path", str(model),
             "--yolo_weights", str(self.root/"mock.pt"), "--output_dir", str(self.root/"reports"),
             "--rf_center_mhz", "2400", "--labels_json", str(truth), "--device", "cpu"])
         predictor = Mock()
@@ -237,7 +238,7 @@ class MultiSignalIntegrationTests(unittest.TestCase):
         path = self._png()
         checkpoint = self.root/"model.pth"
         torch.save(self.checkpoint, checkpoint)
-        args = build_parser().parse_args(["--inputs", str(path), "--checkpoint_path", str(checkpoint),
+        args = parse_test_args(build_parser(), ["--inputs", str(path), "--checkpoint_path", str(checkpoint),
             "--yolo_weights", "unused.pt", "--output_dir", str(self.root/"out"), "--group_policy", "union"])
         with self.assertRaisesRegex(ValueError, "every group"):
             run(args, predictor=Mock())

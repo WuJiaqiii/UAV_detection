@@ -14,7 +14,7 @@ try:
 except Exception:
     linear_sum_assignment = None
 
-from util.mask_input import boxes_to_centered_mask, build_mask_input
+from util.mask_input import build_mask_input
 from util.vis import DetectionVisualizer
 from util.spectrogram_frontend import pixel_y_to_freq_mhz, FrontendConfig, render_gray
 from util.checkpoint import save_training_checkpoint, load_training_checkpoint
@@ -60,8 +60,6 @@ class Trainer:
             T_0=int(getattr(config, "cosine_annealing_T0", 50)),
             T_mult=int(getattr(config, "cosine_annealing_mult", 2)))
 
-        self.writer = SummaryWriter(str(self.config.log_dir))
-
         self.visualizer = DetectionVisualizer(config=self.config, logger=self.logger)
 
         self.best_val_acc = -1.0
@@ -105,13 +103,18 @@ class Trainer:
             )
             if isinstance(ckpt, dict) and "best_val_acc" in ckpt:
                 try:
-                    self.best_val_acc = float(ckpt["best_val_acc"])
+                    self.resume_best_val_acc = float(ckpt["best_val_acc"])
+                    if self.config.run_mode != "train":
+                        self.best_val_acc = self.resume_best_val_acc
+                    else:
+                        self.logger.info(f"Previous run best={self.resume_best_val_acc}; selecting best within the new continuation run")
                 except Exception:
                     pass
             if self.config.run_mode == "train" and isinstance(ckpt, dict):
                 self.start_epoch = int(ckpt.get("epoch", -1)) + 1
         else:
             self.logger.info("No checkpoint path provided, training from scratch.")
+        self.writer = SummaryWriter(str(self.config.log_dir))
 
 
     def _label_name(self, idx: int) -> str:
@@ -221,8 +224,6 @@ class Trainer:
             return float(group["bandwidth"])
         return 0.0
     
-    def _boxes_to_centered_mask(self, image_shape, boxes):
-        return boxes_to_centered_mask(image_shape, boxes, self.config)
 
     def _build_mask_input(self, spec, boxes):
         return build_mask_input(spec, boxes, self.config)
@@ -1246,6 +1247,8 @@ class Trainer:
     def train(self):
         if self.train_loader is None or self.val_loader is None:
             raise RuntimeError("train_loader / val_loader is None.")
+        if self.start_epoch >= self.config.epochs:
+            raise ValueError(f"epochs={self.config.epochs} must be greater than checkpoint start_epoch={self.start_epoch}")
 
         for epoch in range(self.start_epoch, self.config.epochs):
             self.logger.info(f"===== Epoch {epoch + 1}/{self.config.epochs} =====")

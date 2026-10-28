@@ -19,15 +19,16 @@ from util.unknown_discovery import add_discovery_arguments, discover_unknown, di
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--features", type=Path, required=True, help="unknown_features.npz from open-set evaluation")
-    parser.add_argument("--output_dir", type=Path, required=True, help="Must be absent or empty")
     add_discovery_arguments(parser)
     return parser
 
 
 def run(args):
-    output = args.output_dir.expanduser().resolve()
-    if output.exists() and (not output.is_dir() or any(output.iterdir())):
-        raise ValueError("Use an empty output_dir")
+    if not getattr(args, "output_dir", None):
+        from util.run_context import execute_run
+        return execute_run("cluster", args, run)
+    from util.run_context import check_output_directory
+    output = check_output_directory(args)
     metadata, arrays = load_npz(args.features, "unknown_candidates")
     features = normalize_features(arrays["features"])
     records = metadata["records"]

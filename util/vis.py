@@ -20,7 +20,7 @@ class DetectionVisualizer:
 
     def _spec_to_u8(self, spec):
         # Whole-image visualization only. Exact per-tile model rasters are
-        # exported by export_iq_yolo_dataset.py / checked by the equivalence tool.
+        # produced by the shared native frontend; never enhance PNGs twice.
         return render_gray(spec, self.frontend, self.input_domain)
 
     def _log_warning(self, msg):
@@ -29,15 +29,6 @@ class DetectionVisualizer:
         else:
             print(msg)
 
-    def clear_split_dir(self, split_name: str):
-        save_dir = self.result_dir / "detect_result" / str(split_name)
-        save_dir.mkdir(parents=True, exist_ok=True)
-
-        for p in save_dir.glob("*.png"):
-            try:
-                p.unlink()
-            except Exception as e:
-                self._log_warning(f"[Vis] failed to remove {p}: {e}")
 
     def collect_fps_from_dataset(self, dataset):
         if dataset is None:

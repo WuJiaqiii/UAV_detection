@@ -13,7 +13,6 @@ from typing import Optional
 
 import numpy as np
 import torch
-from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, Subset
 
 from data.data_loader import create_dataloader
@@ -60,6 +59,39 @@ def discover_iq_classes(dataset_path, include_background=False):
     if include_background:
         names = ["Background"] + [name for name in names if name != "Background"]
     return {name: idx for idx, name in enumerate(names)}
+
+
+def resolve_iq_classes(config):
+    """Discover training labels from the same paths the loaders will consume.
+
+    Explicit train/validation paths share one mapping. ``class_names`` may
+    reorder that mapping, but cannot silently whitelist or invent folder labels.
+    Class exclusion and incremental splits are applied to this mapping later.
+    """
+    train_paths = _paths(getattr(config, "train_dataset_path", None))
+    val_paths = _paths(getattr(config, "val_dataset_path", None))
+    if train_paths or val_paths:
+        if not train_paths or not val_paths:
+            raise ValueError("Provide both --train_dataset_path and --val_dataset_path")
+        paths = train_paths + val_paths
+    else:
+        paths = _paths(getattr(config, "dataset_path", None))
+    classes = discover_iq_classes(paths)
+    names = getattr(config, "class_names", None)
+    if names is not None:
+        if not names or len(set(names)) != len(names) or any(not str(n).strip() for n in names):
+            raise ValueError("class_names must be nonempty unique names in checkpoint order")
+        missing = sorted(set(classes) - set(names))
+        extra = sorted(set(names) - set(classes))
+        if missing or extra:
+            raise ValueError(
+                "For iq_dat, class_names may only reorder discovered folder classes; "
+                f"missing folder names={missing}, names not found in data={extra}. "
+                "Omit class_names for automatic discovery; use exclude_classes to "
+                "hold out discovered classes."
+            )
+        classes = {name: idx for idx, name in enumerate(names)}
+    return classes
 
 
 def read_iq_dat(path, start_sample=0, num_samples: Optional[int] = None,
@@ -156,8 +188,14 @@ class RawIQDataset(Dataset):
         self.samples = []
         for path in list_iq_files(paths):
             name = path.parent.name
-            if name not in class_map or name in excluded or (included and name not in included):
+            if name in excluded or (included and name not in included):
                 continue
+            if name not in class_map:
+                raise ValueError(
+                    f"IQ folder class {name!r} is missing from config.classes: {path}. "
+                    "Discover a shared class mapping before creating the datasets, "
+                    "or explicitly exclude this class."
+                )
             if path.stat().st_size % BYTES_PER_COMPLEX_SAMPLE:
                 raise ValueError(f"Invalid IQ file size: {path}")
             available = path.stat().st_size // BYTES_PER_COMPLEX_SAMPLE
@@ -193,10 +231,8 @@ def create_iq_train_val_loaders(config, logger=None):
     val_data = RawIQDataset(config, logger, split_name="val")
     if [s["fp"] for s in train_data.samples] != [s["fp"] for s in val_data.samples]:
         raise ValueError("Automatic split requires identical train/val class filters")
-    indices = np.arange(len(train_data))
-    labels = [s["label"] for s in train_data.samples]
-    train_idx, val_idx = train_test_split(indices, test_size=float(config.val_ratio),
-                                          random_state=42, stratify=labels)
+    from util.recordings import dataset_train_val_indices
+    train_idx, val_idx = dataset_train_val_indices(train_data.samples, config)
     train_loader = create_dataloader(Subset(train_data, train_idx.tolist()), config,
                                      shuffle=True, sample_ratio=float(config.sample_ratio))
     val_loader = create_dataloader(Subset(val_data, val_idx.tolist()), config,

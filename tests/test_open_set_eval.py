@@ -1,3 +1,4 @@
+from tests.fixtures import parse_test_args
 import copy
 import json
 from pathlib import Path
@@ -9,6 +10,7 @@ import cv2
 import numpy as np
 import torch
 
+from tests.fixtures import archive, track_fixture
 from model.resnet import MaskImageClassifier
 from scripts.evaluate_single_signal import build_parser, run
 from util.open_set import (
@@ -17,32 +19,6 @@ from util.open_set import (
 )
 from util.single_signal_eval import resolve_config
 from util.unknown_discovery import discover_unknown
-
-
-def archive(path, features, labels, split, signature=None, classes=None):
-    classes = classes or {"known": 0}
-    records = [{"path": f"{split}/{i}.png", "track_id": "T0001", "recording_id": f"{split}_{i}",
-                "source_sha256": f"{split}_hash_{i}", "true_class_name": name}
-               for i, name in enumerate(labels)]
-    metadata = {"schema_version": 1, "kind": "track_features", "feature_version": FEATURE_VERSION,
-                "signature": signature or {"sha256": "fixture"}, "classes": classes, "records": records}
-    save_npz(path, metadata, features=normalize_features(features))
-    return metadata
-
-
-def track_fixture(embeddings, probabilities=None, min_votes=1):
-    from util.multi_signal_eval import FrequencyTracker, group_geometry
-    tracker, rows = FrequencyTracker(), []
-    for i, embedding in enumerate(embeddings):
-        group = {"status": "ok", "group_id": 0, "probabilities": probabilities or [1.], "embedding": embedding,
-                 "selected_boxes": [[10, 100, 50, 110]], "observation_id": f"S{i}_G0", "slice_index": i,
-                 "confidence": 1., "class_name": "known"}
-        group.update(group_geometry(group["selected_boxes"], (512, 750), 122880000, i*50.))
-        tracker.update([group])
-        rows.append({"slice_index": i, "groups": [group]})
-    result = {"path": "test.png", "status": "ok", "signals": tracker.summarize({"known": 0}, {"min_votes": min_votes}),
-              "predicted_classes": ["known"], "true_class_names": None}
-    return [result], {"test.png": rows}
 
 
 class FeatureCompatibilityTests(unittest.TestCase):
@@ -222,7 +198,7 @@ class OpenSetCliTests(unittest.TestCase):
         return path
 
     def args(self, inputs, output, *extra):
-        return build_parser().parse_args(["--inputs", *map(str, inputs), "--checkpoint_path", str(self.checkpoint),
+        return parse_test_args(build_parser(), ["--inputs", *map(str, inputs), "--checkpoint_path", str(self.checkpoint),
             "--yolo_weights", str(self.weights), "--output_dir", str(self.root/output), "--device", "cpu", *extra])
 
     @staticmethod

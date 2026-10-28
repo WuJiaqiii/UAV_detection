@@ -1,0 +1,42 @@
+# Full labeled experiment. Replace paths and class names with real DAT folders.
+experiment:
+  inputs: [/data/uav/iq/all_classes]
+  input_type: iq_dat
+  recursive: true
+  known_classes: [Device-A, Device-B, Device-C]
+  # Omit unknown_classes to use every other discovered class as unknown.
+  # exclude_classes: [Background]  # Only if this folder exists; omit it entirely.
+  seed: 42
+  val_ratio: 0.15
+  calibration_ratio: 0.20
+  test_ratio: 0.20
+  # recording_ids_json: /data/uav/recording_ids.json
+  # split_only: true
+train:
+  yolo_weights: /models/detector.pt
+  iq_sample_rate: 100000000
+  iq_byte_order: "<"
+  epochs: 100
+  batch_size: 32
+  num_workers: 1
+  lr: 0.0001
+  grouping_mode: hopping
+  hop_association: shape
+  supcon_weight: 0.1
+  bbox_cache_mode: "off"
+evaluation:
+  signal_mode: multi
+  iq_stride_ms: 50.0
+  max_slices: 0
+  min_votes: 1
+  # Shared frontend/group settings otherwise come from the trained checkpoint.
+profile:
+  knn_k: 5
+  known_false_reject_rate: 0.01
+  min_calibration_per_class: 20
+  max_reference_per_class: 2000
+discovery:
+  unknown_cluster_backend: hdbscan
+  unknown_min_cluster_size: 5
+  unknown_min_recordings: 2
+  save_visuals: true

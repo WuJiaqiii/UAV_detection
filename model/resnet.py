@@ -31,6 +31,7 @@ class MaskImageClassifier(nn.Module):
         self.backbone_name = backbone.lower()
         self.num_classes = int(num_classes)
         self.in_chans = int(in_chans)
+        self._backbone_frozen = False
 
         if self.backbone_name == "resnet18":
             weights = ResNet18_Weights.DEFAULT if pretrained else None
@@ -130,6 +131,7 @@ class MaskImageClassifier(nn.Module):
         model.features[0][0] = new_conv
 
     def freeze_backbone(self):
+        self._backbone_frozen = True
         for n, p in self.net.named_parameters():
             p.requires_grad = False
 
@@ -139,6 +141,14 @@ class MaskImageClassifier(nn.Module):
         else:
             for p in self.net.classifier.parameters():
                 p.requires_grad = True
+
+    def train(self, mode=True):
+        super().train(mode)
+        if mode and self._backbone_frozen:
+            self.net.eval()
+            head = self.net.fc if self.backbone_name.startswith("resnet") else self.net.classifier
+            head.train(True)
+        return self
 
     def forward_features(self, x):
         """Penultimate representation; no new parameters or checkpoint keys.

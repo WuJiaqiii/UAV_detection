@@ -1,0 +1,12 @@
+evaluation:
+  checkpoint_path: /models/known_best.pth
+  yolo_weights: /models/detector.pt
+  signal_mode: multi
+  recursive: true
+  # Saved effective model/frontend/group settings are used unless overridden.
+predict:
+  inputs: [/data/uav/test_mixed]
+  save_visuals: true
+  max_visualizations: 24
+  # rf_center_mhz: 2400
+  # labels_json: /data/uav/test_labels.json

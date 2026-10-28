@@ -1,19 +1,15 @@
 """Per-group classification, native frequency geometry and conservative track voting."""
 from collections import Counter
 from collections.abc import Mapping
-import json
 import math
 from pathlib import Path
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-import torch
 
 from data.iq_dat_loader import BYTES_PER_COMPLEX_SAMPLE
-from util.mask_input import build_mask_input
-from util.single_signal_eval import (
-    SingleSignalPredictor, load_spectrum, plan_iq_slices, validate_classes, vote_predictions,
-)
+from util.eval_common import load_spectrum, plan_iq_slices, validate_classes, vote_predictions, read_path_mapping
+from util.group_predictor import GroupPredictor
 from util.spectrogram_frontend import pixel_y_to_freq_mhz
 
 
@@ -76,47 +72,10 @@ def group_geometry(boxes, shape, sample_rate, slice_start_ms=0., duration_ms=50.
             "pulses": pulses}
 
 
-class MultiSignalPredictor(SingleSignalPredictor):
-    def __init__(self, classifier, detector, preprocessor, config, device="cpu", batch_size=32, return_features=False):
-        super().__init__(classifier, detector, preprocessor, config, device, "main")
-        if batch_size < 1:
-            raise ValueError("classifier_batch_size must be >= 1")
-        self.batch_size = batch_size
-        self.return_features = return_features
-
-    @torch.inference_mode()
+class MultiSignalPredictor(GroupPredictor):
     def predict(self, spectrum, domain):
-        from util.spectrogram_frontend import render_rgb
-
-        boxes = self.detector.detect_rgb(render_rgb(spectrum, self.frontend, domain))
-        result = {"status": "no_detection", "detected_boxes": len(boxes), "group_count": 0, "groups": []}
-        if not len(boxes):
-            return result
-        groups = self.preprocessor.select_signal_groups(boxes, spectrogram=spectrum) or []
-        result.update(group_count=len(groups), status="ok" if groups else "no_group")
-        names = {idx: name for name, idx in self.config.classes.items()}
-        for start in range(0, len(groups), self.batch_size):
-            chunk = groups[start:start+self.batch_size]
-            tensors = [build_mask_input(spectrum, group["boxes"], self.config)[0] for group in chunk]
-            batch = torch.stack(tensors).to(self.device)
-            if self.return_features:
-                logits, features = self.classifier(batch, return_features=True)
-                from util.open_set import normalize_features
-                features = normalize_features(features.cpu().numpy())
-            else:
-                logits = self.classifier(batch)
-            if tuple(logits.shape) != (len(chunk), self.config.num_classes) or not torch.isfinite(logits).all():
-                raise ValueError("Classifier must return finite [group_count, num_classes] logits")
-            for index, (group, probabilities) in enumerate(zip(chunk, logits.softmax(dim=1).cpu().numpy())):
-                label = int(np.argmax(probabilities))
-                result["groups"].append({"group_id": start+index, "status": "ok", "class_id": label,
-                    "class_name": names[label], "confidence": float(probabilities[label]),
-                    "probabilities": probabilities.astype(float).tolist(),
-                    "selected_boxes": np.asarray(group["boxes"]).tolist(),
-                    "selected_group_score": float(group.get("score", 0.)),
-                    "group_type": group.get("group_type", "frequency")})
-                if self.return_features:
-                    result["groups"][-1]["embedding"] = features[index].tolist()
+        result, groups = self.detect_groups(spectrum, domain)
+        result["groups"] = self.classify_groups(spectrum, groups) if groups else []
         return result
 
 
@@ -252,21 +211,6 @@ def evaluate_multi_file(path, predictor, config, vote_options=None, stride_ms=50
               "rf_center_mhz": rf_center_mhz, "frequency_reference": "offset" if rf_center_mhz is None else "absolute_and_offset",
               "visualization_errors": sum("visualization_error" in row for row in rows)}
     return result, rows
-
-
-def read_path_mapping(path):
-    path = Path(path).expanduser().resolve()
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, Mapping):
-        raise ValueError("Expected a JSON object keyed by input paths")
-    result = {}
-    for name, value in raw.items():
-        file = Path(name).expanduser()
-        key = str((file if file.is_absolute() else path.parent/file).resolve())
-        if key in result:
-            raise ValueError(f"Duplicate normalized input path: {name}")
-        result[key] = value
-    return result
 
 
 def resolve_rf_centers(path=None, default=None):

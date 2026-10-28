@@ -1,0 +1,39 @@
+# One shared evaluation section binds identical reference/calibration/test
+# frontend, grouping, slicing and voting settings. Edit all /data and /models paths.
+evaluation:
+  checkpoint_path: /models/known_best.pth
+  yolo_weights: /models/detector.pt
+  signal_mode: multi
+  recursive: true
+  grouping_mode: hopping
+  hop_association: shape
+  iq_sample_rate: 100000000
+  iq_stride_ms: 50.0
+  max_slices: 0
+  min_votes: 1
+  # recording_ids_json: /data/uav/recording_ids.json
+  # rf_center_mhz: 2400
+profile:
+  reference_inputs: [/data/uav/fold1/known_train]
+  calibration_inputs: [/data/uav/fold1/known_calibration]
+  label_mode: filename   # parent for class-folder DAT; json for explicit mappings
+  knn_k: 5
+  known_false_reject_rate: 0.01
+  min_calibration_per_class: 20
+  max_reference_per_class: 2000
+  ignore_classes: []     # Use [Background] only when it exists in the model head
+discovery:
+  test_inputs: [/data/uav/fold1/dev_mixed]
+  unknown_cluster_backend: hdbscan
+  unknown_min_cluster_size: 5
+  unknown_min_recordings: 2
+  save_visuals: true
+  # test_labels_json: /data/uav/fold1/test_labels.json
+  # test_label_mode: filename
+predict:
+  inputs: [/data/uav/fold1/test_mixed]
+  open_set_profile: /models/known_profile.npz  # Copy the profile path printed by the profile task
+  unknown_cluster_backend: hdbscan
+  unknown_min_cluster_size: 5
+  unknown_min_recordings: 2
+  # labels_json: /data/uav/fold1/test_labels.json

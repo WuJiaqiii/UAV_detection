@@ -23,7 +23,7 @@ def validate_dcg_options(topk=15, cosine_threshold=.85, resolution=1., mutual=Tr
         import networkx as nx
         from networkx.algorithms.community import louvain_communities
     except ImportError as exc:
-        raise ImportError("DCG requires NetworkX >= 3.0; install requirements-open-set.txt") from exc
+        raise ImportError("DCG requires NetworkX >= 3.0; install requirements.txt") from exc
     return nx, louvain_communities
 
 

@@ -16,10 +16,9 @@ if str(ROOT) not in sys.path:
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--inputs", nargs="+", required=True, help="Files, directories or quoted glob patterns; formats may be mixed")
-    p.add_argument("--recursive", action="store_true")
+    p.add_argument("--recursive", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--checkpoint_path", type=Path, required=True, help="Classifier .pth; effective settings and label IDs are read from config")
     p.add_argument("--yolo_weights", type=Path, required=True)
-    p.add_argument("--output_dir", type=Path, required=True, help="Must be absent or empty")
     p.add_argument("--classes_json", type=Path, help="Name-to-ID mapping for legacy checkpoints; must agree with saved metadata if present")
     p.add_argument("--device", default="auto", help="auto, cpu, cuda or cuda:0")
     p.add_argument("--signal_mode", choices=["multi", "single"], default="multi", help="multi classifies every valid group; single retains the previous file-level voter")
@@ -50,10 +49,10 @@ def build_parser():
     p.add_argument("--save_visuals", action=argparse.BooleanOptionalAction, default=True, help="Multi-mode annotated slice PNGs; HTML timeline is always written")
     p.add_argument("--max_visualizations", type=int, default=24, help="Per file, evenly spaced; 0 saves all slices")
     p.add_argument("--labels_json", type=Path, help="Input-path-to-class-name mapping; multi mode also accepts lists of class names")
-    p.add_argument("--label_from_parent", action="store_true", help="Explicitly use parent folder names as truth; never changes model label IDs")
-    p.add_argument("--label_from_filename", action="store_true", help="Multi mode: use existing Protocol-[...] filename blocks as reporting/export truth only")
-    p.add_argument("--fail_fast", action="store_true")
-    p.add_argument("--export_features", action="store_true", help="Multi mode: save one penultimate feature per accepted track to features.npz")
+    p.add_argument("--label_from_parent", action=argparse.BooleanOptionalAction, default=False, help="Explicitly use parent folder names as truth; never changes model label IDs")
+    p.add_argument("--label_from_filename", action=argparse.BooleanOptionalAction, default=False, help="Multi mode: use existing Protocol-[...] filename blocks as reporting/export truth only")
+    p.add_argument("--fail_fast", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--export_features", action=argparse.BooleanOptionalAction, default=False, help="Multi mode: save one penultimate feature per accepted track to features.npz")
     p.add_argument("--recording_ids_json", type=Path, help="Input-path-to-original-recording-ID mapping; required for crops/slices sharing a recording")
     p.add_argument("--open_set_profile", type=Path, help="Frozen known-only profile; enables rejection and global unknown discovery in multi mode")
     p.add_argument("--min_novel_observation_share", type=float, default=.6, help="Consistency guard in addition to calibrated track distance")
@@ -63,15 +62,15 @@ def build_parser():
 
 
 def run(args, predictor=None):
+    if not getattr(args, "output_dir", None):
+        from util.run_context import execute_run
+        return execute_run("predict", args, lambda managed: run(managed, predictor))
     import torch
-    from util.single_signal_eval import (
-        SingleSignalPredictor, collect_inputs, resolve_config, evaluate_file,
-        vote_predictions, load_truth, evaluation_metrics,
-    )
+    from util.single_signal_eval import SingleSignalPredictor, evaluate_file, load_truth, evaluation_metrics
+    from util.eval_common import collect_inputs, resolve_config, validate_prediction_options
 
-    output = args.output_dir.expanduser().resolve()
-    if output.exists() and (not output.is_dir() or any(output.iterdir())):
-        raise ValueError("Use an empty output_dir; existing reports are never overwritten")
+    from util.run_context import check_output_directory
+    output = check_output_directory(args)
     inputs = collect_inputs(args.inputs, args.recursive)
     checkpoint_path = args.checkpoint_path.expanduser().resolve()
     if not checkpoint_path.is_file():
@@ -98,6 +97,7 @@ def run(args, predictor=None):
             overrides[key] = getattr(args, key)
     logger = logging.getLogger("single_signal_eval")
     cfg = resolve_config(checkpoint, classes, overrides, args.frontend_config, logger)
+    options = validate_prediction_options(args, cfg.classes)
     feature_mode = args.export_features or args.open_set_profile is not None
     if feature_mode and args.signal_mode != "multi":
         raise ValueError("Open-set profiles and feature export require --signal_mode multi")
@@ -105,10 +105,6 @@ def run(args, predictor=None):
         raise ValueError("label_from_filename requires --signal_mode multi")
     if args.export_features and args.open_set_profile:
         raise ValueError("Export reference/calibration features without open-set rejection")
-    if not 0 <= args.min_novel_observation_share <= 1:
-        raise ValueError("min_novel_observation_share must be in [0, 1]")
-    if args.unknown_min_cluster_size < 2 or args.unknown_min_samples < 1 or args.unknown_min_recordings < 1:
-        raise ValueError("Invalid unknown clustering support counts")
     signature, profile, recording_ids = None, None, {}
     if feature_mode:
         from util.open_set import inference_signature, OpenSetProfile
@@ -124,21 +120,8 @@ def run(args, predictor=None):
             recording_ids = read_path_mapping(args.recording_ids_json)
             if any(not isinstance(value, str) or not value.strip() for value in recording_ids.values()):
                 raise ValueError("Recording IDs must be nonempty strings")
-    if args.signal_mode == "multi" and args.group_policy not in (None, "all"):
-        raise ValueError("Multi mode classifies every group; main/union require --signal_mode single")
-    if args.signal_mode == "single" and args.group_policy == "all":
-        raise ValueError("--group_policy all requires --signal_mode multi")
-    options = dict(method=args.vote_method, min_slice_confidence=args.min_slice_confidence,
-                   min_votes=args.min_votes, min_vote_share=args.min_vote_share,
-                   exclude_classes=args.exclude_vote_classes)
-    vote_predictions([], cfg.classes, **options)  # Validate before creating reports or models.
-    if args.max_slices < 0 or not 0 < args.iq_stride_ms < float("inf"):
-        raise ValueError("Need max_slices >= 0 and finite iq_stride_ms > 0")
-    if args.classifier_batch_size < 1 or args.max_visualizations < 0:
-        raise ValueError("Need classifier_batch_size >= 1 and max_visualizations >= 0")
     if args.signal_mode == "multi":
-        from util.multi_signal_eval import FrequencyTracker, load_multi_truth, resolve_rf_centers
-        FrequencyTracker(args.track_freq_tolerance_mhz, args.track_min_band_iou, args.track_max_gap_ms)
+        from util.multi_signal_eval import load_multi_truth, resolve_rf_centers
         resolve_rf_centers(args.rf_centers_json, args.rf_center_mhz)
         truth = load_multi_truth(args.labels_json, inputs, cfg.classes, args.label_from_parent,
                                 allow_unknown=args.open_set_profile is not None, label_from_filename=args.label_from_filename)
@@ -319,6 +302,11 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
             track.pop("_feature", None)
     metrics = multi_evaluation_metrics(results, cfg.classes)
     if profile:
+        from util.open_set_metrics import evaluate_open_set
+        evaluation = evaluate_open_set(results, cfg.classes, discovery, recording_ids)
+        metrics["open_set_evaluation"] = evaluation["metrics"]
+        (output/"open_set_metrics.json").write_text(json.dumps(evaluation, ensure_ascii=False, indent=2,
+                                                             allow_nan=False)+"\n", encoding="utf-8")
         # Closed-set file-set accuracy would silently ignore anonymous novel IDs.
         metrics.pop("file_class_set_accuracy", None)
         metrics.pop("unknown_files", None)  # Legacy vote abstention is not a novel-class count.

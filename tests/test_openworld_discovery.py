@@ -1,3 +1,4 @@
+from tests.fixtures import parse_test_args
 import copy
 import json
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import torch
 
+from tests.fixtures import known_archive, track_fixture
 from scripts.cluster_unknown_features import build_parser as cluster_parser, run as cluster_run
 from scripts.evaluate_single_signal import build_parser, run
 from util.dcg_discovery import cluster_dcg
@@ -23,16 +25,6 @@ from util.unknown_discovery import discover_unknown
 def candidates(features, same_recording=False):
     return [{"path": f"file_{i}.dat", "recording_id": "same_capture" if same_recording else f"capture_{i}",
              "feature": feature, "track": {"track_id": "T0001"}} for i, feature in enumerate(features)]
-
-
-def known_archive(path, features, split, signature=None, classes=None, recording=None):
-    labels = classes or {"known": 0}
-    records = [{"path": f"{split}/{i}.png", "recording_id": recording or f"{split}_{i}",
-                "source_sha256": f"hash_{split}_{i}", "true_class_name": "known", "track_id": "T0001"}
-               for i in range(len(features))]
-    save_npz(path, {"kind": "track_features", "schema_version": 1, "feature_version": FEATURE_VERSION,
-                   "signature": signature or {"sha256": "fixture"}, "classes": labels, "records": records},
-             features=normalize_features(features))
 
 
 class DcgDiscoveryTests(unittest.TestCase):
@@ -123,7 +115,6 @@ class ProfileAndArchiveTests(unittest.TestCase):
                                          label_from_filename=True)[str(unknown)], ["Unseen"])
 
     def test_ignored_background_needs_no_reference_and_is_uncertain(self):
-        from tests.test_open_set_eval import track_fixture
         classes = {"known": 0, "Background": 1}
         ref, cal, profile = [self.root/name for name in ("ref.npz", "cal.npz", "profile.npz")]
         known_archive(ref, [[1., 0, 0]], "train", classes=classes)
@@ -148,7 +139,7 @@ class ProfileAndArchiveTests(unittest.TestCase):
         reports = []
         for backend in ("hdbscan", "dcg"):
             output = self.root/backend
-            reports.append(cluster_run(cluster_parser().parse_args(["--features", str(archive), "--output_dir", str(output),
+            reports.append(cluster_run(parse_test_args(cluster_parser(), ["--features", str(archive), "--output_dir", str(output),
                                                                     "--unknown_cluster_backend", backend])))
             metadata, arrays = load_npz(output/"unknown_features.npz", "unknown_candidates")
             np.testing.assert_allclose(arrays["features"], normalize_features(features), atol=1e-7)
@@ -164,7 +155,7 @@ class ProfileAndArchiveTests(unittest.TestCase):
         metadata = {"kind": "unknown_candidates", "schema_version": 1, "feature_version": FEATURE_VERSION,
                     "signature": {"sha256": "fixture"}, "records": []}
         save_npz(archive, metadata, features=np.empty((0, 3), dtype=np.float32))
-        args = cluster_parser().parse_args(["--features", str(archive), "--output_dir", str(self.root/"empty"),
+        args = parse_test_args(cluster_parser(), ["--features", str(archive), "--output_dir", str(self.root/"empty"),
                                             "--unknown_cluster_backend", "dcg"])
         self.assertEqual(cluster_run(args)["estimated_unknown_class_count"], 0)
         metadata["records"] = [{"path": "a.dat", "track_id": "T0001", "recording_id": "a"}]*2
@@ -184,7 +175,7 @@ class ProfileAndArchiveTests(unittest.TestCase):
         saved = {"config": {"classes": {"known": 0}, "mask_img_size": 32}, "model_state_dict": {}}
         torch.save(saved, checkpoint)
         weights.write_bytes(b"fixture")
-        args = build_parser().parse_args(["--inputs", str(dat), "--checkpoint_path", str(checkpoint), "--yolo_weights", str(weights),
+        args = parse_test_args(build_parser(), ["--inputs", str(dat), "--checkpoint_path", str(checkpoint), "--yolo_weights", str(weights),
             "--output_dir", str(self.root/"report"), "--device", "cpu", "--min_votes", "2", "--rf_center_mhz", "2400",
             "--unknown_cluster_backend", "dcg", "--unknown_min_cluster_size", "2", "--unknown_min_recordings", "1"])
         signature = inference_signature(args, resolve_config(saved))
@@ -211,7 +202,7 @@ class ProfileAndArchiveTests(unittest.TestCase):
         self.assertGreater(metadata["records"][0]["end_ms"], 50.)
         self.assertIn("DCG-Louvain", (args.output_dir/"report.html").read_text(encoding="utf-8"))
         self.assertIn("Unknown_001", (args.output_dir/"tracks.csv").read_text(encoding="utf-8-sig"))
-        clustered = cluster_run(cluster_parser().parse_args(["--features", str(args.output_dir/"unknown_features.npz"),
+        clustered = cluster_run(parse_test_args(cluster_parser(), ["--features", str(args.output_dir/"unknown_features.npz"),
             "--output_dir", str(self.root/"reclustered"), "--unknown_cluster_backend", "hdbscan",
             "--unknown_min_cluster_size", "2", "--unknown_min_samples", "1", "--unknown_min_recordings", "1"]))
         self.assertEqual(clustered["unknown_candidate_tracks"], 2)
