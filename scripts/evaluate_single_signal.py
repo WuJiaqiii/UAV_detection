@@ -55,7 +55,8 @@ def build_parser():
     p.add_argument("--export_features", action=argparse.BooleanOptionalAction, default=False, help="Multi mode: save one penultimate feature per accepted track to features.npz")
     p.add_argument("--recording_ids_json", type=Path, help="Input-path-to-original-recording-ID mapping; required for crops/slices sharing a recording")
     p.add_argument("--open_set_profile", type=Path, help="Frozen known-only profile; enables rejection and global unknown discovery in multi mode")
-    p.add_argument("--min_novel_observation_share", type=float, default=.6, help="Consistency guard in addition to calibrated track distance")
+    p.add_argument("--novelty_policy", choices=["calibrated_track", "observation_guard"], default="calibrated_track", help="Default uses the calibrated track score; guard is an optional stricter ablation")
+    p.add_argument("--min_novel_observation_share", type=float, default=.5, help="Only vetoes unknowns under novelty_policy observation_guard; always reported diagnostically")
     from util.unknown_discovery import add_discovery_arguments
     add_discovery_arguments(p)
     return p
@@ -226,7 +227,7 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
         rows_by_file[str(path)] = rows
         if profile:
             from util.open_set import apply_open_set
-            candidates.extend(apply_open_set(profile, [result], {str(path): rows}, args.min_novel_observation_share))
+            candidates.extend(apply_open_set(profile, [result], {str(path): rows}, args.min_novel_observation_share, args.novelty_policy))
             for row in rows:
                 for group in row.get("groups", []):
                     group.pop("embedding", None)
@@ -300,6 +301,8 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
     for result in results:
         for track in result["signals"]:
             track.pop("_feature", None)
+    from util.class_evidence import summarize_class_evidence
+    summarize_class_evidence(results, rows_by_file)
     metrics = multi_evaluation_metrics(results, cfg.classes)
     if profile:
         from util.open_set_metrics import evaluate_open_set
@@ -357,12 +360,14 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
         "frequency_center_absolute_mhz", "frequency_low_absolute_mhz", "frequency_high_absolute_mhz", "frequency_bands_absolute_mhz"]
     observations = (group for rows in rows_by_file.values() for row in rows for group in row.get("groups", []))
     open_columns = ["recognition_status", "display_label", "known_candidate_class", "ood_score", "ood_threshold",
-        "track_ood_score", "novel_observation_share", "unknown_cluster_id", "cluster_status", "cluster_membership", "cluster_similarity"] if profile else []
+        "track_ood_score", "novel_observation_share", "novelty_policy", "profile_class_name", "unknown_cluster_id", "cluster_status", "cluster_membership", "cluster_similarity"] if profile else []
     write_csv("signals.csv", observations, ["path", "slice_index", "group_id", "observation_id", "track_id", "class_name",
         "confidence", *open_columns, "start_ms", "end_ms", *frequency_columns, "vote_accepted", "vote_reason", "selected_boxes", "probabilities"])
     tracks = ({"path": result["path"], **track} for result in results for track in result["signals"])
     write_csv("tracks.csv", tracks, ["path", "track_id", "status", "class_name", "candidate_class_name", "start_ms", "end_ms",
-        *frequency_columns, *open_columns, "valid_votes", "observation_count", "mean_probability", "vote_share", "vote_counts", "unknown_reason"])
+        *frequency_columns, *open_columns, "component_types", "valid_votes", "observation_count", "mean_probability", "vote_share", "vote_counts", "unknown_reason"])
+    evidence = ({"path": result["path"], **item} for result in results for item in result["class_evidence"])
+    write_csv("class_evidence.csv", evidence, ["path", "display_label", "recognition_status", "class_name", "identity_status", "components"])
     write_csv("results.csv", results, ["path", "input_type", "status", "predicted_classes", "total_slices", "observation_count",
         "track_count", "accepted_track_count", "rf_center_mhz", "error_slices", "visualization_errors", "true_class_names", "class_set_correct",
         "predicted_unknown_classes", "known_track_count", "novel_track_count", "uncertain_track_count", "no_signal_reason", "error"])

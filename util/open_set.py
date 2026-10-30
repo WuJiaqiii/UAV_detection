@@ -36,7 +36,8 @@ def inference_signature(args, config):
     sources = ["model/resnet.py", "util/mask_input.py", "util/preprocess.py", "util/detector.py",
                "util/spectrogram_frontend.py", "data/iq_dat_loader.py",
                "util/single_signal_eval.py", "util/multi_signal_eval.py", "util/open_set.py",
-               "util/eval_common.py", "util/group_predictor.py", "util/recordings.py"]
+               "util/eval_common.py", "util/group_predictor.py", "util/recordings.py",
+               "util/known_reference.py", "util/class_evidence.py"]
     settings = {key: value for key, value in vars(config).items()
                 if key not in {"device", "yolo_weights", "frontend_config"}}
     options = {key: getattr(args, key) for key in (
@@ -130,6 +131,7 @@ def export_feature_archive(path, signature, classes, results, rows_by_file, reco
         records.append({"path": source, "source_sha256": digest, "recording_id": identity,
                         "track_id": track["track_id"], "true_class_name": truth,
                         "known_candidate_class": track["class_name"],
+                        "component_type": (next(iter(types)) if len(types := {g.get("group_type", "unspecified") for g in accepted}) == 1 else "mixed"),
                         "observation_count": len(accepted)})
         features.append(center)
     if not features:
@@ -167,8 +169,10 @@ def _validate_feature_archive(metadata, arrays):
 
 
 def build_profile(reference_path, calibration_path, output_path, k=5, known_false_reject_rate=.01,
-                  min_calibration_per_class=20, max_reference_per_class=2000, ignore_classes=()):
-    if not 0 < known_false_reject_rate < 1 or min_calibration_per_class < 1 or max_reference_per_class < k or k < 1:
+                  min_calibration_per_class=20, max_reference_per_class=2000, ignore_classes=(),
+                  score_method="record_class_knn", scale_prior_records=5.):
+    if (isinstance(k, bool) or not isinstance(k, (int, np.integer)) or
+            not 0 < known_false_reject_rate < 1 or min_calibration_per_class < 1 or max_reference_per_class < k or k < 1):
         raise ValueError("Need 0 < known_false_reject_rate < 1 and positive counts")
     ref_meta, ref_arrays = load_npz(reference_path, "track_features")
     cal_meta, cal_arrays = load_npz(calibration_path, "track_features")
@@ -190,6 +194,20 @@ def build_profile(reference_path, calibration_path, output_path, k=5, known_fals
     ref_records, cal_records = [ref_records[i] for i in ref_keep], [cal_records[i] for i in cal_keep]
     ref_labels = np.array([row["true_class_name"] for row in ref_records])
     cal_labels = np.array([row["true_class_name"] for row in cal_records])
+    if score_method not in {"record_class_knn", "global_knn"}:
+        raise ValueError("Unknown profile score_method")
+    if score_method == "record_class_knn":
+        from util.known_reference import build_record_bank
+        active_classes = {name: index for name, index in classes.items() if name not in ignored}
+        metadata, arrays = build_record_bank(reference, ref_records, calibration, cal_records, active_classes,
+            k, min_calibration_per_class, max_reference_per_class, known_false_reject_rate, scale_prior_records)
+        metadata.update(schema_version=1, kind="open_set_profile", feature_version=FEATURE_VERSION,
+                        signature=ref_meta["signature"], classes=classes, ignore_classes=sorted(ignored), k=int(k),
+                        target_known_false_reject_rate=known_false_reject_rate,
+                        reference_archive_sha256=file_sha256(reference_path),
+                        calibration_archive_sha256=file_sha256(calibration_path))
+        save_npz(output_path, metadata, **arrays)
+        return metadata
     selected, per_class = [], {}
     for name in classes:
         if name in ignored:
@@ -219,6 +237,7 @@ def build_profile(reference_path, calibration_path, output_path, k=5, known_fals
         warnings.append("Few calibration samples in the requested tail; threshold uncertainty is high.")
     warnings.append("Calibration rate is empirical, not a guarantee of deployment FPR or unknown recall.")
     metadata = {"schema_version": 1, "kind": "open_set_profile", "feature_version": FEATURE_VERSION,
+                "score_method": "global_knn", "calibration_unit": "track (legacy ablation)",
                 "signature": ref_meta["signature"], "classes": classes, "ignore_classes": sorted(ignored), "k": int(k),
                 "score": "kth Euclidean neighbor distance on L2-normalized track embeddings",
                 "threshold": threshold, "target_known_false_reject_rate": known_false_reject_rate,
@@ -243,6 +262,19 @@ class OpenSetProfile:
         self.k, self.threshold = self.metadata["k"], self.metadata["threshold"]
         if not isinstance(self.k, int) or not 1 <= self.k <= len(self.reference) or not math.isfinite(self.threshold):
             raise ValueError("Invalid profile k/threshold")
+        self.classes = dict(classes)
+        self.score_method = self.metadata.get("score_method", "global_knn")
+        self.bank = None
+        if self.score_method == "record_class_knn":
+            from util.known_reference import RecordingClassBank
+            self.bank = RecordingClassBank(self.reference, arrays["reference_labels"],
+                arrays["reference_recording_ids"], {n: i for n, i in classes.items() if n not in self.ignore_classes},
+                self.k, arrays["class_scales"])
+            if self.metadata["class_order"] != self.bank.names:
+                raise ValueError("Profile class scale order mismatch")
+            return
+        if self.score_method != "global_knn":
+            raise ValueError("Unknown profile score method")
         from sklearn.neighbors import NearestNeighbors
         self.neighbors = NearestNeighbors(n_neighbors=self.k, metric="euclidean", algorithm="brute").fit(self.reference)
 
@@ -250,30 +282,49 @@ class OpenSetProfile:
         query = normalize_features(features)
         if query.shape[1] != self.reference.shape[1]:
             raise ValueError("Profile/query feature dimension mismatch")
+        if self.bank is not None:
+            return self.bank.details(query)[0]
         return self.neighbors.kneighbors(query, return_distance=True)[0][:, -1]
 
+    def score_details(self, features):
+        query = normalize_features(features)
+        if self.bank is None:
+            return self.score(query), [None] * len(query)
+        scores, names, _, _ = self.bank.details(query)
+        return scores, names
 
-def apply_open_set(profile, results, rows_by_file, min_novel_observation_share=.6):
+
+def apply_open_set(profile, results, rows_by_file, min_novel_observation_share=.5, novelty_policy="calibrated_track"):
     if not 0 <= min_novel_observation_share <= 1:
         raise ValueError("min_novel_observation_share must be in [0, 1]")
+    if novelty_policy not in {"calibrated_track", "observation_guard"}:
+        raise ValueError("Unknown novelty policy")
     candidates = []
     items = list(iter_track_features(results, rows_by_file))
     ignored = getattr(profile, "ignore_classes", set())
     valid = [item for item in items if item[2] is not None and item[1].get("class_name") not in ignored]
-    scores = iter(profile.score([item[2] for item in valid])) if valid else iter([])
+    if valid:
+        score_values, profile_names = profile.score_details([item[2] for item in valid])
+        scores = iter(zip(score_values, profile_names))
+    else:
+        scores = iter([])
     for result, track, center, accepted, groups in items:
         track.update(closed_set_status=track["status"], known_candidate_class=track.get("class_name") or track.get("candidate_class_name"),
                      recognition_status="uncertain", unknown_cluster_id=None, ood_score=None,
-                     ood_threshold=profile.threshold, novel_observation_share=None)
+                     ood_threshold=profile.threshold, novel_observation_share=None,
+                     novelty_policy=novelty_policy, profile_class_name=None)
         if track["known_candidate_class"] in ignored:
             track.update(status="unknown", class_name=None, class_id=None, unknown_reason="ignored_profile_class")
         elif center is not None:
-            score = float(next(scores))
+            score, profile_name = next(scores)
+            score = float(score)
             share = float(np.mean(profile.score([group["embedding"] for group in accepted]) > profile.threshold))
-            track.update(ood_score=score, novel_observation_share=share)
+            track.update(ood_score=score, novel_observation_share=share, profile_class_name=profile_name)
             if score <= profile.threshold:
+                if profile_name is not None:
+                    track.update(class_name=profile_name, class_id=profile.classes[profile_name])
                 track.update(recognition_status="known", display_label=track["class_name"])
-            elif share >= min_novel_observation_share:
+            elif novelty_policy == "calibrated_track" or share >= min_novel_observation_share:
                 track.update(status="unknown", recognition_status="novel_candidate", display_label="Unknown_unassigned",
                              class_name=None, class_id=None, unknown_reason="outside_known_feature_distribution")
                 candidates.append({"path": result["path"], "track": track, "feature": center})
@@ -284,6 +335,7 @@ def apply_open_set(profile, results, rows_by_file, min_novel_observation_share=.
         for group in groups:
             group.update(recognition_status=track["recognition_status"], display_label=track["display_label"],
                          known_candidate_class=group["class_name"], track_ood_score=track["ood_score"],
+                         profile_class_name=track["profile_class_name"], novelty_policy=novelty_policy,
                          unknown_cluster_id=None)
     return candidates
 

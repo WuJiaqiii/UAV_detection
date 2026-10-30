@@ -137,7 +137,8 @@ class ProfileTests(unittest.TestCase):
 
     def test_inconsistent_novelty_is_uncertain(self):
         results, rows = track_fixture([[1, 0, 0], [1, 0, 0], [0, 1, 0]])
-        candidates = apply_open_set(self.build(), results, rows, min_novel_observation_share=.6)
+        candidates = apply_open_set(self.build(), results, rows, min_novel_observation_share=.6,
+                                    novelty_policy="observation_guard")
         self.assertFalse(candidates)
         self.assertEqual(results[0]["signals"][0]["unknown_reason"], "inconsistent_novelty_across_observations")
 
@@ -232,6 +233,10 @@ class OpenSetCliTests(unittest.TestCase):
         self.assertNotIn("file_class_set_accuracy", report["metrics"])
         self.assertEqual(report["metrics"]["file_unknown_presence_metrics"]["recall"], 1.)
         self.assertTrue((args.output_dir/"unknown_clusters.json").is_file())
+        self.assertTrue((args.output_dir/"class_evidence.csv").is_file())
+        self.assertEqual(report["files"][0]["class_evidence"][0]["class_name"], "known")
+        self.assertEqual(report["files"][0]["class_evidence"][0]["identity_status"], "category_evidence_only")
+        self.assertIn("Category evidence across signal components", (args.output_dir/"report.html").read_text(encoding="utf-8"))
         self.assertIn("Unknown_001", (args.output_dir/"tracks.csv").read_text(encoding="utf-8-sig"))
         self.assertIn("Unknown_001", (args.output_dir/"report.html").read_text(encoding="utf-8"))
         rows = [json.loads(line) for line in (args.output_dir/"slices.jsonl").read_text(encoding="utf-8").splitlines()]

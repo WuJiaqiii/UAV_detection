@@ -132,7 +132,7 @@ def write_html_report(output_dir, report, rows_by_file):
         '.scroll{overflow:auto}.muted{color:#94a3b8}img,svg{max-width:100%;height:auto}.previews{display:grid;gap:16px}'
         'details{margin:14px 0}code{overflow-wrap:anywhere}</style><body>',
         '<h1>Multi-signal evaluation</h1><p>Each group is classified independently. Track votes use time and frequency association; track IDs are candidate associations, not transmitter identities.</p>',
-        '<p><a href="results.json">Full JSON</a> · <a href="signals.csv">Per-group CSV</a> · <a href="tracks.csv">Track votes CSV</a> · <a href="slices.jsonl">Slice records</a></p>',
+        '<p><a href="results.json">Full JSON</a> · <a href="signals.csv">Per-group CSV</a> · <a href="tracks.csv">Track votes CSV</a> · <a href="class_evidence.csv">Category components CSV</a> · <a href="slices.jsonl">Slice records</a></p>',
         f'<p>{report["metrics"]["total_files"]} files · {report["metrics"]["total_observations"]} group observations · '
         f'{report["metrics"]["total_accepted_tracks"]} accepted tracks</p>']
     if report.get("discovery"):
@@ -154,6 +154,13 @@ def write_html_report(output_dir, report, rows_by_file):
                          f'{result.get("novel_track_count", 0)} novel candidates · {result.get("uncertain_track_count", 0)} uncertain tracks</p>')
         if result.get("error"):
             parts.append(f'<p>{escape(result["error"])}</p>')
+        if result.get("class_evidence"):
+            parts.append('<h3>Category evidence across signal components</h3><p class="muted">A category can include hopping and fixed-frequency components. This summary does not establish physical device identity.</p><ul>')
+            for evidence in result["class_evidence"]:
+                components = ", ".join(component["track_id"] + " (" + "/".join(component["component_types"]) + ")"
+                                       for component in evidence["components"])
+                parts.append(f'<li>{escape(evidence["display_label"])}: {escape(components)}</li>')
+            parts.append('</ul>')
         parts.append(_timeline(result, observations))
         parts.append('<h3>Track vote summaries</h3><div class="scroll"><table><tr><th>Track</th><th>Final label / recognition</th><th>Time (ms)</th><th>Frequency range</th><th>Known-head mean p / vote share</th><th>Valid / observed</th><th>OOD score / threshold</th></tr>')
         for track in result["signals"]:

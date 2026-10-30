@@ -107,6 +107,8 @@ def profile_parser(discover=False):
     parser.add_argument("--known_false_reject_rate", type=float, default=.01)
     parser.add_argument("--min_calibration_per_class", type=int, default=20)
     parser.add_argument("--max_reference_per_class", type=int, default=2000)
+    parser.add_argument("--profile_score_method", choices=["record_class_knn", "global_knn"], default="record_class_knn")
+    parser.add_argument("--profile_scale_prior_records", type=float, default=5.)
     parser.add_argument("--ignore_classes", nargs="*", default=[], help="Explicit abstention head classes, e.g. Background")
     if discover:
         parser.description += "; then predict a mixed batch and discover anonymous classes"
@@ -173,7 +175,8 @@ def run_profile(args, discover=False, predictor=None):
     target = output/"known_profile.npz"
     metadata = build_profile(output/"reference/features.npz", output/"calibration/features.npz", target,
         args.knn_k, args.known_false_reject_rate, args.min_calibration_per_class,
-        args.max_reference_per_class, args.ignore_classes)
+        args.max_reference_per_class, args.ignore_classes,
+        score_method=args.profile_score_method, scale_prior_records=args.profile_scale_prior_records)
     if not discover:
         return {"profile": str(target), "threshold": metadata["threshold"]}
     prediction = copy.deepcopy(args)

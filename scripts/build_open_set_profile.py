@@ -20,6 +20,8 @@ def main():
     parser.add_argument("--known_false_reject_rate", type=float, default=.01)
     parser.add_argument("--min_calibration_per_class", type=int, default=20, help="Minimum distinct original known recordings per class")
     parser.add_argument("--max_reference_per_class", type=int, default=2000)
+    parser.add_argument("--profile_score_method", choices=["record_class_knn", "global_knn"], default="record_class_knn")
+    parser.add_argument("--profile_scale_prior_records", type=float, default=5.)
     parser.add_argument("--ignore_classes", nargs="*", default=[], help="Optional abstention classes, e.g. Background; their predictions become uncertain")
     args = parser.parse_args()
     from util.run_context import execute_run
@@ -27,7 +29,8 @@ def main():
         target = managed.output_dir / "known_profile.npz"
         metadata = build_profile(managed.reference_features, managed.calibration_features, target,
             managed.knn_k, managed.known_false_reject_rate, managed.min_calibration_per_class,
-            managed.max_reference_per_class, managed.ignore_classes)
+            managed.max_reference_per_class, managed.ignore_classes,
+            score_method=managed.profile_score_method, scale_prior_records=managed.profile_scale_prior_records)
         return {"profile": str(target), **{key: value for key, value in metadata.items() if key != "signature"}}
     summary = execute_run("profile_archive", args, build)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

@@ -27,11 +27,15 @@ train:
   bbox_cache_mode: "off"
 evaluation:
   signal_mode: multi
+  novelty_policy: calibrated_track
   iq_stride_ms: 50.0
   max_slices: 0
   min_votes: 1
   # Shared frontend/group settings otherwise come from the trained checkpoint.
 profile:
+  # Single-device known recordings may contain several control/video components.
+  profile_score_method: record_class_knn
+  profile_scale_prior_records: 5.0
   knn_k: 5
   known_false_reject_rate: 0.01
   min_calibration_per_class: 5

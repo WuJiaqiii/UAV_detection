@@ -1,6 +1,7 @@
 # Unlabeled inference. Match the model/profile's effective feature settings.
 # A completed experiment also exports an inference.yaml with its exact options.
 evaluation:
+  novelty_policy: calibrated_track
   checkpoint_path: /models/known_best.pth
   yolo_weights: /models/detector.pt
   signal_mode: multi

@@ -85,6 +85,9 @@ def stage_arguments(args, config_path):
     if (profile.knn_k < 1 or profile.min_calibration_per_class < 1 or
             profile.max_reference_per_class < profile.knn_k or not 0 < profile.known_false_reject_rate < 1):
         raise ValueError("Invalid known-profile calibration settings")
+    import math
+    if not math.isfinite(profile.profile_scale_prior_records) or profile.profile_scale_prior_records < 0:
+        raise ValueError("profile_scale_prior_records must be finite and nonnegative")
     return train, profile
 
 
