@@ -18,6 +18,8 @@ def build_parser():
     parser.add_argument("--calibration_ratio", type=float, default=.20)
     parser.add_argument("--test_ratio", type=float, default=.20)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--training_variant", choices=["configured", "primary_ce", "all_ce", "all_supcon"], default="configured",
+                        help="Controlled component recipe; same seed/data splits; all_supcon uses weight 0.1")
     parser.add_argument("--recording_ids_json", type=Path)
     parser.add_argument("--split_only", action=argparse.BooleanOptionalAction, default=False,
                         help="Write the split manifest and stage configs without training or running models")
@@ -31,6 +33,10 @@ def stage_arguments(args, config_path):
     from util.run_context import planned_directory, run_type
     output = (getattr(args, "output_dir", None) or planned_directory(run_type("experiment", args))).resolve()
     train_settings, _ = load_settings(config_path, "train")
+    variant = getattr(args, "training_variant", "configured")
+    if variant != "configured":
+        train_settings.update(train_group_policy="primary" if variant == "primary_ce" else "all",
+                              supcon_weight=.1 if variant == "all_supcon" else 0.)
     managed_train = {"dataset_path", "train_dataset_path", "val_dataset_path", "class_names", "exclude_classes",
                      "incremental_new_classes", "incremental_split_mode", "checkpoint_path", "experiment_dir", "recording_ids_json"}
     if managed_train & train_settings.keys():
@@ -162,8 +168,8 @@ def run_experiment(args, config_path=None, train_runner=None, predictor=None):
         if not profile.checkpoint_path.is_file():
             raise RuntimeError(f"Training did not produce a best checkpoint: {profile.checkpoint_path}")
         # Ensure a custom runner or stale file cannot change the known head space.
-        import torch
-        checkpoint = torch.load(profile.checkpoint_path, map_location="cpu", weights_only=False)
+        from util.checkpoint import load_checkpoint_object
+        checkpoint = load_checkpoint_object(profile.checkpoint_path)
         if checkpoint.get("config", {}).get("classes") != manifest["classes"]:
             raise ValueError("Best checkpoint class mapping does not match the known split")
         del checkpoint

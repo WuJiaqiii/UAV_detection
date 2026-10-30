@@ -10,6 +10,11 @@ from util.mask_input import build_mask_input
 
 
 def validate_representation_options(config):
+    policy = getattr(config, "train_group_policy", "primary")
+    if policy not in {"primary", "all"}:
+        raise ValueError("train_group_policy must be primary or all")
+    if policy == "all" and getattr(config, "trainer_type", "normal") != "normal":
+        raise ValueError("All-component training currently requires the normal known-only trainer")
     weight = float(getattr(config, "supcon_weight", 0.))
     temperature = float(getattr(config, "supcon_temperature", .2))
     probability = float(getattr(config, "supcon_drop_prob", .1))
@@ -40,7 +45,7 @@ class SupervisedContrastiveLoss(nn.Module):
             raise ValueError("temperature must be finite and >= 1e-6")
         self.temperature = temperature
 
-    def forward(self, features, labels):
+    def forward(self, features, labels, sample_weights=None):
         if features.ndim != 3 or features.shape[-1] < 1 or features.shape[1] < 1:
             raise ValueError("SupCon features must be [B,V,D] with V,D > 0")
         if labels.ndim != 1 or len(labels) != len(features):
@@ -58,6 +63,17 @@ class SupervisedContrastiveLoss(nn.Module):
         if not valid.any():
             return features.sum() * 0.
         logits = values @ values.T / self.temperature
+        if sample_weights is not None:
+            weights = torch.as_tensor(sample_weights, dtype=values.dtype, device=values.device)
+            if weights.shape != (len(features),) or not torch.isfinite(weights).all() or (weights <= 0).any():
+                raise ValueError("SupCon sample_weights must be finite positive [B]")
+            weights = weights.repeat_interleave(features.shape[1])
+            weighted_logits = logits + weights.log()[None, :]
+            denominator = torch.logsumexp(weighted_logits.masked_fill(diagonal, -torch.inf), dim=1)
+            log_prob = weighted_logits - denominator[:, None]
+            positive_weights = positives.to(logits.dtype) * weights[None, :]
+            losses = -(positive_weights * log_prob).sum(1) / positive_weights.sum(1).clamp_min(1e-12)
+            return (losses[valid]*weights[valid]).sum()/weights[valid].sum()
         denominator = torch.logsumexp(logits.masked_fill(diagonal, -torch.inf), dim=1)
         log_prob = logits - denominator[:, None]
         positive_log_prob = torch.where(positives, log_prob, torch.zeros_like(log_prob)).sum(1)

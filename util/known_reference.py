@@ -72,6 +72,30 @@ class RecordingClassBank:
         return normalized[np.arange(len(indices)), indices], [self.names[i] for i in indices], raw, normalized
 
 
+def fit_record_scales(bank, prior_records=5.):
+    """Reference-only scale fit, shared by deployed profiles and ablations."""
+    if not np.isfinite(prior_records) or prior_records < 0:
+        raise ValueError("profile_scale_prior_records must be finite and nonnegative")
+    leave_out = bank.distances(bank.reference, bank.recording_ids)
+    typical, counts = [], []
+    for c, groups in enumerate(bank.groups):
+        values = [float(np.max(leave_out[indices, c])) for _, indices in groups
+                  if np.isfinite(leave_out[indices, c]).all()]
+        typical.append(float(np.median(values)) if values else np.nan)
+        counts.append(len(values))
+    finite = [value for value in typical if np.isfinite(value)]
+    pooled = max(float(np.median(finite)) if finite else 1., 1e-3)
+    floor = max(1e-3, .05 * pooled)
+    scales = []
+    for value, count in zip(typical, counts):
+        value = value if np.isfinite(value) else pooled
+        denominator = count + prior_records
+        scales.append(max(float((count * value + prior_records * pooled) / denominator
+                                if denominator else pooled), floor))
+    bank.scales = np.asarray(scales)
+    return counts, floor
+
+
 def build_record_bank(reference, ref_records, calibration, cal_records, classes, k,
                       minimum_calibration, maximum_reference, false_reject_rate, prior_records=5.):
     if not np.isfinite(prior_records) or prior_records < 0:
@@ -102,26 +126,10 @@ def build_record_bank(reference, ref_records, calibration, cal_records, classes,
                            "reference_tracks": sum(label == name for label in labels),
                            "calibration_tracks": sum(row["class_name"] == name for g in calibrated for row in g)}
     bank = RecordingClassBank(np.asarray(selected), labels, identities, classes, k)
-    leave_out = bank.distances(bank.reference, bank.recording_ids)
-    typical, counts = [], []
-    for c, groups in enumerate(bank.groups):
-        # One worst-component value per independent single-device recording.
-        values = [float(np.max(leave_out[indices, c])) for _, indices in groups
-                  if np.isfinite(leave_out[indices, c]).all()]
-        typical.append(float(np.median(values)) if values else np.nan)
-        counts.append(len(values))
-    finite = [value for value in typical if np.isfinite(value)]
-    pooled = max(float(np.median(finite)) if finite else 1., 1e-3)
-    floor = max(1e-3, .05 * pooled)
-    scales = []
-    for name, value, count in zip(bank.names, typical, counts):
-        value = value if np.isfinite(value) else pooled
-        denominator = count + prior_records
-        scale = (count * value + prior_records * pooled) / denominator if denominator else pooled
-        scales.append(max(float(scale), floor))
-        per_class[name].update(scale=float(scales[-1]), scale_fit_recordings=count,
-                               leave_one_recording_out_k=min(k, max(0, len(bank.groups[len(scales)-1])-1)))
-    bank.scales = np.asarray(scales)
+    counts, floor = fit_record_scales(bank, prior_records)
+    for c, (name, count) in enumerate(zip(bank.names, counts)):
+        per_class[name].update(scale=float(bank.scales[c]), scale_fit_recordings=count,
+                               leave_one_recording_out_k=min(k, max(0, len(bank.groups[c])-1)))
     track_scores, _, _, _ = bank.details(calibration)
     record_scores = np.asarray([max(track_scores[row["index"]] for row in group) for group in cal_groups])
     threshold = float(np.quantile(record_scores, 1-false_reject_rate, method="higher"))

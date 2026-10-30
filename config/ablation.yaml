@@ -1,0 +1,32 @@
+# Frozen R0-R4 comparison on ONE completed experiment. No encoder retraining.
+ablate:
+  source_experiment: /data/uav/experiment/open_set_experiment_YYYYMMDD_HHMMSS
+  replay_masks: true  # trusted saved best.pth + saved selected_boxes; no original DAT/YOLO required
+  # checkpoint_path: /models/best.pth  # exact original checkpoint hash required
+  # replay_cache: /data/uav/experiment/open_set_ablation_previous/replay_cache
+  device: cpu
+  threads: 4
+  replay_batch_size: 32
+  replay_tolerance: 0.005
+  require_all_methods: true
+  methods: [record_class_knn, record_class_knn_unscaled, record_knn, global_knn, maha_pp_shrink, maxlogit, energy, nnguide_record, vim]
+  calibration_units: [primary, record_max, record_balanced]
+  known_false_reject_rates: [0.01, 0.05, 0.10]
+  knn_k: 5
+  covariance_shrinkage: 0.1
+  vim_dim: 64
+  # R4 pool is fixed here BEFORE inspecting test metrics.
+  cluster_score_method: record_knn
+  cluster_calibration_unit: primary
+  cluster_frr: 0.05
+  cluster_backends: [hdbscan, dcg, smooth_hdbscan]
+  unknown_min_cluster_size: 5
+  unknown_min_samples: 3
+  unknown_min_recordings: 2
+  dcg_topk: 15
+  dcg_cosine_threshold: 0.85
+  dcg_resolution: 1.0
+  dcg_mutual: true
+  dcg_seed: 42
+  smooth_k: 5
+  smooth_blend: 0.2

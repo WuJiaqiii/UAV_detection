@@ -1,0 +1,46 @@
+# Three controlled known-only training recipes on the SAME split:
+# bash run.sh experiment --config config/component_ablation.yaml --training_variant primary_ce
+# bash run.sh experiment --config config/component_ablation.yaml --training_variant all_ce
+# bash run.sh experiment --config config/component_ablation.yaml --training_variant all_supcon
+# All-component supervision requires clean single-device recordings, including RC/video links.
+experiment:
+  inputs: [/data/uav/train_dataset]
+  input_type: iq_dat
+  known_classes: [DAUTEL EVO NANO, DJFPV, DJI FPV COMBO, DJI MINI3 PRO, DJI_Inspire_2, DJI_MATRICE_200, DJI_MATRICE_600_Pro, DJMavicMini, DJMiniSE, EVOIIPRO, FIMIX8SE2020, FIMIx8Mini, FLYSKY FS I6X, FRSKY X20R, HubsanZino2, JUMPER T14]
+  seed: 42
+  val_ratio: 0.15
+  calibration_ratio: 0.20
+  test_ratio: 0.15
+train:
+  yolo_weights: /models/detector.pt
+  iq_sample_rate: 100000000
+  iq_byte_order: "<"
+  epochs: 100
+  backbone: resnet18
+  batch_size: 32
+  num_workers: 1
+  lr: 0.0001
+  grouping_mode: hopping
+  hop_association: shape
+  hop_shape_log_tol: 0.50
+  train_group_policy: primary
+  supcon_weight: 0.0
+  bbox_cache_mode: "off"
+evaluation:
+  signal_mode: multi
+  novelty_policy: calibrated_track
+  iq_stride_ms: 50.0
+  max_slices: 0
+  min_votes: 1
+profile:
+  profile_score_method: record_class_knn
+  knn_k: 5
+  known_false_reject_rate: 0.01
+  min_calibration_per_class: 5
+discovery:
+  unknown_cluster_backend: hdbscan
+  unknown_min_cluster_size: 5
+  unknown_min_recordings: 2
+  save_feature_plots: true
+  feature_plot_method: pca
+  save_visuals: true

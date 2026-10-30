@@ -17,7 +17,8 @@ def load_state_skip_mismatch(model, checkpoint_path, device, logger=None, checkp
     Load checkpoint weights into model, skipping keys with shape mismatch.
     This is needed when old_num_classes != new_num_classes.
     """
-    ckpt = checkpoint if checkpoint is not None else torch.load(checkpoint_path, map_location=device, weights_only=False)
+    from util.checkpoint import load_checkpoint_object
+    ckpt = checkpoint if checkpoint is not None else load_checkpoint_object(checkpoint_path, device)
 
     if "model_state_dict" not in ckpt:
         raise RuntimeError(f"No model_state_dict found in checkpoint: {checkpoint_path}")
@@ -72,7 +73,8 @@ class LwFTrainer(Trainer):
         teacher_ckpt = str(config.lwf_teacher_checkpoint or config.checkpoint_path or "").strip()
         if not teacher_ckpt:
             raise ValueError("LwF requires --lwf_teacher_checkpoint or --checkpoint_path")
-        teacher_checkpoint = torch.load(teacher_ckpt, map_location="cpu", weights_only=False)
+        from util.checkpoint import load_checkpoint_object
+        teacher_checkpoint = load_checkpoint_object(teacher_ckpt)
         if not isinstance(teacher_checkpoint.get("config", {}).get("classes"), dict):
             raise ValueError("LwF teacher checkpoint must contain config.classes to verify old class semantics")
         expected_old = {name: idx for name, idx in config.classes.items() if idx < old_count}

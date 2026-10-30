@@ -7,14 +7,15 @@ import sys
 
 import yaml
 
-TASKS = ("train", "predict", "profile", "cluster", "discover", "experiment", "infer", "visualize")
-SECTIONS = {"train", "evaluation", "predict", "profile", "cluster", "discovery", "experiment", "infer", "visualize"}
+TASKS = ("train", "predict", "profile", "cluster", "discover", "experiment", "infer", "visualize", "ablate")
+SECTIONS = {"train", "evaluation", "predict", "profile", "cluster", "discovery", "experiment", "infer", "visualize", "ablate"}
 PATH_OPTIONS = {
     "dataset_path", "train_dataset_path", "val_dataset_path", "yolo_weights", "checkpoint_path",
     "lwf_teacher_checkpoint", "bbox_cache_path", "bbox_cache_dataset_root", "frontend_config",
     "classes_json", "inputs", "features", "reference_inputs", "calibration_inputs",
     "test_inputs", "reference_labels_json", "calibration_labels_json",
     "test_labels_json", "labels_json", "recording_ids_json", "rf_centers_json", "open_set_profile", "results_json",
+    "source_experiment", "replay_cache",
 }
 
 
@@ -28,7 +29,7 @@ def load_settings(path, task):
     for key, value in document.items():
         if not isinstance(value, dict):
             raise ValueError(f"Config section {key} must be a mapping")
-    if task in {"train", "cluster", "experiment", "visualize"}:
+    if task in {"train", "cluster", "experiment", "visualize", "ablate"}:
         settings = document.get(task, {}).copy()
     else:
         settings = document.get("evaluation", {}).copy()
@@ -119,6 +120,9 @@ def profile_parser(discover=False):
 
 
 def build_task_parser(task):
+    if task == "ablate":
+        from scripts.compare_open_set import build_parser
+        return build_parser()
     if task == "visualize":
         from scripts.visualize_features import build_parser
         return build_parser()
@@ -203,6 +207,9 @@ def dispatch(task, args):
 
 
 def _dispatch(task, args):
+    if task == "ablate":
+        from util.open_set_ablation import run
+        return run(args)
     if task == "visualize":
         from scripts.visualize_features import run
         return run(args)
@@ -258,6 +265,9 @@ def main(argv=None):
             stage_arguments(args, path)
     if task == "infer" and controls.dry_run:
         validate_infer_args(args)
+    if task == "ablate":
+        from util.open_set_ablation import validate_options
+        validate_options(args)
     if controls.dry_run:
         if task == "train":
             from util.train_entry import validate_training_options

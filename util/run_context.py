@@ -32,7 +32,8 @@ def run_type(task, args):
         labeled = any(getattr(args, key, None) for key in ("labels_json", "label_from_parent", "label_from_filename"))
         return ("open_set_" if getattr(args, "open_set_profile", None) else "") + ("validation" if labeled else "inference")
     return {"infer": "open_set_inference", "profile": "known_profile", "discover": "open_set_discovery",
-            "cluster": "unknown_clustering", "profile_archive": "known_profile", "visualize": "feature_visualization"}[task]
+            "cluster": "unknown_clustering", "profile_archive": "known_profile", "visualize": "feature_visualization",
+            "ablate": "open_set_ablation"}[task]
 
 
 def planned_directory(kind):

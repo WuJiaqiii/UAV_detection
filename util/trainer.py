@@ -431,6 +431,12 @@ class Trainer:
 
             groups = self._extract_groups(yolo_boxes, spec)
             main_group = self._select_training_group(groups, targets[0])
+            all_components = split_name == "train" and getattr(self.config, "train_group_policy", "primary") == "all"
+            selected_groups = [(index, g) for index, g in enumerate(groups)
+                               if len(np.asarray(g.get("boxes", [])).reshape(-1, 4))] if all_components else (
+                                   [(0, main_group)] if main_group is not None else [])
+            if all_components:
+                main_group = self._select_main_group([g for _, g in selected_groups])
 
             image_info = {
                 "fp": fp,
@@ -473,32 +479,20 @@ class Trainer:
             image_info["unmatched_targets"] = []
             image_infos.append(image_info)
 
-            x, mask = self._build_mask_input(spec, final_boxes)
-
-            batch_images.append(x)
-            batch_labels.append(label)
-            batch_metas.append({
-                "fp": fp,
-                "target_idx": 0,
-                "group_idx": 0,
-                "label": label,
-                "target_name": self._label_name(label),
-                "boxes": final_boxes.copy(),
-                "spec_shape": tuple(spec.shape),
-            })
-
-            if should_save:
-                self._save_classifier_input_mask_vis(
-                    spec=spec,
-                    mask=mask,
-                    x_tensor=x,
-                    fp=fp,
-                    sample_idx=i,
-                    group_idx=0,
-                    split_name=split_name,
-                    epoch=epoch,
-                    class_name=self._label_name(label),
-                )
+            for group_idx, selected_group in selected_groups:
+                component_boxes = np.asarray(selected_group["boxes"], dtype=np.int32).reshape(-1, 4)
+                x, mask = self._build_mask_input(spec, component_boxes)
+                batch_images.append(x)
+                batch_labels.append(label)
+                batch_metas.append({
+                    "fp": fp, "target_idx": 0, "group_idx": group_idx, "label": label,
+                    "target_name": self._label_name(label), "boxes": component_boxes.copy(),
+                    "spec_shape": tuple(spec.shape), "loss_weight": 1./len(selected_groups),
+                })
+                if should_save:
+                    self._save_classifier_input_mask_vis(spec=spec, mask=mask, x_tensor=x, fp=fp,
+                        sample_idx=i, group_idx=group_idx, split_name=split_name, epoch=epoch,
+                        class_name=self._label_name(label))
 
         if len(batch_images) == 0:
             return None, None, None, matched_total, target_total, image_infos
@@ -832,17 +826,29 @@ class Trainer:
     # ------------------------------------------------------------------
     def _training_objective(self, images, labels, metas):
         """Known-only CE/SupCon; feature interface has no additional parameters."""
+        weights = None
+        if getattr(self.config, "train_group_policy", "primary") == "all":
+            if metas is None or len(metas) != len(images):
+                raise ValueError("All-component training requires per-component record weights")
+            weights = torch.tensor([m["loss_weight"] for m in metas], device=images.device, dtype=torch.float32)
+            if not torch.isfinite(weights).all() or (weights <= 0).any():
+                raise ValueError("Component record weights must be finite and positive")
+        def cross_entropy(logits, targets, sample_weights):
+            if sample_weights is None:
+                return self.criterion(logits, targets)
+            losses = nn.functional.cross_entropy(logits, targets, reduction="none")
+            return (losses*sample_weights).sum()/sample_weights.sum()
         if not self.supcon_weight:
             logits = self.classifier(images)
-            ce = self.criterion(logits, labels)
+            ce = cross_entropy(logits, labels, weights)
             return logits, ce, ce, ce.detach().new_zeros(())
         from model.representation import contrastive_mask_batch
         alternative = contrastive_mask_batch(metas, self.config).to(images.device, non_blocking=True)
         count = len(images)
         logits, features = self.classifier(torch.cat([images, alternative]), return_features=True)
-        ce = self.criterion(logits, labels.repeat(2))
+        ce = cross_entropy(logits, labels.repeat(2), weights.repeat(2) if weights is not None else None)
         views = torch.stack([features[:count], features[count:]], dim=1)
-        supcon = self.supcon_criterion(views, labels)
+        supcon = self.supcon_criterion(views, labels, sample_weights=weights)
         return logits[:count], ce + self.supcon_weight * supcon, ce, supcon
 
     def train_one_epoch(self, epoch):

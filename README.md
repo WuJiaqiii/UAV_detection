@@ -1,5 +1,8 @@
 # UAV_detection
 
+开集对照实验可用 `bash run.sh ablate --config config/ablation.yaml --source_experiment /path/to/completed_experiment`。
+统一比较分类头覆盖、三种校准单位、九种拒识分数和固定候选池聚类；组件训练提供三组独立配方。用法、限制与实测结果见 [开集对照实验](docs/open_set_ablation.md)。
+
 开集结果默认提供 PCA 特征点分布图，可选 t-SNE 和真值着色对照；`visualize` 可从已有特征归档离线补图。配置、输出与解释范围见 [特征可视化](docs/feature_visualization.md)。
 
 已知 profile 默认采用按原始记录平衡的多原型参考库、类别距离尺度和逐记录校准；推理保留每条链路的时间/频率，并在 `class_evidence.csv` 汇总同类别组件。说明、消融参数和旧 profile 迁移见 [记录平衡参考库](docs/record_balanced_profiles.md)。

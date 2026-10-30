@@ -6,6 +6,13 @@ from pathlib import Path
 import torch
 
 
+def load_checkpoint_object(path, map_location="cpu"):
+    """Load a trusted project checkpoint, including foreign-OS path metadata."""
+    from util import checkpoint_pickle
+    return torch.load(path, map_location=map_location, weights_only=False,
+                      pickle_module=checkpoint_pickle)
+
+
 def _strip_module_prefix(state_dict):
     if not isinstance(state_dict, dict) or len(state_dict) == 0:
         return state_dict
@@ -115,10 +122,7 @@ def load_training_checkpoint(
             logger.warning(f'Checkpoint "{checkpoint_path}" not found')
         return None
 
-    try:
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    except TypeError:
-        ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = load_checkpoint_object(checkpoint_path, map_location=device)
 
     if not isinstance(ckpt, dict):
         raise RuntimeError(f"Unsupported checkpoint format: {checkpoint_path}")

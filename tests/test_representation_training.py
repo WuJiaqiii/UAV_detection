@@ -152,6 +152,44 @@ class TrainingIntegrationTests(unittest.TestCase):
         torch.testing.assert_close(loss, expected_loss, rtol=0, atol=0)
         self.assertEqual(float(contrast), 0.)
 
+    def test_all_components_expand_training_only_with_equal_record_weight(self):
+        config = self.config(weight=0.)
+        config.train_group_policy = "all"
+        trainer = self.make_trainer(config)
+        boxes = np.array([[10, 100, 70, 110], [150, 100, 210, 110]])
+        trainer.preprocessor.select_signal_groups.return_value = [
+            {"boxes": boxes, "score": 2.}, {"boxes": boxes+[0, 100, 0, 100], "score": 1.}]
+        inputs, targets, _, fps = next(iter(trainer.train_loader))
+        train = trainer._build_single_instances(inputs, targets, fps, split_name="train")
+        val = trainer._build_single_instances(inputs, targets, fps, split_name="val")
+        self.assertEqual(len(train[1]), 8)
+        self.assertEqual(len(val[1]), 4)
+        self.assertEqual(train[3:5], (4, 4))
+        for fp in fps:
+            self.assertEqual(sum(m["loss_weight"] for m in train[2] if m["fp"] == fp), 1.)
+
+    def test_all_component_ce_is_invariant_to_duplicated_identical_component(self):
+        config = self.config(weight=0.)
+        config.train_group_policy = "all"
+        trainer = self.make_trainer(config)
+        trainer.classifier.eval()
+        images = torch.rand(2, 1, 32, 32)
+        labels = torch.tensor([0, 1])
+        before = trainer._training_objective(images, labels, [{"loss_weight": 1.}]*2)[1]
+        duplicate = images[[0, 0, 1]]
+        after = trainer._training_objective(duplicate, labels[[0, 0, 1]],
+            [{"loss_weight": .5}, {"loss_weight": .5}, {"loss_weight": 1.}])[1]
+        torch.testing.assert_close(before, after)
+
+    def test_all_component_supcon_training_step_has_finite_backbone_gradients(self):
+        config = self.config(weight=.1)
+        config.train_group_policy = "all"
+        trainer = self.make_trainer(config)
+        before = trainer.classifier.net.layer4[0].conv1.weight.detach().clone()
+        loss, _, _ = trainer.train_one_epoch(0)
+        self.assertTrue(np.isfinite(loss))
+        self.assertFalse(torch.equal(before, trainer.classifier.net.layer4[0].conv1.weight))
+
     def test_supcon_reaches_backbone_gradients_and_one_sample_is_safe(self):
         trainer = self.make_trainer(self.config())
         images = torch.rand(4, 1, 32, 32)

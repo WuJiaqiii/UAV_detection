@@ -80,10 +80,8 @@ def run(args, predictor=None):
     checkpoint_path = args.checkpoint_path.expanduser().resolve()
     if not checkpoint_path.is_file():
         raise FileNotFoundError(checkpoint_path)
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    except TypeError:
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    from util.checkpoint import load_checkpoint_object
+    checkpoint = load_checkpoint_object(checkpoint_path)
     if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
         raise ValueError("Expected a project classifier checkpoint with model_state_dict")
     classes = json.loads(args.classes_json.read_text(encoding="utf-8")) if args.classes_json else None

@@ -153,6 +153,8 @@ def build_parser():
 
     g_repr = parser.add_argument_group("Known-class representation learning")
     g_repr.add_argument("--supcon_weight", type=float, default=0., help="0 keeps legacy CE; positive enables known-only CE + two-view SupCon")
+    g_repr.add_argument("--train_group_policy", choices=["primary", "all"], default="primary",
+                        help="all: every final nonempty group shares the label of a clean single-device training recording; validation remains primary")
     g_repr.add_argument("--supcon_temperature", type=float, default=.2)
     g_repr.add_argument("--supcon_drop_prob", type=float, default=.1, help="Probability of dropping a detected pulse in the second training view")
     g_repr.add_argument("--supcon_max_drop_fraction", type=float, default=.25, help="Cap dropped pulses; retain at least two")
@@ -309,6 +311,8 @@ def setup_incremental_class_split(config, logger=None):
         )
 
 def validate_training_options(args):
+    from model.representation import validate_representation_options
+    validate_representation_options(args)
     for name in ("epochs", "batch_size", "save_interval", "early_stop_patience", "cosine_annealing_T0", "cosine_annealing_mult"):
         if int(getattr(args, name)) < 1:
             raise ValueError(f"{name} must be >= 1")
@@ -326,8 +330,6 @@ def main(args):
         return execute_run("train", args, main)
     validate_training_options(args)
     set_seed(seed=getattr(args, "seed", 42))
-    from model.representation import validate_representation_options
-    validate_representation_options(args)
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
         raise RuntimeError("Distributed training is not implemented for the detection/classification pipeline")
     if args.use_data_parallel or args.use_amp_autocast:
