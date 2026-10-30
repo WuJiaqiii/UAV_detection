@@ -64,7 +64,7 @@ def build_parser():
     g_pre.add_argument("--hop_max_overlap_ratio", type=float, default=0.2, help="Substantial time overlap as a fraction of the shorter pulse; periodic mode rejects any, shape mode limits the total affected fraction.")
     g_pre.add_argument("--hop_max_conflict_fraction", type=float, default=0.2, help="Shape mode: maximum fraction of pulses involved in substantial time overlaps. Set 0 for strict separation.")
     g_pre.add_argument("--hop_min_timing_consistency", type=float, default=0.85)
-    g_pre.add_argument("--hop_min_pulses", type=int, default=3, help="Minimum combined detected pulse count before considering a cross-frequency association.")
+    g_pre.add_argument("--hop_min_pulses", type=int, default=3, help="Minimum final cross-frequency group size in shape mode; minimum proposed union size in periodic mode.")
     g_pre.add_argument("--hop_min_time_extent_ratio", type=float, default=0.15)
     g_pre.add_argument("--hop_min_time_coverage_ratio", type=float, default=0.02)
     g_pre.add_argument("--min_area", type=int, default=4)

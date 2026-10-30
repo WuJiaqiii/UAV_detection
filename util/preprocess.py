@@ -519,10 +519,12 @@ class SignalPreprocessor:
         return float(np.mean(conflicted)) if len(boxes) else 0.0
 
     def _shape_hopping_evidence(self, first, second):
-        """Associate by shape; missing detections and absent cadence are allowed."""
+        """Build shape-compatible unions; enforce pulse count after association.
+
+        A carrier may have only one observed pulse. Requiring the final minimum
+        here would prevent two singleton seeds from ever growing into a train.
+        """
         boxes = np.concatenate([first["boxes"], second["boxes"]])
-        if len(boxes) < int(getattr(self.config, "hop_min_pulses", 3)):
-            return self._reject_hop("insufficient_pulses")
         components = self._hopping_components(first) + self._hopping_components(second)
         distances = []
         for key in ("width", "height"):
@@ -709,6 +711,10 @@ class SignalPreprocessor:
         if g["n_boxes"] < int(self.config.min_group_len):
             reasons.append(f"n_boxes={g['n_boxes']} < min_group_len={self.config.min_group_len}")
         if self.grouping_mode == "hopping":
+            if g.get("group_type") == "hopping":
+                minimum = int(getattr(self.config, "hop_min_pulses", 3))
+                if g["n_boxes"] < minimum:
+                    reasons.append(f"n_boxes={g['n_boxes']} < hop_min_pulses={minimum}")
             for metric, option, default in (
                 ("time_extent_ratio", "hop_min_time_extent_ratio", 0.15),
                 ("time_coverage_ratio", "hop_min_time_coverage_ratio", 0.02),

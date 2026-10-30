@@ -23,6 +23,8 @@ train:
   lr: 0.0001
   grouping_mode: hopping
   hop_association: shape
+  # Allow modest height/aspect jitter for thin 4-6 pixel pulses.
+  hop_shape_log_tol: 0.50
   supcon_weight: 0.1
   bbox_cache_mode: "off"
 evaluation:
