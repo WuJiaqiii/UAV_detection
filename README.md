@@ -1,5 +1,7 @@
 # UAV_detection
 
+已知 profile 默认采用按原始记录平衡的多原型参考库、类别距离尺度和逐记录校准；推理保留每条链路的时间/频率，并在 `class_evidence.csv` 汇总同类别组件。说明、消融参数和旧 profile 迁移见 [记录平衡参考库](docs/record_balanced_profiles.md)。
+
 无人机信号的已知类训练、多信号分类、开集拒识与未知类别发现。主线为：MAT/PNG/DAT → 统一频谱 → YOLO 框 → 信号分组 → 二值 mask CNN → DAT 轨迹投票 → 已知 profile 拒识 → 未知候选聚类。输出类别、时间和频率位置。
 
 ## 安装

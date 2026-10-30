@@ -1,6 +1,7 @@
 # One shared evaluation section binds identical reference/calibration/test
 # frontend, grouping, slicing and voting settings. Edit all /data and /models paths.
 evaluation:
+  novelty_policy: calibrated_track
   checkpoint_path: /models/known_best.pth
   yolo_weights: /models/detector.pt
   signal_mode: multi
@@ -14,6 +15,8 @@ evaluation:
   # recording_ids_json: /data/uav/recording_ids.json
   # rf_center_mhz: 2400
 profile:
+  profile_score_method: record_class_knn
+  profile_scale_prior_records: 5.0
   reference_inputs: [/data/uav/fold1/known_train]
   calibration_inputs: [/data/uav/fold1/known_calibration]
   label_mode: filename   # parent for class-folder DAT; json for explicit mappings
