@@ -142,6 +142,17 @@ def write_html_report(output_dir, report, rows_by_file):
                   '<p class="muted">These are batch-local feature clusters. No unknown percentage or class count is forced. '
                   'Uncertain votes and missing detections do not enter the unknown pool. Probabilities below belong to the known classifier head.</p>',
                   '<p><a href="unknown_clusters.json">Cluster support and representatives</a> · <a href="unknown_prototypes.npz">Normalized prototypes</a></p>']
+    projection = report.get("feature_visualization")
+    if projection:
+        parts.append('<h2>Feature distribution and unknown clusters</h2><p class="muted">One valid track per point; multiple tracks can share an original recording. Projections are for display only. File truth colors do not establish multi-signal instance labels.</p>')
+        if projection.get("archive"):
+            parts.append(f'<p><a href="{escape(projection["archive"], quote=True)}">Frozen track feature archive</a></p>')
+        for plot in projection.get("plots", []):
+            parts.append(f'<h3>{escape(plot["title"])}</h3><a href="feature_plots/{escape(plot["file"], quote=True)}"><img loading="lazy" src="feature_plots/{escape(plot["file"], quote=True)}" alt="{escape(plot["title"], quote=True)}"></a>')
+        if projection.get("error"):
+            parts.append('<p>Projection error: '+escape(projection["error"])+'</p>')
+        elif not projection.get("plots"):
+            parts.append('<p>'+escape(projection.get("reason", "No projection generated"))+'</p>')
     for result in report["files"]:
         rows = rows_by_file.get(result["path"], [])
         observations = [group for row in rows for group in row.get("groups", [])]

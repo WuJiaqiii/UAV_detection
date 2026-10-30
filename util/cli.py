@@ -7,14 +7,14 @@ import sys
 
 import yaml
 
-TASKS = ("train", "predict", "profile", "cluster", "discover", "experiment", "infer")
-SECTIONS = {"train", "evaluation", "predict", "profile", "cluster", "discovery", "experiment", "infer"}
+TASKS = ("train", "predict", "profile", "cluster", "discover", "experiment", "infer", "visualize")
+SECTIONS = {"train", "evaluation", "predict", "profile", "cluster", "discovery", "experiment", "infer", "visualize"}
 PATH_OPTIONS = {
     "dataset_path", "train_dataset_path", "val_dataset_path", "yolo_weights", "checkpoint_path",
     "lwf_teacher_checkpoint", "bbox_cache_path", "bbox_cache_dataset_root", "frontend_config",
     "classes_json", "inputs", "features", "reference_inputs", "calibration_inputs",
     "test_inputs", "reference_labels_json", "calibration_labels_json",
-    "test_labels_json", "labels_json", "recording_ids_json", "rf_centers_json", "open_set_profile",
+    "test_labels_json", "labels_json", "recording_ids_json", "rf_centers_json", "open_set_profile", "results_json",
 }
 
 
@@ -28,7 +28,7 @@ def load_settings(path, task):
     for key, value in document.items():
         if not isinstance(value, dict):
             raise ValueError(f"Config section {key} must be a mapping")
-    if task in {"train", "cluster", "experiment"}:
+    if task in {"train", "cluster", "experiment", "visualize"}:
         settings = document.get(task, {}).copy()
     else:
         settings = document.get("evaluation", {}).copy()
@@ -119,6 +119,9 @@ def profile_parser(discover=False):
 
 
 def build_task_parser(task):
+    if task == "visualize":
+        from scripts.visualize_features import build_parser
+        return build_parser()
     if task == "experiment":
         from util.open_set_experiment import build_parser
         return build_parser()
@@ -200,6 +203,9 @@ def dispatch(task, args):
 
 
 def _dispatch(task, args):
+    if task == "visualize":
+        from scripts.visualize_features import run
+        return run(args)
     if task == "experiment":
         from util.open_set_experiment import run_experiment
         return run_experiment(args, args._config_path)
@@ -243,6 +249,9 @@ def main(argv=None):
     settings, path = load_settings(controls.config, task)
     args = parser.parse_args([*settings_tokens(parser, settings), *explicit])
     args._config_path = path
+    if hasattr(args, "feature_plot_method"):
+        from util.feature_visualization import plot_options
+        plot_options(args)
     if task == "experiment":
         from util.open_set_experiment import stage_arguments
         if controls.dry_run:

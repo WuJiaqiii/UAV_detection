@@ -20,6 +20,9 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--features", type=Path, required=True, help="unknown_features.npz from open-set evaluation")
     add_discovery_arguments(parser)
+    parser.add_argument("--results_json", type=Path, help="Optional source results.json for file-truth colors only")
+    from util.feature_visualization import add_feature_plot_arguments
+    add_feature_plot_arguments(parser)
     return parser
 
 
@@ -28,6 +31,8 @@ def run(args):
         from util.run_context import execute_run
         return execute_run("cluster", args, run)
     from util.run_context import check_output_directory
+    from util.feature_visualization import plot_options
+    plot_options(args)
     output = check_output_directory(args)
     metadata, arrays = load_npz(args.features, "unknown_candidates")
     features = normalize_features(arrays["features"])
@@ -64,6 +69,14 @@ def run(args):
         for row in updated:
             writer.writerow({key: json.dumps(value, ensure_ascii=False, allow_nan=False)
                              if isinstance(value, (dict, list)) else value for key, value in row.items()})
+    if args.save_feature_plots:
+        from util.feature_visualization import attach_file_truth, write_feature_plots, write_plot_gallery, plot_options
+        plot_records = attach_file_truth(updated, args.results_json)
+        summary = write_feature_plots(output/"feature_plots", features, plot_records, **plot_options(args))
+        write_plot_gallery(output, summary)
+        discovery["feature_visualization"] = summary
+        (output/"unknown_clusters.json").write_text(json.dumps(discovery, ensure_ascii=False, indent=2,
+            allow_nan=False)+"\n", encoding="utf-8")
     return discovery
 
 

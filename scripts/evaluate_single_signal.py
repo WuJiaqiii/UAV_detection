@@ -59,6 +59,8 @@ def build_parser():
     p.add_argument("--min_novel_observation_share", type=float, default=.5, help="Only vetoes unknowns under novelty_policy observation_guard; always reported diagnostically")
     from util.unknown_discovery import add_discovery_arguments
     add_discovery_arguments(p)
+    from util.feature_visualization import add_feature_plot_arguments
+    add_feature_plot_arguments(p)
     return p
 
 
@@ -72,6 +74,8 @@ def run(args, predictor=None):
 
     from util.run_context import check_output_directory
     output = check_output_directory(args)
+    from util.feature_visualization import plot_options
+    plot_options(args)
     inputs = collect_inputs(args.inputs, args.recursive)
     checkpoint_path = args.checkpoint_path.expanduser().resolve()
     if not checkpoint_path.is_file():
@@ -202,7 +206,7 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
     centers = resolve_rf_centers(args.rf_centers_json, args.rf_center_mhz)
     track_options = dict(frequency_tolerance_mhz=args.track_freq_tolerance_mhz,
                          min_band_iou=args.track_min_band_iou, max_gap_ms=args.track_max_gap_ms)
-    results, rows_by_file, candidates = [], {}, []
+    results, rows_by_file, candidates, plot_items = [], {}, [], []
     for path in inputs:
         rf = centers.get(str(path), args.rf_center_mhz)
         try:
@@ -226,6 +230,12 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
         results.append(result)
         rows_by_file[str(path)] = rows
         if profile:
+            if args.save_feature_plots:
+                from util.open_set import iter_track_features
+                for source, track, feature, accepted, _ in iter_track_features([result], {str(path): rows}):
+                    if feature is not None:
+                        plot_items.append({"path": str(path), "track": track, "feature": feature,
+                                           "component_types": sorted({g.get("group_type", "unspecified") for g in accepted})})
             from util.open_set import apply_open_set
             candidates.extend(apply_open_set(profile, [result], {str(path): rows}, args.min_novel_observation_share, args.novelty_policy))
             for row in rows:
@@ -292,6 +302,27 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
         (output/"unknown_clusters.json").write_text(json.dumps(discovery, ensure_ascii=False, indent=2,
                                                              allow_nan=False)+"\n", encoding="utf-8")
 
+    feature_visualization = None
+    if profile and args.save_feature_plots:
+        from util.feature_visualization import write_feature_plots, plot_options
+        fields = ("track_id", "recognition_status", "display_label", "class_name", "unknown_cluster_id",
+                  "start_ms", "end_ms", "frequency_bands_offset_mhz", "ood_score", "ood_threshold")
+        plot_records = [{"path": item["path"], "recording_id": (recording_ids or {}).get(item["path"], item["path"]),
+                         "true_class_names": truth.get(item["path"]), "component_types": item["component_types"],
+                         **{key: item["track"].get(key) for key in fields}} for item in plot_items]
+        all_features = np.stack([item["feature"] for item in plot_items]) if plot_items else np.empty((0, profile.reference.shape[1]), dtype=np.float32)
+        # Keep all frozen track vectors for later plots, including missed unknowns accepted as known.
+        save_npz(output/"inference_features.npz", {"kind": "inference_features", "schema_version": 1,
+            "feature_version": FEATURE_VERSION, "signature": signature, "classes": cfg.classes, "records": plot_records},
+            features=all_features)
+        try:
+            feature_visualization = write_feature_plots(output/"feature_plots", all_features, plot_records, **plot_options(args))
+            feature_visualization["archive"] = "inference_features.npz"
+            feature_visualization["tracks_without_features"] = sum(len(r["signals"]) for r in results) - len(plot_items)
+        except Exception as error:
+            logger.warning("Feature projection failed; recognition results retained: %s", error)
+            feature_visualization = {"status": "error", "error": str(error), "archive": "inference_features.npz", "plots": []}
+
     with (output/"slices.jsonl").open("w", encoding="utf-8") as stream:
         for rows in rows_by_file.values():
             for row in rows:
@@ -305,6 +336,7 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
     summarize_class_evidence(results, rows_by_file)
     metrics = multi_evaluation_metrics(results, cfg.classes)
     if profile:
+        metrics["feature_plot_errors"] = int(feature_visualization is not None and feature_visualization["status"] == "error")
         from util.open_set_metrics import evaluate_open_set
         evaluation = evaluate_open_set(results, cfg.classes, discovery, recording_ids)
         metrics["open_set_evaluation"] = evaluation["metrics"]
@@ -339,6 +371,8 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
         "files": results}
     if feature_archive:
         report["feature_archive"] = feature_archive
+    if feature_visualization is not None:
+        report["feature_visualization"] = feature_visualization
     if profile:
         report.update(open_set={"profile": str(args.open_set_profile.resolve()),
                                 "profile_sha256": file_sha256(args.open_set_profile),
@@ -382,7 +416,7 @@ def main():
     print(json.dumps(report["metrics"], ensure_ascii=False, indent=2))
     print("Reports: " + str(args.output_dir.resolve()))
     return 2 if (report["metrics"]["error_files"] or report["metrics"]["files_with_slice_errors"]
-                 or report["metrics"].get("visualization_errors", 0)) else 0
+                 or report["metrics"].get("visualization_errors", 0) or report["metrics"].get("feature_plot_errors", 0)) else 0
 
 
 if __name__ == "__main__":

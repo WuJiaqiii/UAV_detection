@@ -43,6 +43,10 @@ profile:
   min_calibration_per_class: 5
   max_reference_per_class: 2000
 discovery:
+  save_feature_plots: true
+  feature_plot_method: pca  # pca, tsne, both
+  feature_plot_max_points: 3000
+  feature_plot_seed: 42
   unknown_cluster_backend: hdbscan
   unknown_min_cluster_size: 5
   unknown_min_recordings: 2

@@ -1,5 +1,7 @@
 # UAV_detection
 
+开集结果默认提供 PCA 特征点分布图，可选 t-SNE 和真值着色对照；`visualize` 可从已有特征归档离线补图。配置、输出与解释范围见 [特征可视化](docs/feature_visualization.md)。
+
 已知 profile 默认采用按原始记录平衡的多原型参考库、类别距离尺度和逐记录校准；推理保留每条链路的时间/频率，并在 `class_evidence.csv` 汇总同类别组件。说明、消融参数和旧 profile 迁移见 [记录平衡参考库](docs/record_balanced_profiles.md)。
 
 无人机信号的已知类训练、多信号分类、开集拒识与未知类别发现。主线为：MAT/PNG/DAT → 统一频谱 → YOLO 框 → 信号分组 → 二值 mask CNN → DAT 轨迹投票 → 已知 profile 拒识 → 未知候选聚类。输出类别、时间和频率位置。
@@ -48,6 +50,7 @@ bash run.sh discover --config config/open_set.yaml
 | profile | 从 reference_inputs / calibration_inputs 提取特征并建立已知 profile |
 | cluster | 复用 unknown_features.npz 重新聚类，不加载 YOLO/CNN |
 | discover | 顺序运行 profile 与 predict，保持相同特征设置 |
+| visualize | 从已有轨迹特征归档绘制 PCA/t-SNE，不加载模型、不重新聚类 |
 
 ## 实验配置
 

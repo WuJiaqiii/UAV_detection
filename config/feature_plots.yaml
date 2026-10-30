@@ -1,0 +1,7 @@
+visualize:
+  features: /data/uav/experiment/test/inference_features.npz
+  # Old experiments may only have unknown_features.npz; those plots cover candidates only.
+  # results_json: /data/uav/experiment/test/results.json
+  feature_plot_method: both
+  feature_plot_max_points: 3000
+  feature_plot_seed: 42

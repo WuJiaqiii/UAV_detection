@@ -1,4 +1,6 @@
 cluster:
+  feature_plot_method: pca  # pca / tsne / both; does not change clustering
+  # results_json: /data/uav/experiment/test/results.json  # Optional file-truth colors
   features: /data/uav/unknown_features.npz  # Candidate archive from an earlier inference/discovery run
   unknown_cluster_backend: dcg
   unknown_min_cluster_size: 5

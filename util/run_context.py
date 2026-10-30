@@ -32,7 +32,7 @@ def run_type(task, args):
         labeled = any(getattr(args, key, None) for key in ("labels_json", "label_from_parent", "label_from_filename"))
         return ("open_set_" if getattr(args, "open_set_profile", None) else "") + ("validation" if labeled else "inference")
     return {"infer": "open_set_inference", "profile": "known_profile", "discover": "open_set_discovery",
-            "cluster": "unknown_clustering", "profile_archive": "known_profile"}[task]
+            "cluster": "unknown_clustering", "profile_archive": "known_profile", "visualize": "feature_visualization"}[task]
 
 
 def planned_directory(kind):
@@ -100,7 +100,7 @@ def check_output_directory(args):
 
 
 def metric_error_count(metrics):
-    return sum(int(metrics.get(key, 0) or 0) for key in ("error_files", "files_with_slice_errors", "visualization_errors"))
+    return sum(int(metrics.get(key, 0) or 0) for key in ("error_files", "files_with_slice_errors", "visualization_errors", "feature_plot_errors"))
 
 
 def command_exit_code(result):

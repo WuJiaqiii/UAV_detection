@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -233,6 +233,13 @@ class OpenSetCliTests(unittest.TestCase):
         self.assertNotIn("file_class_set_accuracy", report["metrics"])
         self.assertEqual(report["metrics"]["file_unknown_presence_metrics"]["recall"], 1.)
         self.assertTrue((args.output_dir/"unknown_clusters.json").is_file())
+        self.assertTrue((args.output_dir/"feature_plots/pca_predictions.png").is_file())
+        self.assertTrue((args.output_dir/"feature_plots/pca_unknown_clusters.png").is_file())
+        self.assertTrue((args.output_dir/"feature_plots/pca_truth.png").is_file())
+        meta, arrays = load_npz(args.output_dir/"inference_features.npz", "inference_features")
+        self.assertEqual(arrays["features"].shape, (7, 3))
+        self.assertEqual(sum(row["recognition_status"] == "known" for row in meta["records"]), 1)
+        self.assertIn("Feature distribution and unknown clusters", (args.output_dir/"report.html").read_text(encoding="utf-8"))
         self.assertTrue((args.output_dir/"class_evidence.csv").is_file())
         self.assertEqual(report["files"][0]["class_evidence"][0]["class_name"], "known")
         self.assertEqual(report["files"][0]["class_evidence"][0]["identity_status"], "category_evidence_only")
@@ -245,9 +252,11 @@ class OpenSetCliTests(unittest.TestCase):
         labels.write_text(json.dumps({str(path): "known" for path in paths}), encoding="utf-8")
         args.output_dir = self.root/"misleading_truth"
         args.save_visuals = False
+        args.save_feature_plots = False
         predictor.predict.side_effect = [self.prediction(feature) for feature in features]
         second = run(args, predictor)
         self.assertEqual(second["discovery"], report["discovery"])
+        self.assertFalse((args.output_dir/"inference_features.npz").exists())
         self.assertEqual(second["metrics"]["file_unknown_presence_metrics"]["fp"], 6)
 
     def test_profile_mismatch_fails_before_creating_output_or_running_predictor(self):
@@ -263,6 +272,25 @@ class OpenSetCliTests(unittest.TestCase):
             run(args, predictor)
         predictor.predict.assert_not_called()
         self.assertFalse(args.output_dir.exists())
+
+    def test_plot_failure_retains_predictions_and_feature_archive(self):
+        path = self.png("test", "known.png", 7)
+        args = self.args([path], "plot_error", "--no-save_visuals")
+        signature = inference_signature(args, resolve_config({"config": {"classes": {"known": 0}, "mask_img_size": 32}}))
+        archive(self.root/"ref.npz", [[1., 0, 0]], ["known"], "ref", signature)
+        archive(self.root/"cal.npz", [[1., .01, 0]], ["known"], "cal", signature)
+        build_profile(self.root/"ref.npz", self.root/"cal.npz", self.root/"profile.npz", k=1, min_calibration_per_class=1)
+        args.open_set_profile = self.root/"profile.npz"
+        predictor = Mock()
+        predictor.predict.return_value = self.prediction([1., 0, 0])
+        with patch("util.feature_visualization.write_feature_plots", side_effect=RuntimeError("renderer unavailable")):
+            report = run(args, predictor)
+        self.assertEqual(report["metrics"]["known_tracks"], 1)
+        self.assertEqual(report["metrics"]["feature_plot_errors"], 1)
+        self.assertTrue((args.output_dir/"results.json").exists())
+        self.assertTrue((args.output_dir/"inference_features.npz").exists())
+        from util.run_context import command_exit_code
+        self.assertEqual(command_exit_code(report), 2)
 
     def test_feature_modes_cannot_silently_use_single_signal_voting(self):
         path = self.png("test", "one.png", 3)

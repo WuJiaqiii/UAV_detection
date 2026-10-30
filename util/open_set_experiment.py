@@ -76,6 +76,8 @@ def stage_arguments(args, config_path):
         raise ValueError("experiment requires multi mode with no ignored/excluded head classes")
     from util.eval_common import validate_prediction_options
     validate_prediction_options(profile, {"known": 0})
+    from util.feature_visualization import plot_options
+    plot_options(profile)
     if args.input_type == "iq_dat" and (profile.iq_sample_rate != train.iq_sample_rate or profile.iq_byte_order != train.iq_byte_order):
         raise ValueError("Training and evaluation must use the same IQ capture rate/byte order")
     from util.unknown_discovery import discovery_kwargs, validate_discovery_options
