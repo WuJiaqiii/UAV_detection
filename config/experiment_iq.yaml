@@ -1,19 +1,20 @@
 # Full labeled experiment. Replace paths and class names with real DAT folders.
 experiment:
-  inputs: [/data/uav/iq/all_classes]
+  inputs: [/media/kaneki/05E4235537EC7AC2/dataset_wjq/train_dataset]
   input_type: iq_dat
   recursive: true
-  known_classes: [Device-A, Device-B, Device-C]
+  known_classes: [DAUTEL EVO NANO, DJFPV, DJI FPV COMBO, DJI MINI3 PRO, DJI_Inspire_2, DJI_MATRICE_200, DJI_MATRICE_600_Pro, DJMavicMini, DJMiniSE, EVOIIPRO, FIMIX8SE2020, FIMIx8Mini, FLYSKY FS I6X, FRSKY X20R, HubsanZino2, JUMPER T14]
+  # DAUTEL EVO NANO, DEVENTION DEVO, DJFPV, DJI AVATA2, DJI FPV COMBO, DJI MAVIC3 PRO, DJI MINI3 PRO, DJI_Inspire_2, DJI_MATRICE_200, DJI_MATRICE_600_Pro, DJMavicMini, DJMiniSE, EVOIIPRO, FIMIX8SE2020, FIMIx8Mini, FLYSKY FS I6X, FRSKY X14, FRSKY X20R, HubsanZino2, JUMPER T14 
   # Omit unknown_classes to use every other discovered class as unknown.
   # exclude_classes: [Background]  # Only if this folder exists; omit it entirely.
   seed: 42
   val_ratio: 0.15
   calibration_ratio: 0.20
-  test_ratio: 0.20
+  test_ratio: 0.15
   # recording_ids_json: /data/uav/recording_ids.json
   # split_only: true
 train:
-  yolo_weights: /models/detector.pt
+  yolo_weights: /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code/yolov5/runs/train/exp10/weights/best.pt
   iq_sample_rate: 100000000
   iq_byte_order: "<"
   epochs: 100
@@ -33,7 +34,7 @@ evaluation:
 profile:
   knn_k: 5
   known_false_reject_rate: 0.01
-  min_calibration_per_class: 20
+  min_calibration_per_class: 5
   max_reference_per_class: 2000
 discovery:
   unknown_cluster_backend: hdbscan

@@ -1,5 +1,6 @@
 import torch
 import logging
+import os
 import numpy as np
 import random
 from datetime import datetime, timedelta, timezone
@@ -319,10 +320,20 @@ def create_logger(filename: str) -> logging.Logger:
         handler.close()
         logger.removeHandler(handler)
 
+    project_root = Path(__file__).resolve().parents[1]
+    log_path = Path(filename).expanduser().resolve()
+    try:
+        display_path = Path(os.path.relpath(log_path, project_root)).as_posix()
+    except ValueError:
+        # Windows paths on another drive cannot be expressed relatively.
+        display_path = log_path.as_posix()
+
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    # formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter(
+        '%(asctime)s - %(log_path)s - %(levelname)s - %(message)s',
+        defaults={"log_path": display_path},
+    )
     formatter.converter = custom_time
     ch.setFormatter(formatter)
     
