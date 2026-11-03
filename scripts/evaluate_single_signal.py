@@ -374,7 +374,10 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
     if profile:
         report.update(open_set={"profile": str(args.open_set_profile.resolve()),
                                 "profile_sha256": file_sha256(args.open_set_profile),
-                                "threshold": profile.threshold, "k": profile.k,
+                                "threshold":profile.threshold,"score_method":profile.score_method,
+                                "calibration_unit":profile.metadata.get("calibration_unit"),
+                                "known_label_policy":profile.known_label_policy,
+                                "k":profile.k if profile.score_method!="maha_pp_shrink" else None,
                                 "calibration": {key: value for key, value in profile.metadata.items() if key != "signature"}},
                       discovery=discovery)
     (output/"results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str, allow_nan=False)+"\n", encoding="utf-8")

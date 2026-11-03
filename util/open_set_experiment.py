@@ -90,12 +90,10 @@ def stage_arguments(args, config_path):
     options = discovery_kwargs(profile)
     validate_discovery_options(options["backend"], options["min_cluster_size"], options["min_samples"],
                                options["min_recordings"], options["dcg_options"])
-    if (profile.knn_k < 1 or profile.min_calibration_per_class < 1 or
-            profile.max_reference_per_class < profile.knn_k or not 0 < profile.known_false_reject_rate < 1):
-        raise ValueError("Invalid known-profile calibration settings")
-    import math
-    if not math.isfinite(profile.profile_scale_prior_records) or profile.profile_scale_prior_records < 0:
-        raise ValueError("profile_scale_prior_records must be finite and nonnegative")
+    from util.open_set import validate_profile_options
+    profile.profile_calibration_unit=validate_profile_options(profile.knn_k,profile.known_false_reject_rate,
+        profile.min_calibration_per_class,profile.max_reference_per_class,profile.profile_score_method,
+        profile.profile_scale_prior_records,profile.profile_covariance_shrinkage,profile.profile_calibration_unit)
     return train, profile
 
 
@@ -134,7 +132,9 @@ def run_experiment(args, config_path=None, train_runner=None, predictor=None):
     manifest = split_dataset(args, train)
     for name in manifest["known_classes"]:
         counts = manifest["summary"][name]
-        if counts["train"]["recordings"] < profile.knn_k or counts["calibration"]["recordings"] < profile.min_calibration_per_class:
+        from util.mahalanobis import MIN_REFERENCE_RECORDINGS
+        minimum_reference = MIN_REFERENCE_RECORDINGS if profile.profile_score_method=="maha_pp_shrink" else profile.knn_k
+        if counts["train"]["recordings"] < minimum_reference or counts["calibration"]["recordings"] < profile.min_calibration_per_class:
             raise ValueError(f"Insufficient independent reference/calibration recordings for {name!r}: {counts}; "
                              "adjust split ratios or profile counts before training")
     rows = manifest["records"]

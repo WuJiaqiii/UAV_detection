@@ -3,8 +3,6 @@
 Record-balanced variants are explicitly adaptations, not benchmark reproductions.
 References and exact formulas are recorded in docs/open_set_ablation.md.
 """
-from collections import Counter
-
 import numpy as np
 from scipy.special import logsumexp
 
@@ -16,17 +14,8 @@ METHODS = ("record_class_knn", "record_class_knn_unscaled", "record_knn", "globa
 RAW_METHODS = {"maxlogit", "energy", "nnguide_record", "vim"}
 
 
-def record_weights(records):
-    counts = Counter(r["recording_id"] for r in records)
-    weights = np.asarray([1. / counts[r["recording_id"]] for r in records])
-    return weights / weights.sum()
-
-
-def record_groups(records):
-    result = {}
-    for i, r in enumerate(records):
-        result.setdefault(r["recording_id"], []).append(i)
-    return [np.asarray(ids) for _, ids in sorted(result.items())]
+from util.recording_features import record_weights, record_groups, calibrate_scores
+from util.mahalanobis import RecordingMahalanobis
 
 
 def squared_distances(x, y):
@@ -61,22 +50,8 @@ class FittedScore:
         if method == "global_knn" and len(self.reference) < k:
             raise ValueError("k exceeds reference tracks")
         if method == "maha_pp_shrink":
-            names = np.asarray([r["true_class_name"] for r in reference.records])
-            self.means = []
-            residual = self.reference.copy()
-            for name in reference.classes:
-                keep = names == name
-                if not keep.any():
-                    raise ValueError(f"No reference data for {name}")
-                mean = np.average(self.reference[keep], axis=0, weights=self.weights[keep])
-                self.means.append(mean)
-                residual[keep] -= mean
-            self.means = np.asarray(self.means)
-            covariance = residual.T @ (self.weights[:, None] * residual)
-            dimension = covariance.shape[0]
-            average_variance = max(float(np.trace(covariance)/dimension), 1e-12)
-            covariance = (1-shrinkage)*covariance + shrinkage*average_variance*np.eye(dimension)
-            self.precision = np.linalg.inv(covariance)
+            self.mahalanobis = RecordingMahalanobis.fit(self.reference, reference.records, list(reference.classes), shrinkage)
+            self.means, self.precision = self.mahalanobis.means, self.mahalanobis.precision
             self.info.update(covariance_shrinkage=shrinkage,
                              covariance="record-weighted shared, shrunk toward isotropic; normalized features")
         if method == "nnguide_record":
@@ -117,9 +92,7 @@ class FittedScore:
                 values = np.stack([values[:, ids].min(1) for ids in self.groups], axis=1)
             return np.sqrt(np.partition(values, self.k-1, axis=1)[:, self.k-1])
         if self.method == "maha_pp_shrink":
-            distance = np.stack([np.sum(((x-mean) @ self.precision) * (x-mean), axis=1)
-                                 for mean in self.means], axis=1)
-            return np.maximum(distance.min(1), 0.)
+            return self.mahalanobis.details(x)[0]
         if split.logits is None:
             raise ValueError(f"Missing logits for {self.method}")
         if self.method == "maxlogit":
@@ -137,40 +110,9 @@ class FittedScore:
 
 def calibrate(scores, split, unit, false_reject_rate):
     """No test scores, unknown labels or unknown ratio enter threshold fitting."""
-    scores = np.asarray(scores, dtype=float)
-    if scores.shape != (len(split.records),) or not np.isfinite(scores).all():
-        raise ValueError("Invalid calibration scores")
-    if not 0 < false_reject_rate < 1:
-        raise ValueError("known_false_reject_rate must be in (0,1)")
-    if unit == "record_max":
-        values = np.asarray([scores[ids].max() for ids in record_groups(split.records)])
-        threshold = float(np.quantile(values, 1-false_reject_rate, method="higher"))
-        empirical = float(np.mean(values > threshold))
-    elif unit == "primary":
-        values = scores[split.primary_indices()]
-        if not len(values):
-            raise ValueError("No valid primary calibration tracks")
-        threshold = float(np.quantile(values, 1-false_reject_rate, method="higher"))
-        empirical = float(np.mean(values > threshold))
-    elif unit == "record_balanced":
-        values = scores
-        weights = record_weights(split.records)
-        order = np.argsort(values, kind="stable")
-        cumulative = np.cumsum(weights[order])
-        index = min(int(np.searchsorted(cumulative, 1-false_reject_rate, side="left")), len(values)-1)
-        threshold = float(values[order[index]])
-        empirical = float(weights[values > threshold].sum())
-    else:
-        raise ValueError("calibration_unit must be primary, record_max or record_balanced")
-    n = len(set(split.recording_ids))
     identity_map = {r["path"]: r["recording_id"] for r in split.records}
     identity_map.update(split.source_recording_ids or {})
     source_count = len({identity_map.get(f["path"], f["path"]) for f in split.report["files"]})
-    return {"threshold": threshold, "calibration_unit": unit, "target_known_false_reject_rate": false_reject_rate,
-            "calibration_recordings": n, "calibration_values": len(values),
-            "calibration_source_recordings": source_count,
-            "calibration_primary_without_feature": source_count-len(values) if unit == "primary" else None,
-            "empirical_calibration_false_reject_rate": empirical,
-            "threshold_fit": "independent_known_calibration_only",
-            "warnings": ["Few independent tail recordings; empirical target is not a deployment guarantee"]
-                        if n*false_reject_rate < 5 else []}
+    metadata, _ = calibrate_scores(scores, split.records, unit, false_reject_rate,
+        split.primary_indices() if unit=="primary" else None, source_count)
+    return metadata

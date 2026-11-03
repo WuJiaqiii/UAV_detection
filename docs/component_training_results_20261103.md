@@ -2,7 +2,7 @@
 
 三组均已完成已知类训练、独立参考/校准、测试和 86 组冻结配置评估。额外对每组重复一次关闭 `unknown_allow_single_cluster` 的矩阵，作为观察到大簇后增加的诊断。原定与诊断矩阵共 516 个配置评分，全部保留；不以未知测试标签选择 checkpoint。
 
-运行代码版本：[3be1fe0](https://github.com/WuJiaqiii/UAV_detection/commit/3be1fe008f43ef83d6bc74d5ca5d3276fa93853f)。本页仅记录实验，不更改生产推理默认值。Maha++ 等新增分数目前通过 `ablate` 离线评估，常规 `infer` 的 profile 需要另行接入相应分数的保存与加载。
+运行代码版本：[3be1fe0](https://github.com/WuJiaqiii/UAV_detection/commit/3be1fe008f43ef83d6bc74d5ca5d3276fa93853f)。本页记录该版本的历史对照。随后 Maha++ 适配已接入正式 profile/infer，并与 primary CE 一起成为主线，当前用法见 [主线运行说明](mainline_open_set.md)。本页实测数值仍对应上述运行代码版本。
 
 ## 数据和训练协议
 

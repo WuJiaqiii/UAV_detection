@@ -2,6 +2,8 @@
 
 统一入口为 `bash run.sh TASK --config FILE`，也可用 `python main.py TASK --config FILE`。
 
+当前主线为主分组 CE、记录平衡 Maha++ 适配、主轨迹校准及 HDBSCAN。参数和迁移说明见 [主线运行说明](mainline_open_set.md)。
+
 temp 分支已补回与 main 相同的 YOLOv5 子模块指针（17cfa633999107857a337d51c9c8271fef97edc7）。更新代码后先运行 `git submodule update --init --recursive`，再准备本地检测权重。
 
 ## 训练、校准与带标签评估
@@ -25,7 +27,8 @@ bash run.sh experiment --config config/experiment_iq.yaml
 | input_type | iq_dat、mat 或 png；本轮只使用对应格式，避免混合格式重复训练 |
 | known_classes / unknown_classes | 至少指定一项，另一项为剩余已发现类别；两项都指定时必须不重叠并覆盖未排除类别 |
 | exclude_classes | 从整个实验中排除的实际类别，例如 Background；不会变成未知类 |
-| val_ratio / calibration_ratio / test_ratio | 每个已知类按独立记录分配的比例，默认 0.15 / 0.20 / 0.20；余下用于训练 |
+| val_ratio / calibration_ratio / test_ratio | 每个已知类按独立记录分配的比例；主线 config 为 0.15 / 0.20 / 0.15，余下用于训练；不读 config 时命令行 test_ratio 默认 0.20 |
+| training_variant | 主线 config 为 primary_ce：主分组 CE；configured 使用 train 段自定义设置；all_ce / all_supcon 用于组件对照 |
 | seed | 划分和训练种子，默认 42 |
 | recording_ids_json | 文件到原始采集 ID 的映射；无法从命名判断的同源数据须指定 |
 
@@ -41,7 +44,7 @@ train 段填写 epochs、batch_size、lr、supcon_weight、前端和分组参数
 
 evaluation 段控制所有特征提取、切片、投票、轨迹关联和测试设置；profile 段设置参考/校准计数和目标误拒率；discovery 段设置 HDBSCAN/DCG 和预览参数。实验会自动接续最佳 checkpoint，并用训练集作为参考库，独立 calibration 集确定阈值。IQ 采集率和字节序从 train 段传给所有阶段，显式不一致会报错。
 
-默认每类至少需要 5 条独立参考记录和 20 条独立校准记录；划分后计数不足会在训练前报错。减少 min_calibration_per_class 适合检查流程，但不能证明尾部阈值稳定。实际检测/分组若产生的有效轨迹不足，profile 阶段仍会明确失败，不会伪造校准结果。
+主线 Maha++ 每类至少需要 2 条独立参考记录和 5 条有效主校准记录；划分后计数不足会在训练前报错。kNN 对照仍要求相应的 knn_k 条参考记录。减少 min_calibration_per_class 适合检查流程，但不能证明尾部阈值稳定。实际检测/分组若产生的有效主轨迹不足，profile 阶段仍会明确失败，不会用次轨迹替代。
 
 ## 无标签推理
 

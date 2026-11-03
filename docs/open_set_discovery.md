@@ -1,6 +1,6 @@
 # 已知训练后的开集识别与离线类别发现
 
-当前默认已升级为 `record_class_knn`：原始记录平衡的多组件参考库、类别尺度和每记录一次校准；默认轨迹拒识不再使用逐观测 60% 否决门槛。具体定义与多链路输出见 [记录平衡参考库](record_balanced_profiles.md)。旧 `global_knn` 保留为消融。
+当前默认是 `maha_pp_shrink`：按原始记录平衡的类别均值和共享收缩协方差、主轨迹校准、保留分类头投票类别。完整流程见 [主线运行说明](mainline_open_set.md)。`record_class_knn` 和 `global_knn` 保留为兼容对照；默认轨迹拒识不附加逐观测比例否决。
 
 训练阶段只有已知类，未知仅在最终混合测试出现。先冻结编码器，用已知参考库和独立已知校准数据确定距离阈值，然后对跨文件未知候选轨迹做 HDBSCAN / DCG-Louvain。未知比例和类别数不作为输入。
 
@@ -32,13 +32,13 @@ label_mode 选择 filename（项目 Protocol-[...] 名称）、parent（类别�
 
 同一采集的 Figure 切片、SNR 增强、MAT/PNG/DAT 导出必须在同一划分。项目 -Figure-N 会按前缀自动统一身份，无法自动判断的同源数据用 evaluation.recording_ids_json 指定。内容哈希或 recording_id 的参考/校准重叠会报错；测试隔离仍需实验者管理。
 
-每类参考轨迹至少为 knn_k（默认 5）；每类校准独立记录默认至少 20 条。20 是运行下限，不保证稳定估计 1% 尾部。known_false_reject_rate=0.01 是已知校准轨迹的目标误拒比例，不保证部署误拒或未知召回。
+主线每类至少 2 条独立参考记录、5 条有效主校准记录；建议充分利用已知训练数据。known_false_reject_rate=0.01 是已知主校准记录上的经验目标，不保证部署误拒或未知召回。kNN 方法仍要求相应的 knn_k 支持量。
 
 class_names / checkpoint 中若保留了 Background，但它没有有效组，可显式 `ignore_classes: [Background]`。其预测成为 uncertain，不进入未知池。若训练排除了 Background，则 `ignore_classes: []`，不能忽略不存在的类别。
 
 ## 表示与路由
 
-ResNet18/34 使用分类头前 512 维特征，MobileNetV3-small 使用 1024 维。每个有效观测先 L2 标准化，在轨迹内求均值再标准化；一个轨迹只有一个发现特征。默认 score 为各类别的第 k 个独立参考记录距离除以类别尺度，再取最小值；global_knn 消融使用原始参考轨迹的第 k 近邻距离。
+ResNet18/34 使用分类头前 512 维特征，MobileNetV3-small 使用 1024 维。每个有效观测先 L2 标准化，在轨迹内求均值再标准化；一个轨迹只有一个发现特征。默认 score 为到各类别均值的最小平方 Mahalanobis 距离，参考记录等权拟合共享协方差并固定收缩 0.1。类别尺度距离与原始全局 kNN 作为显式对照。
 
 | 状态 | 含义 | 进入未知聚类 |
 | --- | --- | --- |

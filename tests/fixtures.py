@@ -21,7 +21,7 @@ def parse_test_args(parser, tokens):
 def archive(path, features, labels, split, signature=None, classes=None):
     classes = classes or {"known": 0}
     records = [{"path": f"{split}/{i}.png", "track_id": "T0001", "recording_id": f"{split}_{i}",
-                "source_sha256": f"{split}_hash_{i}", "true_class_name": name}
+                "source_sha256": f"{split}_hash_{i}", "true_class_name": name,"is_primary":True}
                for i, name in enumerate(labels)]
     metadata = {"schema_version": 1, "kind": "track_features", "feature_version": FEATURE_VERSION,
                 "signature": signature or {"sha256": "fixture"}, "classes": classes, "records": records}
@@ -47,7 +47,7 @@ def track_fixture(embeddings, probabilities=None, min_votes=1):
 def known_archive(path, features, split, signature=None, classes=None, recording=None):
     labels = classes or {"known": 0}
     records = [{"path": f"{split}/{i}.png", "recording_id": recording or f"{split}_{i}",
-                "source_sha256": f"hash_{split}_{i}", "true_class_name": "known", "track_id": "T0001"}
+                "source_sha256": f"hash_{split}_{i}", "true_class_name": "known", "track_id": "T0001","is_primary":True}
                for i in range(len(features))]
     save_npz(path, {"kind": "track_features", "schema_version": 1, "feature_version": FEATURE_VERSION,
                    "signature": signature or {"sha256": "fixture"}, "classes": labels, "records": records},

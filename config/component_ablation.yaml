@@ -33,13 +33,17 @@ evaluation:
   max_slices: 0
   min_votes: 1
 profile:
-  profile_score_method: record_class_knn
+  profile_score_method: maha_pp_shrink
+  profile_covariance_shrinkage: 0.1
+  profile_calibration_unit: primary
   knn_k: 5
   known_false_reject_rate: 0.01
   min_calibration_per_class: 5
 discovery:
   unknown_cluster_backend: hdbscan
   unknown_min_cluster_size: 5
+  unknown_min_samples: 3
+  unknown_allow_single_cluster: true
   unknown_min_recordings: 2
   save_feature_plots: true
   feature_plot_method: pca

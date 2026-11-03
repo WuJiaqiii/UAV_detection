@@ -15,20 +15,24 @@ evaluation:
   # recording_ids_json: /data/uav/recording_ids.json
   # rf_center_mhz: 2400
 profile:
-  profile_score_method: record_class_knn
+  profile_score_method: maha_pp_shrink
+  profile_covariance_shrinkage: 0.1
+  profile_calibration_unit: primary
   profile_scale_prior_records: 5.0
   reference_inputs: [/data/uav/fold1/known_train]
   calibration_inputs: [/data/uav/fold1/known_calibration]
-  label_mode: filename   # parent for class-folder DAT; json for explicit mappings
+  label_mode: parent   # DAT class folders; filename for protocol-named MAT/PNG; json for explicit mappings
   knn_k: 5
   known_false_reject_rate: 0.01
-  min_calibration_per_class: 20
+  min_calibration_per_class: 5
   max_reference_per_class: 2000
   ignore_classes: []     # Use [Background] only when it exists in the model head
 discovery:
   test_inputs: [/data/uav/fold1/dev_mixed]
   unknown_cluster_backend: hdbscan
   unknown_min_cluster_size: 5
+  unknown_min_samples: 3
+  unknown_allow_single_cluster: true
   unknown_min_recordings: 2
   save_visuals: true
   # test_labels_json: /data/uav/fold1/test_labels.json
@@ -38,5 +42,7 @@ predict:
   open_set_profile: /models/known_profile.npz  # Copy the profile path printed by the profile task
   unknown_cluster_backend: hdbscan
   unknown_min_cluster_size: 5
+  unknown_min_samples: 3
+  unknown_allow_single_cluster: true
   unknown_min_recordings: 2
   # labels_json: /data/uav/fold1/test_labels.json

@@ -106,9 +106,13 @@ def profile_parser(discover=False):
     parser.add_argument("--calibration_labels_json", type=Path)
     parser.add_argument("--knn_k", type=int, default=5)
     parser.add_argument("--known_false_reject_rate", type=float, default=.01)
-    parser.add_argument("--min_calibration_per_class", type=int, default=20)
+    parser.add_argument("--min_calibration_per_class", type=int, default=5)
     parser.add_argument("--max_reference_per_class", type=int, default=2000)
-    parser.add_argument("--profile_score_method", choices=["record_class_knn", "global_knn"], default="record_class_knn")
+    parser.add_argument("--profile_score_method", choices=["maha_pp_shrink", "record_class_knn", "global_knn"], default="maha_pp_shrink")
+    parser.add_argument("--profile_covariance_shrinkage",type=float,default=.1,
+                        help="Maha++ adaptation: reference-only shared covariance shrinkage")
+    parser.add_argument("--profile_calibration_unit",choices=["primary","record_max","record_balanced","track"],default=None,
+                        help="Method default: Maha++ primary, class kNN record_max, global kNN track")
     parser.add_argument("--profile_scale_prior_records", type=float, default=5.)
     parser.add_argument("--ignore_classes", nargs="*", default=[], help="Explicit abstention head classes, e.g. Background")
     if discover:
@@ -155,7 +159,7 @@ def run_profile(args, discover=False, predictor=None):
         return execute_run("discover" if discover else "profile", args,
                            lambda managed: run_profile(managed, discover, predictor))
     from scripts.evaluate_single_signal import run
-    from util.open_set import build_profile
+    from util.open_set import build_profile, validate_profile_options
 
     from util.run_context import check_output_directory
     output = check_output_directory(args)
@@ -165,6 +169,9 @@ def run_profile(args, discover=False, predictor=None):
         raise ValueError("Use profile label_mode and the separate reference/calibration label mappings")
     if args.label_mode == "json" and (not args.reference_labels_json or not args.calibration_labels_json):
         raise ValueError("JSON mode requires both reference_labels_json and calibration_labels_json")
+    args.profile_calibration_unit=validate_profile_options(args.knn_k,args.known_false_reject_rate,
+        args.min_calibration_per_class,args.max_reference_per_class,args.profile_score_method,
+        args.profile_scale_prior_records,args.profile_covariance_shrinkage,args.profile_calibration_unit)
     if discover and getattr(args, "test_output_dir", None):
         test_output = args.test_output_dir.expanduser().resolve()
         if test_output.exists() and (not test_output.is_dir() or any(test_output.iterdir())):
@@ -183,9 +190,11 @@ def run_profile(args, discover=False, predictor=None):
     metadata = build_profile(output/"reference/features.npz", output/"calibration/features.npz", target,
         args.knn_k, args.known_false_reject_rate, args.min_calibration_per_class,
         args.max_reference_per_class, args.ignore_classes,
-        score_method=args.profile_score_method, scale_prior_records=args.profile_scale_prior_records)
+        score_method=args.profile_score_method, scale_prior_records=args.profile_scale_prior_records,
+        covariance_shrinkage=args.profile_covariance_shrinkage,calibration_unit=args.profile_calibration_unit)
     if not discover:
-        return {"profile": str(target), "threshold": metadata["threshold"]}
+        return {"profile":str(target),"threshold":metadata["threshold"],"score_method":metadata["score_method"],
+                "calibration_unit":metadata["calibration_unit"],"known_label_policy":metadata.get("known_label_policy","legacy")}
     prediction = copy.deepcopy(args)
     prediction.inputs = args.test_inputs
     prediction.output_dir = getattr(args, "test_output_dir", None) or output/"discovery"

@@ -211,11 +211,12 @@ class OpenSetCliTests(unittest.TestCase):
     def test_export_calibrate_and_discover_end_to_end_with_final_html_png_csv(self):
         # Deterministic feature fixtures exercise orchestration, not real accuracy.
         train = self.png("train/known", "train.png", 1)
+        train_second = self.png("train/known", "second.png", 11)
         calibration = self.png("val/known", "calibration.png", 2)
         for path, output, feature in ((train, "ref", [1., 0, 0]), (calibration, "cal", [1., .01, 0])):
             predictor = Mock()
-            predictor.predict.return_value = self.prediction(feature)
-            run(self.args([path], output, "--export_features", "--label_from_parent", "--no-save_visuals"), predictor)
+            predictor.predict.side_effect = lambda *args,feature=feature: self.prediction(feature)
+            run(self.args([path,train_second] if output=="ref" else [path], output, "--export_features", "--label_from_parent", "--no-save_visuals"), predictor)
         profile = self.root/"profile.npz"
         build_profile(self.root/"ref/features.npz", self.root/"cal/features.npz", profile, k=1, min_calibration_per_class=1)
         paths = [self.png("test", f"{i}.png", i+3) for i in range(7)]
@@ -263,7 +264,7 @@ class OpenSetCliTests(unittest.TestCase):
         path = self.png("test", "one.png", 3)
         args = self.args([path], "bad")
         reference, calibration, profile = [self.root/name for name in ("r.npz", "c.npz", "p.npz")]
-        archive(reference, [[1., 0, 0]], ["known"], "r")
+        archive(reference, [[1., 0, 0],[1., .001, 0]], ["known"]*2, "r")
         archive(calibration, [[1., .1, 0]], ["known"], "c")
         build_profile(reference, calibration, profile, k=1, min_calibration_per_class=1)
         args.open_set_profile = profile
@@ -277,7 +278,7 @@ class OpenSetCliTests(unittest.TestCase):
         path = self.png("test", "known.png", 7)
         args = self.args([path], "plot_error", "--no-save_visuals")
         signature = inference_signature(args, resolve_config({"config": {"classes": {"known": 0}, "mask_img_size": 32}}))
-        archive(self.root/"ref.npz", [[1., 0, 0]], ["known"], "ref", signature)
+        archive(self.root/"ref.npz", [[1., 0, 0],[1., .001, 0]], ["known"]*2, "ref", signature)
         archive(self.root/"cal.npz", [[1., .01, 0]], ["known"], "cal", signature)
         build_profile(self.root/"ref.npz", self.root/"cal.npz", self.root/"profile.npz", k=1, min_calibration_per_class=1)
         args.open_set_profile = self.root/"profile.npz"

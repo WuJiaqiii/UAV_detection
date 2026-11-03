@@ -15,6 +15,8 @@ infer:
   open_set_profile: /models/known_profile.npz
   unknown_cluster_backend: hdbscan
   unknown_min_cluster_size: 5
+  unknown_min_samples: 3
+  unknown_allow_single_cluster: true
   unknown_min_recordings: 2
   save_visuals: true
   # rf_center_mhz: 2400

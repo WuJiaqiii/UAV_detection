@@ -117,7 +117,7 @@ class ProfileAndArchiveTests(unittest.TestCase):
     def test_ignored_background_needs_no_reference_and_is_uncertain(self):
         classes = {"known": 0, "Background": 1}
         ref, cal, profile = [self.root/name for name in ("ref.npz", "cal.npz", "profile.npz")]
-        known_archive(ref, [[1., 0, 0]], "train", classes=classes)
+        known_archive(ref, [[1., 0, 0],[1., .001, 0]], "train", classes=classes)
         known_archive(cal, [[1., .01, 0]], "val", classes=classes)
         build_profile(ref, cal, profile, k=1, min_calibration_per_class=1, ignore_classes=["Background"])
         scorer = OpenSetProfile(profile, {"sha256": "fixture"}, classes)
@@ -180,7 +180,7 @@ class ProfileAndArchiveTests(unittest.TestCase):
             "--unknown_cluster_backend", "dcg", "--unknown_min_cluster_size", "2", "--unknown_min_recordings", "1"])
         signature = inference_signature(args, resolve_config(saved))
         ref, cal = self.root/"ref.npz", self.root/"cal.npz"
-        known_archive(ref, [[1., 0, 0]], "train", signature)
+        known_archive(ref, [[1., 0, 0],[1., .001, 0]], "train", signature)
         known_archive(cal, [[1., .02, 0]], "val", signature)
         build_profile(ref, cal, profile, k=1, min_calibration_per_class=1)
         args.open_set_profile = profile

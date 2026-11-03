@@ -7,6 +7,7 @@ experiment:
   # DAUTEL EVO NANO, DEVENTION DEVO, DJFPV, DJI AVATA2, DJI FPV COMBO, DJI MAVIC3 PRO, DJI MINI3 PRO, DJI_Inspire_2, DJI_MATRICE_200, DJI_MATRICE_600_Pro, DJMavicMini, DJMiniSE, EVOIIPRO, FIMIX8SE2020, FIMIx8Mini, FLYSKY FS I6X, FRSKY X14, FRSKY X20R, HubsanZino2, JUMPER T14 
   # Omit unknown_classes to use every other discovered class as unknown.
   # exclude_classes: [Background]  # Only if this folder exists; omit it entirely.
+  training_variant: primary_ce
   seed: 42
   val_ratio: 0.15
   calibration_ratio: 0.20
@@ -17,6 +18,9 @@ train:
   yolo_weights: /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code/yolov5/runs/train/exp10/weights/best.pt
   iq_sample_rate: 100000000
   iq_byte_order: "<"
+  backbone: resnet18
+  mask_pretrained: true
+  mask_img_size: 224
   epochs: 100
   batch_size: 32
   num_workers: 1
@@ -25,7 +29,8 @@ train:
   hop_association: shape
   # Allow modest height/aspect jitter for thin 4-6 pixel pulses.
   hop_shape_log_tol: 0.50
-  supcon_weight: 0.1
+  train_group_policy: primary
+  supcon_weight: 0.0
   bbox_cache_mode: "off"
 evaluation:
   signal_mode: multi
@@ -36,7 +41,9 @@ evaluation:
   # Shared frontend/group settings otherwise come from the trained checkpoint.
 profile:
   # Single-device known recordings may contain several control/video components.
-  profile_score_method: record_class_knn
+  profile_score_method: maha_pp_shrink
+  profile_covariance_shrinkage: 0.1
+  profile_calibration_unit: primary
   profile_scale_prior_records: 5.0
   knn_k: 5
   known_false_reject_rate: 0.01
@@ -49,5 +56,7 @@ discovery:
   feature_plot_seed: 42
   unknown_cluster_backend: hdbscan
   unknown_min_cluster_size: 5
+  unknown_min_samples: 3
+  unknown_allow_single_cluster: true
   unknown_min_recordings: 2
   save_visuals: true

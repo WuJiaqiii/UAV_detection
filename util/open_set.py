@@ -1,4 +1,4 @@
-"""Frozen known-only kNN rejection, track feature archives and profile calibration.
+"""Frozen known-only rejection, track feature archives and profile calibration.
 
 All distance thresholds come from a disjoint known calibration split. Unknown
 test features are used only for inference/discovery, never to fit this profile.
@@ -37,7 +37,8 @@ def inference_signature(args, config):
                "util/spectrogram_frontend.py", "data/iq_dat_loader.py",
                "util/single_signal_eval.py", "util/multi_signal_eval.py", "util/open_set.py",
                "util/eval_common.py", "util/group_predictor.py", "util/recordings.py",
-               "util/known_reference.py", "util/class_evidence.py"]
+               "util/known_reference.py", "util/class_evidence.py", "util/mahalanobis.py",
+               "util/recording_features.py"]
     settings = {key: value for key, value in vars(config).items()
                 if key not in {"device", "yolo_weights", "frontend_config"}}
     options = {key: getattr(args, key) for key in (
@@ -116,6 +117,15 @@ def cache_track_features(results, rows_by_file):
 def export_feature_archive(path, signature, classes, results, rows_by_file, recording_ids=None):
     features, records, skipped = [], [], 0
     identities = {}
+    sources = []
+    for result in results:
+        source = result["path"]
+        digest = file_sha256(source)
+        identity = recording_identity(source, digest, recording_ids)
+        identities[source] = (digest, identity)
+        labels = result.get("true_class_names")
+        sources.append({"path":source,"source_sha256":digest,"recording_id":identity,
+                        "true_class_name":labels[0] if labels and len(labels)==1 else None})
     for result, track, center, accepted, groups in iter_track_features(results, rows_by_file):
         if center is None:
             skipped += 1
@@ -132,12 +142,19 @@ def export_feature_archive(path, signature, classes, results, rows_by_file, reco
                         "track_id": track["track_id"], "true_class_name": truth,
                         "known_candidate_class": track["class_name"],
                         "component_type": (next(iter(types)) if len(types := {g.get("group_type", "unspecified") for g in accepted}) == 1 else "mixed"),
-                        "observation_count": len(accepted)})
+                        "valid_votes":track.get("valid_votes",len(accepted)),
+                        "observation_count":track.get("observation_count",len(groups))})
         features.append(center)
     if not features:
         raise ValueError("No valid track features to export; inspect detections, groups and votes")
+    from util.recording_features import primary_track_indices, PRIMARY_RULE
+    primary = set(primary_track_indices(records,results,{p:item[1] for p,item in identities.items()}).tolist())
+    for i,record in enumerate(records):
+        record["is_primary"] = i in primary
     metadata = {"schema_version": 1, "kind": "track_features", "feature_version": FEATURE_VERSION,
                 "signature": signature, "classes": classes, "records": records,
+                "source_recordings":sources,"source_recording_count":len({s["recording_id"] for s in sources}),
+                "primary_rule":PRIMARY_RULE,
                 "skipped_tracks": skipped, "unit": "one L2-normalized mean per accepted track"}
     save_npz(path, metadata, features=normalize_features(features))
     return {"path": str(path), "track_count": len(records), "skipped_tracks": skipped}
@@ -159,21 +176,45 @@ def _validate_feature_archive(metadata, arrays):
     if len(records) != len(features) or not records:
         raise ValueError("Archive records/features must be nonempty and aligned")
     classes = metadata["classes"]
+    labels_by_identity,labels_by_content = {},{}
     for record in records:
         if record.get("true_class_name") not in classes:
             raise ValueError("Profile inputs require single-known-class truth for every track; "
                              "use clean single-signal files and --label_from_filename/--label_from_parent/--labels_json")
         if not record.get("recording_id") or not record.get("source_sha256"):
             raise ValueError("Missing source/recording identity")
+        for mapping,key in ((labels_by_identity,"recording_id"),(labels_by_content,"source_sha256")):
+            if mapping.setdefault(record[key],record["true_class_name"])!=record["true_class_name"]:
+                raise ValueError("One recording/content has conflicting class labels")
     return features, records
 
 
+def validate_profile_options(k, false_reject_rate, minimum_calibration, maximum_reference,
+                             score_method, scale_prior_records=5., covariance_shrinkage=.1, calibration_unit=None):
+    if score_method not in {"maha_pp_shrink","record_class_knn","global_knn"}:
+        raise ValueError("Unknown profile score_method")
+    counts=(k,minimum_calibration,maximum_reference)
+    minimum_reference=2 if score_method=="maha_pp_shrink" else k
+    if (any(isinstance(v,bool) or not isinstance(v,(int,np.integer)) or v<1 for v in counts) or
+            not 0<false_reject_rate<1 or maximum_reference<minimum_reference):
+        raise ValueError("Invalid known-profile calibration settings; need positive counts and 0 < false reject rate < 1")
+    if not np.isfinite(scale_prior_records) or scale_prior_records<0:
+        raise ValueError("profile_scale_prior_records must be finite and nonnegative")
+    if not np.isfinite(covariance_shrinkage) or not 0<covariance_shrinkage<=1:
+        raise ValueError("profile_covariance_shrinkage must be in (0,1]")
+    unit=calibration_unit or ("primary" if score_method=="maha_pp_shrink" else "record_max" if score_method=="record_class_knn" else "track")
+    allowed={"primary","record_max","record_balanced"} if score_method=="maha_pp_shrink" else ({"record_max"} if score_method=="record_class_knn" else {"track"})
+    if unit not in allowed:
+        raise ValueError("profile_calibration_unit does not match the profile score method")
+    return unit
+
+
 def build_profile(reference_path, calibration_path, output_path, k=5, known_false_reject_rate=.01,
-                  min_calibration_per_class=20, max_reference_per_class=2000, ignore_classes=(),
-                  score_method="record_class_knn", scale_prior_records=5.):
-    if (isinstance(k, bool) or not isinstance(k, (int, np.integer)) or
-            not 0 < known_false_reject_rate < 1 or min_calibration_per_class < 1 or max_reference_per_class < k or k < 1):
-        raise ValueError("Need 0 < known_false_reject_rate < 1 and positive counts")
+                  min_calibration_per_class=5, max_reference_per_class=2000, ignore_classes=(),
+                  score_method="maha_pp_shrink", scale_prior_records=5.,
+                  covariance_shrinkage=.1, calibration_unit=None):
+    calibration_unit=validate_profile_options(k,known_false_reject_rate,min_calibration_per_class,
+        max_reference_per_class,score_method,scale_prior_records,covariance_shrinkage,calibration_unit)
     ref_meta, ref_arrays = load_npz(reference_path, "track_features")
     cal_meta, cal_arrays = load_npz(calibration_path, "track_features")
     if ref_meta["signature"] != cal_meta["signature"] or ref_meta["classes"] != cal_meta["classes"]:
@@ -194,8 +235,31 @@ def build_profile(reference_path, calibration_path, output_path, k=5, known_fals
     ref_records, cal_records = [ref_records[i] for i in ref_keep], [cal_records[i] for i in cal_keep]
     ref_labels = np.array([row["true_class_name"] for row in ref_records])
     cal_labels = np.array([row["true_class_name"] for row in cal_records])
-    if score_method not in {"record_class_knn", "global_knn"}:
-        raise ValueError("Unknown profile score_method")
+    if score_method=="maha_pp_shrink":
+        from util.mahalanobis import build_mahalanobis_profile
+        for metadata in (ref_meta,cal_meta):
+            sources = metadata.get("source_recordings",[])
+            if any(s.get("true_class_name") not in classes for s in sources):
+                raise ValueError("Profile source recordings require single-known-class truth, including sources without features")
+        for rows in (ref_records,cal_records):
+            hashes = {}
+            for row in rows:
+                if not isinstance(row.get("recording_id"),str) or not row["recording_id"]:
+                    raise ValueError("Invalid reference/calibration recording identity")
+                previous = hashes.setdefault(row["source_sha256"],row["recording_id"])
+                if previous!=row["recording_id"]:
+                    raise ValueError("Identical source content has inconsistent recording_ids; fix the recording identity mapping")
+        sources = cal_meta.get("source_recordings",[])
+        source_count = len({s["recording_id"] for s in sources if s["true_class_name"] not in ignored}) if sources else None
+        active_classes = {name:index for name,index in classes.items() if name not in ignored}
+        metadata,arrays = build_mahalanobis_profile(reference,ref_records,calibration,cal_records,active_classes,
+            min_calibration_per_class,max_reference_per_class,known_false_reject_rate,covariance_shrinkage,
+            calibration_unit,source_count)
+        metadata.update(schema_version=1,kind="open_set_profile",feature_version=FEATURE_VERSION,
+            signature=ref_meta["signature"],classes=classes,ignore_classes=sorted(ignored),k=int(k),
+            reference_archive_sha256=file_sha256(reference_path),calibration_archive_sha256=file_sha256(calibration_path))
+        save_npz(output_path,metadata,**arrays)
+        return metadata
     if score_method == "record_class_knn":
         from util.known_reference import build_record_bank
         active_classes = {name: index for name, index in classes.items() if name not in ignored}
@@ -259,12 +323,30 @@ class OpenSetProfile:
             raise ValueError("Open-set profile does not match weights, source, classes or inference settings; rebuild it")
         self.reference = normalize_features(arrays["reference"])
         self.ignore_classes = set(self.metadata.get("ignore_classes", []))
+        if self.ignore_classes-classes.keys() or len(self.ignore_classes)>=len(classes):
+            raise ValueError("Invalid profile ignored classes")
         self.k, self.threshold = self.metadata["k"], self.metadata["threshold"]
-        if not isinstance(self.k, int) or not 1 <= self.k <= len(self.reference) or not math.isfinite(self.threshold):
+        if isinstance(self.k,bool) or not isinstance(self.k, int) or self.k < 1 or not math.isfinite(self.threshold):
             raise ValueError("Invalid profile k/threshold")
         self.classes = dict(classes)
         self.score_method = self.metadata.get("score_method", "global_knn")
+        self.known_label_policy = self.metadata.get("known_label_policy",
+            "nearest_reference" if self.score_method=="record_class_knn" else "head")
         self.bank = None
+        self.mahalanobis = None
+        if self.score_method=="maha_pp_shrink":
+            from util.mahalanobis import RecordingMahalanobis,SCORING_VERSION
+            active = set(classes)-self.ignore_classes
+            if (self.metadata.get("scoring_version")!=SCORING_VERSION or
+                    self.known_label_policy!="head" or self.threshold<0 or
+                    set(self.metadata.get("class_order",[]))!=active):
+                raise ValueError("Invalid Mahalanobis profile version/classes/label policy")
+            self.mahalanobis = RecordingMahalanobis(self.metadata["class_order"],arrays["class_means"],arrays["precision"])
+            if self.mahalanobis.means.shape[1]!=self.reference.shape[1]:
+                raise ValueError("Mahalanobis profile/reference dimensions differ")
+            return
+        if self.k>len(self.reference):
+            raise ValueError("Invalid profile k/threshold")
         if self.score_method == "record_class_knn":
             from util.known_reference import RecordingClassBank
             self.bank = RecordingClassBank(self.reference, arrays["reference_labels"],
@@ -282,12 +364,16 @@ class OpenSetProfile:
         query = normalize_features(features)
         if query.shape[1] != self.reference.shape[1]:
             raise ValueError("Profile/query feature dimension mismatch")
+        if self.mahalanobis is not None:
+            return self.mahalanobis.details(query)[0]
         if self.bank is not None:
             return self.bank.details(query)[0]
         return self.neighbors.kneighbors(query, return_distance=True)[0][:, -1]
 
     def score_details(self, features):
         query = normalize_features(features)
+        if self.mahalanobis is not None:
+            return self.mahalanobis.details(query)
         if self.bank is None:
             return self.score(query), [None] * len(query)
         scores, names, _, _ = self.bank.details(query)
@@ -321,7 +407,7 @@ def apply_open_set(profile, results, rows_by_file, min_novel_observation_share=.
             share = float(np.mean(profile.score([group["embedding"] for group in accepted]) > profile.threshold))
             track.update(ood_score=score, novel_observation_share=share, profile_class_name=profile_name)
             if score <= profile.threshold:
-                if profile_name is not None:
+                if profile_name is not None and getattr(profile,"known_label_policy","nearest_reference")=="nearest_reference":
                     track.update(class_name=profile_name, class_id=profile.classes[profile_name])
                 track.update(recognition_status="known", display_label=track["class_name"])
             elif novelty_policy == "calibrated_track" or share >= min_novel_observation_share:

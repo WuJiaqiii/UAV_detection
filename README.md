@@ -1,11 +1,13 @@
 # UAV_detection
 
+当前主线为 **主分组 CE + 记录平衡 Maha++ 适配 + 主轨迹校准 + HDBSCAN**，已接入正式 profile 与无标签 infer。直接从头实验使用 `bash run.sh experiment --config config/experiment_iq.yaml`；训练后使用导出的 inference.yaml。配置、迁移及完整命令见 [主线运行说明](docs/mainline_open_set.md)。
+
 开集对照实验可用 `bash run.sh ablate --config config/ablation.yaml --source_experiment /path/to/completed_experiment`。
 统一比较分类头覆盖、三种校准单位、九种拒识分数和固定候选池聚类；组件训练提供三组独立配方。用法、限制与实测结果见 [开集对照实验](docs/open_set_ablation.md)。
 
 开集结果默认提供 PCA 特征点分布图，可选 t-SNE 和真值着色对照；`visualize` 可从已有特征归档离线补图。配置、输出与解释范围见 [特征可视化](docs/feature_visualization.md)。
 
-已知 profile 默认采用按原始记录平衡的多原型参考库、类别距离尺度和逐记录校准；推理保留每条链路的时间/频率，并在 `class_evidence.csv` 汇总同类别组件。说明、消融参数和旧 profile 迁移见 [记录平衡参考库](docs/record_balanced_profiles.md)。
+已知 profile 默认保存记录平衡的类别均值、共享协方差逆矩阵和主轨迹校准阈值；接受为已知时保留分类头投票类别。推理保留每条链路的时间/频率，在 `class_evidence.csv` 汇总同类别组件。旧类别尺度 kNN 作为兼容对照保留，见 [记录平衡参考库](docs/record_balanced_profiles.md)。
 
 无人机信号的已知类训练、多信号分类、开集拒识与未知类别发现。主线为：MAT/PNG/DAT → 统一频谱 → YOLO 框 → 信号分组 → 二值 mask CNN → DAT 轨迹投票 → 已知 profile 拒识 → 未知候选聚类。输出类别、时间和频率位置。
 
@@ -61,7 +63,7 @@ bash run.sh discover --config config/open_set.yaml
 
 - train：训练参数、类别顺序和排除项。
 - experiment：数据输入、已知/未知类别选择、按原始记录的划分比例与种子；训练数据路径和最终类别空间由实验生成。
-- infer：无标签输入、profile 和输出目录；覆盖 evaluation 的同名设置。
+- infer：无标签输入和 profile；覆盖 evaluation 的同名设置。
 - evaluation：profile 提取和 predict 共用的权重、前端、分组、切片和投票参数。
 - profile：参考/校准输入、真值来源和阈值设置。
 - discovery：discover 专用的混合测试输入、标签和后端；不会进入参考/校准标签。
@@ -70,8 +72,8 @@ bash run.sh discover --config config/open_set.yaml
 命令行显式值覆盖 YAML：
 
 ```bash
-# CE 基线；原配置仍为 SupCon。
-bash run.sh train --config config/train.yaml --supcon_weight 0
+# 可选 SupCon 对照；主线配置默认 primary CE。
+bash run.sh train --config config/train.yaml --train_group_policy all --supcon_weight 0.1
 # 不保存图片；保留 HTML、CSV、JSON。
 bash run.sh predict --config config/predict.yaml --no-save_visuals
 # 只换后端，不重新检测和提取特征。
@@ -104,11 +106,11 @@ IQ 通常应省略 `class_names`；若为恢复旧 checkpoint 指定顺序，列
 
 最终映射会写入实验 `config.yaml` 和 checkpoint 的 `config.classes`。恢复训练时必须保持类别名称与 ID 一致；预测从 checkpoint 读取类别映射，不根据待测目录重新编号。采集率为 `iq_sample_rate`，与输出频谱的 122.88 MHz 网格区别见 [前端契约](docs/spectrogram_frontend.md)。
 
-`config/train.yaml` 示例将 FPV/Skylink1 留作模拟未知、排除 Background。`supcon_weight=0` 保留原 CE；正值使用有限框丢弃和平移构建第二视图。不要冻结骨干后开启 SupCon。普通训练存档在 `experiment/train_时间/models/best.pth`，完整开集实验则在其 `training/models/` 子目录；按已知验证准确率选模型，同时查看匹配召回。
+`config/train.yaml` 示例将 FPV/Skylink1 留作模拟未知、排除 Background。主线使用 `train_group_policy=primary`、`supcon_weight=0`；正值用于可选对照，使用有限框丢弃和平移构建第二视图。不要冻结骨干后开启 SupCon。普通训练存档在 `experiment/train_时间/models/best.pth`，完整开集实验则在其 `training/models/` 子目录；按已知验证准确率选模型，同时查看匹配召回。
 
 ## 开集与输出
 
-参考/校准都应为干净的单已知类别输入，且按原始采集记录隔离。默认每类至少 20 条独立校准记录；同一 DAT 的切片不能充当多条记录。unknown 只在最后的混合输入出现，不参与网络训练或阈值校准，也不预设未知比例/K。
+参考/校准都应为干净的单已知类别输入，且按原始采集记录隔离。主线每类至少 2 条独立参考记录、5 条有效主校准记录；同一 DAT 的切片不能充当多条记录。unknown 只在最后的混合输入出现，不参与网络训练或阈值校准，也不预设未知比例/K。
 
 有 profile 时，最终结论读 `tracks.csv` 的 `display_label / recognition_status`；逐组 `class_name` 仍为已知分类头的原始候选。`unknown_clusters.json` 保存估计 K、支持记录和原型；`unknown_features.npz` 可重聚类，`unknown_prototypes.npz` 保存同空间簇中心。图示/HTML 保留原始框的时间和频率；给出 RF 中心后可输出绝对 MHz。
 

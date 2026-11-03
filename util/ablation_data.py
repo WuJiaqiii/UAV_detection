@@ -37,21 +37,8 @@ class FrozenSplit:
         return np.asarray([r["recording_id"] for r in self.records])
 
     def primary_indices(self):
-        lookup = {(r["path"], r["track_id"]): i for i, r in enumerate(self.records)}
-        identities = {r["path"]: r["recording_id"] for r in self.records}
-        identities.update(self.source_recording_ids or {})
-        grouped = {}
-        for f in self.report["files"]:
-            if f["path"] in identities:
-                for track in f.get("signals", []):
-                    grouped.setdefault(identities[f["path"]], []).append((f["path"], track))
-        selected = []
-        for _, items in sorted(grouped.items()):
-            path, track = min(items, key=lambda pair: primary_key(*pair))
-            key = (path, track["track_id"])
-            if key in lookup:
-                selected.append(lookup[key])
-        return np.asarray(selected, dtype=int)
+        from util.recording_features import primary_track_indices
+        return primary_track_indices(self.records,self.report["files"],self.source_recording_ids)
 
 
 def load_split(directory, archive_name):
