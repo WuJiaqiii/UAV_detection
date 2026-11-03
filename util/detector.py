@@ -13,7 +13,13 @@ def load_yolo_model(weights, device=""):
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
     import yolov5.hubconf as hubconf
-    return hubconf.custom(path=str(weights), autoshape=True, _verbose=False, device=device or None)
+    from models import experimental
+    from unittest.mock import patch
+    from util.checkpoint import load_checkpoint_object
+    # YOLO checkpoints can also contain pathlib objects from the training OS.
+    # Scope the trusted reader to model construction; never replace pathlib globally.
+    with patch.object(experimental, "torch_load", load_checkpoint_object):
+        return hubconf.custom(path=str(weights), autoshape=True, _verbose=False, device=device or None)
 
 
 class YoloV5Detector:

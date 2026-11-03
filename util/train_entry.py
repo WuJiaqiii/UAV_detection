@@ -108,6 +108,10 @@ def build_parser():
     g_data.add_argument("--iq_segment_ms", type=float, default=50.0, help="Length of each IQ crop converted to a spectrogram.")
     g_data.add_argument("--iq_byte_order", choices=["<", ">"], default="<")
     g_data.add_argument("--iq_n_fft", type=int, default=512)
+    g_data.add_argument("--iq_preprocess_threads", type=int, default=3,
+                        help="Deterministic IQ conversions per worker; crop draws and output order remain serial-equivalent")
+    g_data.add_argument("--iq_cache_validation", action=argparse.BooleanOptionalAction, default=True,
+                        help="Cache only fixed validation spectra under the managed experiment cache; random train crops are never cached")
     g_data.add_argument("--iq_hop_length", type=int, default=512)
     g_data.add_argument("--val_ratio", type=float, default=0.2)
     g_data.add_argument("--batch_size", type=int, default=32)
@@ -313,6 +317,8 @@ def setup_incremental_class_split(config, logger=None):
 def validate_training_options(args):
     from model.representation import validate_representation_options
     validate_representation_options(args)
+    if int(getattr(args, "iq_preprocess_threads", 3)) < 1:
+        raise ValueError("iq_preprocess_threads must be >= 1")
     for name in ("epochs", "batch_size", "save_interval", "early_stop_patience", "cosine_annealing_T0", "cosine_annealing_mult"):
         if int(getattr(args, name)) < 1:
             raise ValueError(f"{name} must be >= 1")

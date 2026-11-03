@@ -113,6 +113,14 @@ bash run.sh experiment --config config/component_ablation.yaml --training_varian
 
 每组完成后再用 `ablate --source_experiment <该组输出>` 比较同样的拒识配置。编码器改变后不能复用旧参考/校准特征。原始 DAT、YOLO 权重和训练算力不在结果缓存中，冻结实验不代表这三组已完成完整训练。
 
+### DAT 读取和跨系统权重
+
+`train.iq_preprocess_threads` 默认为 3，控制每个数据加载 worker 内一批 DAT 的读取/频谱转换线程数，设为 1 可关闭。随机切片起点仍按原顺序串行生成，返回顺序保持不变；线程只处理确定性的转换，不增加训练样本或改变采样分布。应结合 `num_workers` 调整总线程数，避免同时开启过多 worker 和线程。
+
+`train.iq_cache_validation` 默认为 `true`，仅在本次实验的 `training/cache/iq_validation/` 中缓存固定验证切片的原生 float32 频谱。随机训练切片不缓存。缓存键包含原文件绝对路径、大小、修改时间、切片/前端参数及前端源文件哈希；数据被原地修改后应保留新的修改时间，或删除对应缓存。内容损坏时重新转换，缓存写入不可用时发出警告并使用新转换结果，不中断训练。缓存文件名缩短以兼容 Windows 常见路径长度限制。
+
+分类器和本地 YOLOv5 的权重读取均支持跨系统保存的 pathlib 对象；不需要修改全局 `pathlib.PosixPath`。这属于 pickle checkpoint 兼容处理，只对来源可信的权重使用。模型结构、类别顺序和输入契约的检查仍然适用。
+
 本版本抽取了共享参考尺度函数；由于 profile 签名包含该源文件，正常推理使用历史 profile 时应按新代码重新生成 profile。历史实验的离线对照不依赖当前代码签名，也不会改写旧 profile。
 
 ## 2026-10-31 实测：19:10 历史实验

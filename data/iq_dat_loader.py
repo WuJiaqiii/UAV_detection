@@ -175,6 +175,9 @@ class RawIQDataset(Dataset):
             self.sample_rate, self.segment_ms, self.n_fft, self.hop_length)
         self.byte_order = str(getattr(config, "iq_byte_order", "<"))
         self.random_crop = self.split_name == "train"
+        self.preprocess_threads = int(getattr(config, "iq_preprocess_threads", 3))
+        if self.preprocess_threads < 1:
+            raise ValueError("iq_preprocess_threads must be >= 1")
         paths = dataset_path if dataset_path is not None else getattr(config, "dataset_path", None)
         class_map = dict(config.classes)
         if not class_map:
@@ -215,14 +218,48 @@ class RawIQDataset(Dataset):
         sample = self.samples[index]
         remaining = sample["num_samples"] - self.segment_samples
         start = int(np.random.randint(0, remaining + 1)) if self.random_crop else remaining // 2
-        iq = read_iq_dat(sample["fp"], start_sample=start, num_samples=self.segment_samples,
-                         byte_order=self.byte_order)
-        spec = iq_to_spectrogram(iq, n_fft=self.n_fft, hop_length=self.hop_length,
-                                 sample_rate=self.sample_rate)
+        return self._read_item(index, start)
+
+    def _read_item(self, index, start):
+        sample = self.samples[index]
+        def convert():
+            iq = read_iq_dat(sample["fp"], start_sample=start, num_samples=self.segment_samples,
+                             byte_order=self.byte_order)
+            return iq_to_spectrogram(iq, n_fft=self.n_fft, hop_length=self.hop_length,
+                                    sample_rate=self.sample_rate)
+        cache_root = getattr(self.config, "cache_dir", None)
+        if not self.random_crop and cache_root and getattr(self.config, "iq_cache_validation", True):
+            from util.iq_cache import fixed_spectrum, implementation_hash
+            from util import spectrogram_frontend
+            parameters = {"start": start, "samples": self.segment_samples, "sample_rate": self.sample_rate,
+                          "n_fft": self.n_fft, "hop_length": self.hop_length, "byte_order": self.byte_order,
+                          "loader": implementation_hash(__file__),
+                          "frontend": implementation_hash(spectrogram_frontend.__file__)}
+            spec = fixed_spectrum(Path(cache_root)/"iq_validation", sample["fp"], parameters, convert)
+        else:
+            spec = convert()
         target = {"label": sample["label"], "class_name": sample["class_name"],
                   "center_freq": 0.0, "bandwidth": self.sample_rate / 1e6,
                   "has_frequency_label": False}
         return torch.from_numpy(spec), [target], float("nan"), sample["fp"]
+
+    def __getitems__(self, indices):
+        """Parallelize only deterministic IQ conversion, preserving crop RNG/order.
+
+        PyTorch's batched dataset fetch uses this method inside a worker. Draw all
+        random starts sequentially before starting threads, so worker scheduling
+        cannot change which crop belongs to an index or the next random state.
+        """
+        threads = int(getattr(self, "preprocess_threads", 3))
+        if threads <= 1 or len(indices) <= 1:
+            return [self[index] for index in indices]
+        starts = []
+        for index in indices:
+            remaining = self.samples[index]["num_samples"] - self.segment_samples
+            starts.append(int(np.random.randint(0, remaining+1)) if self.random_crop else remaining//2)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(threads, len(indices))) as pool:
+            return list(pool.map(self._read_item, indices, starts))
 
 
 def create_iq_train_val_loaders(config, logger=None):
