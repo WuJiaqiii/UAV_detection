@@ -3,7 +3,7 @@
 # No external test data are read during this command.
 experiment:
   protocol: all_known
-  inputs: [/data/uav/dataset]
+  inputs: [/media/kaneki/05E4235537EC7AC2/dataset_wjq/train_dataset]
   input_type: iq_dat
   recursive: true
   exclude_classes: []
@@ -14,7 +14,7 @@ experiment:
   test_ratio: 0.0  # Remaining 65% goes to training.
   # recording_ids_json: /data/uav/original_recording_ids.json
 train:
-  yolo_weights: /models/best.pt
+  yolo_weights: /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code/yolov5/runs/train/exp10/weights/best.pt
   iq_sample_rate: 100000000
   iq_byte_order: "<"
   backbone: resnet18

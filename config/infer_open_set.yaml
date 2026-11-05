@@ -2,8 +2,8 @@
 # A completed experiment also exports an inference.yaml with its exact options.
 evaluation:
   novelty_policy: calibrated_track
-  checkpoint_path: /models/known_best.pth
-  yolo_weights: /models/detector.pt
+  checkpoint_path: /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code/experiment/all_known_training_20261105_171845/training/models/best.pth
+  yolo_weights: /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code/yolov5/runs/train/exp10/weights/best.pt
   signal_mode: multi
   recursive: true
   iq_sample_rate: 100000000
@@ -14,7 +14,7 @@ infer:
   unknown_input_mode: multi  # Use single only when each original recording has one device/class.
   unknown_cluster_policy: auto
   inputs: [/data/uav/unlabeled_test]
-  open_set_profile: /models/known_profile.npz
+  open_set_profile: /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code/experiment/all_known_training_20261105_171845/open_set/known_profile.npz
   unknown_cluster_backend: hdbscan
   unknown_min_cluster_size: 5
   unknown_min_samples: 3
