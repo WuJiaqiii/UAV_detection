@@ -13,18 +13,14 @@
 
 ## 安装
 
-使用 Python 3.11，先安装适合机器的 PyTorch 2.6.0 / torchvision 0.21.0，然后：
+使用 Python 3.11 PyTorch 2.6.0 / torchvision 0.21.0
 
 ```bash
 git submodule update --init --recursive
 python -m pip install -r requirements.txt
 ```
 
-检测仍需要本地 `yolov5/` 子模块和已有 `.pt` 权重。核心仓库不再包含背景/合成数据、标签 remap、标注导出或 YOLO 训练工具；不需要 TensorFlow、TensorRT 等模型导出运行时。
-
-## 统一入口
-
-根目录只保留一个 Bash 包装，所有任务也可以直接使用 `python main.py TASK`：
+## 代码入口
 
 ```bash
 bash run.sh --help
