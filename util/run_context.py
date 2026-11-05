@@ -27,6 +27,8 @@ def run_type(task, args):
             return "incremental_train"
         return "base_train" if mode == "base" else "train"
     if task == "experiment":
+        if getattr(args, "protocol", "open_set") == "all_known":
+            return "all_known_split" if getattr(args, "split_only", False) else "all_known_training"
         return "open_set_split" if getattr(args, "split_only", False) else "open_set_experiment"
     if task == "predict":
         labeled = any(getattr(args, key, None) for key in ("labels_json", "label_from_parent", "label_from_filename"))

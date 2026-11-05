@@ -38,6 +38,8 @@ class RunContextTests(unittest.TestCase):
             ("predict", {"label_from_parent": True}, "validation"),
             ("predict", {"open_set_profile": "profile.npz"}, "open_set_inference"),
             ("experiment", {}, "open_set_experiment"), ("experiment", {"split_only": True}, "open_set_split"),
+            ("experiment", {"protocol": "all_known"}, "all_known_training"),
+            ("experiment", {"protocol": "all_known", "split_only": True}, "all_known_split"),
             ("cluster", {}, "unknown_clustering"), ("infer", {}, "open_set_inference")):
             with self.subTest(task=task, fields=fields):
                 self.assertEqual(run_type(task, SimpleNamespace(**fields)), expected)

@@ -130,10 +130,9 @@ class ExperimentTests(unittest.TestCase):
         for fields in ({"known_classes": ["missing"]}, {"known_classes": ["A"], "unknown_classes": ["A", "B"]},
                        {"val_ratio": .5, "calibration_ratio": .3, "test_ratio": .3}):
             path, _ = self.configuration(**fields)
-            args = self.args(path)
             with self.subTest(fields=fields), self.assertRaises(ValueError):
-                run_experiment(args, path)
-            self.assertFalse(args.output_dir.exists())
+                run_experiment(self.args(path), path)
+            self.assertFalse((self.root / "experiment").exists())
         path, doc = self.configuration()
         doc["profile"]["min_calibration_per_class"] = 20
         path.write_text(yaml.safe_dump(doc))
@@ -254,6 +253,138 @@ class ExperimentTests(unittest.TestCase):
                 main([*base, "--open_set_profile", "profile.npz", option])
 
     def test_new_examples_validate_without_reading_datasets(self):
-        for task, name in (("experiment", "experiment_iq.yaml"), ("infer", "infer_open_set.yaml")):
+        for task, name in (("experiment", "experiment_iq.yaml"), ("experiment", "experiment_all_known_iq.yaml"),
+                           ("infer", "infer_open_set.yaml")):
             with self.subTest(task=task), contextlib.redirect_stdout(io.StringIO()):
                 main([task, "--config", str(ROOT / "config" / name), "--dry_run"])
+
+    def test_all_known_automatically_discovers_every_class_and_has_no_test_partition(self):
+        for name, base in (("A", 10), ("B", 100)):
+            for i in range(40):
+                self.png(name, i, base+i)
+        # A same-recording export with different pixels must follow its source.
+        self.png("A", 0, 70, figure=2)
+        path, _ = self.configuration(protocol="all_known", known_classes=None, split_only=True)
+        args=self.args(path)
+        self.assertEqual(args.test_ratio, 0.)
+        train,profile=stage_arguments(args,path)
+        first=split_dataset(args,train)
+        self.assertEqual(first,split_dataset(args,train))
+        self.assertEqual((first["known_classes"],first["unknown_classes"]),(["A","B"],[]))
+        for name in ("A","B"):
+            self.assertEqual([first["summary"][name][s]["recordings"] for s in
+                              ("train","val","calibration","test_known","test_unknown")], [26,6,8,0,0])
+        grouped={}
+        for row in first["records"]:
+            grouped.setdefault(row["recording_id"],set()).add(row["split"])
+        self.assertTrue(all(len(s)==1 for s in grouped.values()))
+        self.assertFalse(hasattr(profile,"test_inputs"))
+        result=run_experiment(args,path)
+        self.assertFalse(result["test_enabled"])
+        self.assertTrue((args.output_dir/"effective_profile.json").is_file())
+        self.assertFalse((args.output_dir/"test_labels.json").exists())
+        self.assertTrue(all(Path(r["path"]).is_file() for r in first["records"]))
+
+    def test_all_known_exclusions_are_not_simulated_unknown_classes(self):
+        self.png_data()
+        path,_=self.configuration(protocol="all_known",known_classes=None,exclude_classes=["B"])
+        args=self.args(path);train,_=stage_arguments(args,path)
+        manifest=split_dataset(args,train)
+        self.assertEqual(manifest["classes"],{"A":0})
+        self.assertFalse(manifest["unknown_classes"])
+        self.assertTrue(all(r["split"]=="excluded" for r in manifest["records"] if r["class_name"]=="B"))
+
+    def test_all_known_selectors_and_invalid_ratios_fail_before_data_access(self):
+        for fields in ({"known_classes":["A"]}, {"known_classes":None,"unknown_classes":["B"]},
+                       {"known_classes":None,"val_ratio":0.}, {"known_classes":None,"test_ratio":-.1},
+                       {"known_classes":None,"val_ratio":.8,"calibration_ratio":.3}):
+            path,_=self.configuration(protocol="all_known",**fields)
+            with self.subTest(fields=fields),patch("util.eval_common.collect_inputs") as collect:
+                with self.assertRaises(ValueError):self.args(path)
+                collect.assert_not_called()
+
+    def test_all_known_optional_known_test_and_small_calibration_support(self):
+        self.png_data()
+        path,_=self.configuration(protocol="all_known",known_classes=None,test_ratio=.15)
+        args=self.args(path);train,profile=stage_arguments(args,path)
+        manifest=split_dataset(args,train)
+        self.assertTrue(hasattr(profile,"test_inputs"))
+        self.assertTrue(all(c["test_known"]["recordings"]==1 for c in manifest["summary"].values()))
+        path,doc=self.configuration(protocol="all_known",known_classes=None)
+        doc["profile"]["min_calibration_per_class"]=5
+        path.write_text(yaml.safe_dump(doc))
+        with self.assertRaisesRegex(ValueError,"Insufficient independent"):
+            run_experiment(self.args(path),path)
+        self.assertFalse((self.root/"experiment/training").exists())
+
+    def test_all_known_iq_folder_labels_are_dynamic_and_duplicate_captures_stay_together(self):
+        for name in ("设备甲","设备乙"):
+            for i in range(4):
+                p=self.root/"data"/name/f"{i}.dat";p.parent.mkdir(parents=True,exist_ok=True)
+                with p.open("wb") as stream:
+                    stream.write(f"{name}:{i}".encode());stream.truncate(20_000_000)
+        original=self.root/"data/设备甲/0.dat";alias=original.with_name("alias.dat")
+        alias.write_bytes(original.read_bytes())
+        path,_=self.configuration("iq_dat",protocol="all_known",known_classes=None,split_only=True)
+        args=self.args(path);train,_=stage_arguments(args,path)
+        manifest=split_dataset(args,train)
+        self.assertEqual(manifest["known_classes"],["设备乙","设备甲"])
+        duplicate=[r for r in manifest["records"] if r["path"] in {str(original),str(alias)}]
+        self.assertEqual(len({(r["recording_id"],r["split"]) for r in duplicate}),1)
+
+    def test_all_known_complete_pipeline_exports_profile_and_external_unlabeled_inference(self):
+        self.png_data()
+        path,_=self.configuration(protocol="all_known",known_classes=None)
+        observed={}
+        def train_runner(train):
+            observed["train"]=train
+            classes={name:i for i,name in enumerate(train.class_names)}
+            self.assertEqual(classes,{"A":0,"B":1})
+            destination=Path(train._run_dir)/"models/best.pth";destination.parent.mkdir(parents=True)
+            torch.save({"model_state_dict":{},"config":{"classes":classes,"mask_img_size":32}},destination)
+        class Predictor:
+            def predict(self,spectrum,domain):
+                value=spectrum[0,0]
+                feature=[0.,0.,1.] if value>=240 else [0.,1.,0.] if value>=180 else [1.,0.,0.]
+                category=1 if 180<=value<240 else 0
+                return {"status":"ok","detected_boxes":2,"groups":[{"group_id":0,"status":"ok",
+                    "class_name":"B" if category else "A","class_id":category,"confidence":1.,
+                    "probabilities":[0.,1.] if category else [1.,0.],
+                    "selected_boxes":[[10,100,50,110],[100,100,140,110]],"selected_group_score":1.,"embedding":feature}]}
+        from scripts.evaluate_single_signal import run as actual_run
+        with patch("util.train_entry.main",side_effect=train_runner), \
+             patch("scripts.evaluate_single_signal.run",side_effect=lambda a,predictor=None:actual_run(a,Predictor())), \
+             contextlib.redirect_stdout(io.StringIO()):
+            result=main(["experiment","--config",str(path)])
+        output=Path(result["run_dir"])
+        self.assertTrue(output.name.startswith("all_known_training_"))
+        self.assertEqual((result["protocol"],result["status"],result["test_enabled"]),("all_known","complete",False))
+        self.assertEqual(result["metrics"]["known_class_count"],2)
+        self.assertFalse((output/"test").exists())
+        self.assertFalse((output/"test_labels.json").exists())
+        self.assertTrue(Path(result["profile_path"]).is_file())
+        self.assertTrue((output/"open_set/reference/features.npz").is_file())
+        self.assertTrue((output/"open_set/calibration/features.npz").is_file())
+        config=yaml.safe_load((output/"inference.yaml").read_text())
+        self.assertEqual(config["infer"]["unknown_input_mode"],"multi")
+        self.assertNotIn("labels_json",config["evaluation"])
+        self.assertNotIn("recording_ids_json",config["evaluation"])
+        external=self.root/"external";external.mkdir()
+        for i,value in enumerate([44,240,241,242,243,244]):
+            cv2.imencode(".png",np.full((512,750),value,dtype=np.uint8))[1].tofile(external/f"query{i}.png")
+        with patch("scripts.evaluate_single_signal.run",side_effect=lambda a:actual_run(a,Predictor())), \
+             contextlib.redirect_stdout(io.StringIO()):
+            inferred=main(["infer","--config",str(output/"inference.yaml"),"--inputs",str(external),"--no-save_visuals"])
+        self.assertEqual(inferred["metrics"]["labeled_files"],0)
+        self.assertEqual(inferred["metrics"]["error_files"],0)
+        self.assertEqual(inferred["metrics"]["estimated_unknown_class_count"],1)
+        self.assertIsNone(inferred["metrics"]["open_set_evaluation"]["all_accuracy"])
+
+    def test_experiment_detector_override_is_shared_by_profile_and_deployment(self):
+        path,doc=self.configuration(protocol="all_known",known_classes=None)
+        doc["train"]["yolo_weights"]="/missing/template.pt";path.write_text(yaml.safe_dump(doc))
+        with contextlib.redirect_stdout(io.StringIO()):
+            args=main(["experiment","--config",str(path),"--yolo_weights",str(self.weights),"--dry_run"])
+        train,profile=stage_arguments(args,path)
+        self.assertEqual(Path(train.yolo_weights),self.weights)
+        self.assertEqual(profile.yolo_weights,self.weights)

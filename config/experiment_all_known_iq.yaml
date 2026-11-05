@@ -1,0 +1,56 @@
+# One labeled DAT root. Every non-excluded folder is a known class.
+# Automatically split records, train, calibrate, and export inference.yaml.
+# No external test data are read during this command.
+experiment:
+  protocol: all_known
+  inputs: [/data/uav/dataset]
+  input_type: iq_dat
+  recursive: true
+  exclude_classes: []
+  training_variant: primary_ce
+  seed: 42
+  val_ratio: 0.15
+  calibration_ratio: 0.20
+  test_ratio: 0.0  # Remaining 65% goes to training.
+  # recording_ids_json: /data/uav/original_recording_ids.json
+train:
+  yolo_weights: /models/best.pt
+  iq_sample_rate: 100000000
+  iq_byte_order: "<"
+  backbone: resnet18
+  mask_pretrained: true
+  mask_img_size: 224
+  epochs: 100
+  batch_size: 32
+  num_workers: 1
+  lr: 0.0001
+  grouping_mode: hopping
+  hop_association: shape
+  hop_shape_log_tol: 0.50
+  train_group_policy: primary
+  supcon_weight: 0.0
+  bbox_cache_mode: "off"
+evaluation:
+  signal_mode: multi
+  unknown_input_mode: single
+  novelty_policy: calibrated_track
+  iq_stride_ms: 50.0
+  max_slices: 0
+  min_votes: 1
+profile:
+  profile_score_method: maha_pp_shrink
+  profile_covariance_shrinkage: 0.1
+  profile_calibration_unit: primary
+  known_false_reject_rate: 0.01
+  min_calibration_per_class: 5
+  max_reference_per_class: 2000
+discovery:
+  unknown_cluster_backend: hdbscan
+  unknown_cluster_policy: auto
+  unknown_min_cluster_size: 5
+  unknown_min_samples: 3
+  unknown_min_recordings: 2
+  unknown_allow_single_cluster: true
+  save_visuals: true
+  save_feature_plots: true
+  feature_plot_method: pca
