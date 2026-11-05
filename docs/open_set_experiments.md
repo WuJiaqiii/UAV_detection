@@ -4,6 +4,8 @@
 
 当前主线为主分组 CE、记录平衡 Maha++ 适配、主轨迹校准及 HDBSCAN。参数和迁移说明见 [主线运行说明](mainline_open_set.md)。
 
+新增 `protocol: all_known`：一个带类别目录的根目录自动划分训练/验证/独立校准，所有未排除类别均为已知类；默认不留内部测试集，完成后用导出的配置推理外部无标签数据。命令和配置见 [全部已知类自动训练](all_known_training.md)。原有内部未知类对照继续使用默认open_set协议。
+
 temp 分支已补回与 main 相同的 YOLOv5 子模块指针（17cfa633999107857a337d51c9c8271fef97edc7）。更新代码后先运行 `git submodule update --init --recursive`，再准备本地检测权重。
 
 ## 训练、校准与带标签评估

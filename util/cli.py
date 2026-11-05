@@ -176,6 +176,7 @@ def run_profile(args, discover=False, predictor=None):
         test_output = args.test_output_dir.expanduser().resolve()
         if test_output.exists() and (not test_output.is_dir() or any(test_output.iterdir())):
             raise ValueError("Test output_dir must be new or empty")
+    extraction_errors = {key: 0 for key in ("error_files", "files_with_slice_errors", "visualization_errors", "feature_plot_errors")}
     for split in ("reference", "calibration"):
         extraction = copy.deepcopy(args)
         extraction.inputs = getattr(args, split+"_inputs")
@@ -185,7 +186,9 @@ def run_profile(args, discover=False, predictor=None):
         extraction.label_from_filename = args.label_mode == "filename"
         extraction.label_from_parent = args.label_mode == "parent"
         extraction.labels_json = getattr(args, split+"_labels_json") if args.label_mode == "json" else None
-        run(extraction, predictor)
+        extracted = run(extraction, predictor)
+        for key in extraction_errors:
+            extraction_errors[key] += int(extracted.get("metrics", {}).get(key, 0) or 0)
     target = output/"known_profile.npz"
     metadata = build_profile(output/"reference/features.npz", output/"calibration/features.npz", target,
         args.knn_k, args.known_false_reject_rate, args.min_calibration_per_class,
@@ -194,7 +197,8 @@ def run_profile(args, discover=False, predictor=None):
         covariance_shrinkage=args.profile_covariance_shrinkage,calibration_unit=args.profile_calibration_unit)
     if not discover:
         return {"profile":str(target),"threshold":metadata["threshold"],"score_method":metadata["score_method"],
-                "calibration_unit":metadata["calibration_unit"],"known_label_policy":metadata.get("known_label_policy","legacy")}
+                "calibration_unit":metadata["calibration_unit"],"known_label_policy":metadata.get("known_label_policy","legacy"),
+                "extraction_errors":extraction_errors}
     prediction = copy.deepcopy(args)
     prediction.inputs = args.test_inputs
     prediction.output_dir = getattr(args, "test_output_dir", None) or output/"discovery"

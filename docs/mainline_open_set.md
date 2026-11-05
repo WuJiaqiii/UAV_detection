@@ -19,6 +19,8 @@
 
 ## 从头运行 DAT 实验
 
+如果现有根目录中的所有类别都要作为已知类，请使用 [all_known自动划分流程](all_known_training.md) 和config/experiment_all_known_iq.yaml；它自动划分训练/验证/校准并导出外部推理配置。下文experiment_iq.yaml用于内部留出未知类别的对照。
+
 先修改 `config/experiment_iq.yaml`：
 
 - `experiment.inputs`：包含实际类别子目录的 DAT 根目录。

@@ -4,6 +4,8 @@
 
 未知发现支持 `--unknown_input_mode single|multi`：单设备记录以主轨迹拟合，多信号保留全部轨迹。默认 `unknown_cluster_policy=auto` 按独立记录计算HDBSCAN密度，并依据无标签几何证据检查单个大簇。已有实验可直接离线重聚类和重评分，详见 [单信号与多信号未知发现](docs/unknown_discovery_modes.md)。
 
+只有一个完整已知数据集时，使用 `bash run.sh experiment --config config/experiment_all_known_iq.yaml --inputs /path/to/dataset --yolo_weights /path/to/best.pt`，自动发现全部类别并划分训练/验证/校准，生成最佳模型、profile与inference.yaml，再对外部无标签数据执行infer。无需预先整理三个数据目录，详见 [全已知类自动划分训练](docs/all_known_training.md)。
+
 开集对照实验可用 `bash run.sh ablate --config config/ablation.yaml --source_experiment /path/to/completed_experiment`。
 统一比较分类头覆盖、三种校准单位、九种拒识分数和固定候选池聚类；组件训练提供三组独立配方。用法、限制与实测结果见 [开集对照实验](docs/open_set_ablation.md)。
 
