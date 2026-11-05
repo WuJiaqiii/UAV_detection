@@ -55,6 +55,8 @@ def stage_arguments(args, config_path):
         raise ValueError("experiment requires epochs >= 1, single-signal training and sample_ratio=1")
 
     evaluation, _ = load_settings(config_path, "discover")
+    # This benchmark has single-device labeled recordings; deployment is explicit.
+    evaluation.setdefault("unknown_input_mode", "single")
     managed_eval = {"inputs", "checkpoint_path", "classes_json", "reference_inputs", "calibration_inputs", "test_inputs",
                     "output_dir", "test_output_dir", "reference_labels_json", "calibration_labels_json", "test_labels_json",
                     "labels_json", "label_mode", "test_label_mode", "label_from_parent", "label_from_filename",
@@ -89,7 +91,8 @@ def stage_arguments(args, config_path):
     from util.unknown_discovery import discovery_kwargs, validate_discovery_options
     options = discovery_kwargs(profile)
     validate_discovery_options(options["backend"], options["min_cluster_size"], options["min_samples"],
-                               options["min_recordings"], options["dcg_options"])
+                               options["min_recordings"], options["dcg_options"],
+                               options["input_mode"], options["cluster_policy"])
     from util.open_set import validate_profile_options
     profile.profile_calibration_unit=validate_profile_options(profile.knn_k,profile.known_false_reject_rate,
         profile.min_calibration_per_class,profile.max_reference_per_class,profile.profile_score_method,
@@ -114,6 +117,7 @@ def _write_stage_config(output, train, profile):
     settings = json.loads(json.dumps(settings, default=str))
     deployment = {"evaluation": settings, "infer": {
         "inputs": ["/path/to/unlabeled_test"],
+        "unknown_input_mode": "multi",  # Deployment retains all signals; single is an explicit assumption.
         "open_set_profile": str(output / "open_set/known_profile.npz")}}
     (output / "inference.yaml").write_text(yaml.safe_dump(deployment, allow_unicode=True, sort_keys=False), encoding="utf-8")
 

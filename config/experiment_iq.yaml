@@ -34,6 +34,7 @@ train:
   bbox_cache_mode: "off"
 evaluation:
   signal_mode: multi
+  unknown_input_mode: single  # One labeled device per recording; keep all tracks in reports.
   novelty_policy: calibrated_track
   iq_stride_ms: 50.0
   max_slices: 0
@@ -50,6 +51,7 @@ profile:
   min_calibration_per_class: 5
   max_reference_per_class: 2000
 discovery:
+  unknown_cluster_policy: auto
   save_feature_plots: true
   feature_plot_method: pca  # pca, tsne, both
   feature_plot_max_points: 3000

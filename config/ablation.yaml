@@ -1,5 +1,7 @@
 # Frozen R0-R4 comparison on ONE completed experiment. No encoder retraining.
 ablate:
+  unknown_input_mode: multi
+  unknown_cluster_policy: legacy  # Preserve the published historical clustering comparison.
   source_experiment: /data/uav/experiment/open_set_experiment_YYYYMMDD_HHMMSS
   replay_masks: true  # trusted saved best.pth + saved selected_boxes; no original DAT/YOLO required
   # checkpoint_path: /models/best.pth  # exact original checkpoint hash required

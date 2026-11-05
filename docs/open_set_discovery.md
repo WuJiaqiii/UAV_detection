@@ -52,6 +52,8 @@ ResNet18/34 使用分类头前 512 维特征，MobileNetV3-small 使用 1024 维
 
 ## 发现后端与重新聚类
 
+默认auto采用独立记录HDBSCAN密度及单根几何检查。`unknown_input_mode=single`按记录主轨迹拟合，`multi`保留全部信号。`cluster --results_json`现可提供主轨迹上下文并在聚类后重新评分；详见 [模式、算法与命令](unknown_discovery_modes.md)。
+
 HDBSCAN 使用 sklearn.cluster.HDBSCAN。DCG-Louvain 使用归一化特征的稀疏余弦近邻图，不做测试时白化，不设总 K，不训练网络；它是 AMR_NCD 图发现思想的适配，不是其整个单阶段训练器。
 
 ```bash
@@ -62,6 +64,8 @@ bash run.sh cluster --config config/cluster.yaml
 
 | 参数 | 默认 | 作用 |
 | --- | --- | --- |
+| unknown_input_mode | multi | single为每记录一个设备/类别；experiment默认single |
+| unknown_cluster_policy | auto | 独立记录密度与单根检查；legacy复现历史策略 |
 | unknown_min_samples | 3 | HDBSCAN 密度尺度，增大通常更保守 |
 | unknown_allow_single_cluster | true | HDBSCAN 允许单簇 |
 | dcg_topk | 15 | 图近邻数量 |

@@ -118,7 +118,8 @@ def run(args, predictor=None):
             from util.unknown_discovery import validate_discovery_options, discovery_kwargs
             cluster_options = discovery_kwargs(args)
             validate_discovery_options(cluster_options["backend"], cluster_options["min_cluster_size"],
-                cluster_options["min_samples"], cluster_options["min_recordings"], cluster_options["dcg_options"])
+                cluster_options["min_samples"], cluster_options["min_recordings"], cluster_options["dcg_options"],
+                cluster_options["input_mode"], cluster_options["cluster_policy"])
         if args.recording_ids_json:
             recording_ids = read_path_mapping(args.recording_ids_json)
             if any(not isinstance(value, str) or not value.strip() for value in recording_ids.values()):
@@ -253,30 +254,36 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
     if profile:
         from util.open_set import FEATURE_VERSION, refresh_open_set_results, file_sha256, recording_identity, save_npz
         from util.unknown_discovery import discover_unknown, discovery_kwargs, save_unknown_prototypes
-        identities = {}
+        from util.discovery_context import annotate_discovery_candidates, attach_recording_predictions, candidate_record
+        from util.class_evidence import summarize_class_evidence
+        summarize_class_evidence(results, rows_by_file)
+        identities = {result["path"]: (recording_identity(result["path"], file_sha256(result["path"]), recording_ids)
+                      if result["signals"] else (recording_ids or {}).get(result["path"], result["path"]))
+                      for result in results}
         for candidate in candidates:
             path = candidate["path"]
-            if path not in identities:
-                identities[path] = recording_identity(path, file_sha256(path), recording_ids)
             candidate["recording_id"] = identities[path]
+        annotate_discovery_candidates(candidates, results, identities)
         discovery = discover_unknown(candidates, **discovery_kwargs(args))
+        attach_recording_predictions(results, identities, discovery["input_mode"])
         save_unknown_prototypes(output/"unknown_prototypes.npz", discovery, signature, profile.reference.shape[1])
         discovery["prototype_archive"] = "unknown_prototypes.npz"
         import numpy as np
-        positions = ["start_ms", "end_ms", "known_candidate_class", "ood_score", "ood_threshold",
-            "frequency_center_offset_mhz", "frequency_low_offset_mhz", "frequency_high_offset_mhz",
-            "frequency_bands_offset_mhz", "rf_center_mhz", "frequency_center_absolute_mhz",
-            "frequency_low_absolute_mhz", "frequency_high_absolute_mhz", "frequency_bands_absolute_mhz"]
-        candidate_records = [{"path": candidate["path"], "recording_id": candidate["recording_id"],
-                              "track_id": candidate["track"]["track_id"],
-                              "unknown_cluster_id": candidate["track"]["unknown_cluster_id"],
-                              **{key: candidate["track"].get(key) for key in positions}} for candidate in candidates]
+        candidate_records = [candidate_record(candidate) for candidate in candidates]
         candidate_features = (np.stack([candidate["feature"] for candidate in candidates]) if candidates
                               else np.empty((0, profile.reference.shape[1]), dtype=np.float32))
         save_npz(output/"unknown_features.npz", {"kind": "unknown_candidates", "schema_version": 1,
-                 "feature_version": FEATURE_VERSION, "signature": signature, "records": candidate_records},
+                 "feature_version": FEATURE_VERSION, "signature": signature, "records": candidate_records,
+                 "discovery_parameters": discovery["parameters"]},
                  features=candidate_features)
         refresh_open_set_results(results, rows_by_file)
+        for result in results:
+            tracks_by_id = {t["track_id"]: t for t in result["signals"]}
+            for row in rows_by_file[result["path"]]:
+                for group in row.get("groups", []):
+                    track = tracks_by_id[group["track_id"]]
+                    for key in ("discovery_role", "cluster_assignment_source", "discovery_is_primary"):
+                        group[key] = track.get(key)
         # Re-render only previously selected previews with FINAL track decisions.
         # The original slice predictions remain in class_name/known_candidate_class.
         from util.single_signal_eval import load_spectrum
@@ -353,6 +360,8 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
         metrics["file_unknown_presence_metrics"] = {"tp": tp, "fp": fp, "fn": fn,
             "precision": tp/(tp+fp) if tp+fp else None, "recall": tp/(tp+fn) if tp+fn else None}
         metrics.update(known_tracks=sum(row.get("known_track_count", 0) for row in results),
+                       discovery_fit_tracks=discovery["fit_tracks"],
+                       discovery_inherited_tracks=discovery["inherited_secondary_tracks"],
                        files_with_novel_candidates=sum(row.get("novel_track_count", 0) > 0 for row in results),
                        uncertain_tracks=sum(row.get("uncertain_track_count", 0) for row in results),
                        no_signal_files=sum(row["status"] == "no_signal" for row in results),
@@ -372,7 +381,7 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
     if feature_visualization is not None:
         report["feature_visualization"] = feature_visualization
     if profile:
-        report.update(open_set={"profile": str(args.open_set_profile.resolve()),
+        report.update(recording_ids=identities, open_set={"profile": str(args.open_set_profile.resolve()),
                                 "profile_sha256": file_sha256(args.open_set_profile),
                                 "threshold":profile.threshold,"score_method":profile.score_method,
                                 "calibration_unit":profile.metadata.get("calibration_unit"),
@@ -395,7 +404,8 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
         "frequency_center_absolute_mhz", "frequency_low_absolute_mhz", "frequency_high_absolute_mhz", "frequency_bands_absolute_mhz"]
     observations = (group for rows in rows_by_file.values() for row in rows for group in row.get("groups", []))
     open_columns = ["recognition_status", "display_label", "known_candidate_class", "ood_score", "ood_threshold",
-        "track_ood_score", "novel_observation_share", "novelty_policy", "profile_class_name", "unknown_cluster_id", "cluster_status", "cluster_membership", "cluster_similarity"] if profile else []
+        "track_ood_score", "novel_observation_share", "novelty_policy", "profile_class_name", "unknown_cluster_id", "cluster_status", "cluster_membership", "cluster_similarity",
+        "discovery_role", "cluster_assignment_source", "discovery_is_primary"] if profile else []
     write_csv("signals.csv", observations, ["path", "slice_index", "group_id", "observation_id", "track_id", "class_name",
         "confidence", *open_columns, "start_ms", "end_ms", *frequency_columns, "vote_accepted", "vote_reason", "selected_boxes", "probabilities"])
     tracks = ({"path": result["path"], **track} for result in results for track in result["signals"])
@@ -405,7 +415,7 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
     write_csv("class_evidence.csv", evidence, ["path", "display_label", "recognition_status", "class_name", "identity_status", "components"])
     write_csv("results.csv", results, ["path", "input_type", "status", "predicted_classes", "total_slices", "observation_count",
         "track_count", "accepted_track_count", "rf_center_mhz", "error_slices", "visualization_errors", "true_class_names", "class_set_correct",
-        "predicted_unknown_classes", "known_track_count", "novel_track_count", "uncertain_track_count", "no_signal_reason", "error"])
+        "predicted_unknown_classes", "single_signal_prediction", "known_track_count", "novel_track_count", "uncertain_track_count", "no_signal_reason", "error"])
     write_html_report(output, report, rows_by_file)
     return report
 

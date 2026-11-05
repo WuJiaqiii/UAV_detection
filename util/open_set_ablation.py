@@ -110,13 +110,19 @@ def predict_case(test, scores, threshold, args, backend, cluster_cache):
             candidates.append({"path": r["path"], "recording_id": r["recording_id"], "track": track,
                                "feature": feature})
     # A fixed candidate set is the cache key. Clustering never receives truth labels.
-    key = (backend, tuple((c["path"], c["track"]["track_id"]) for c in candidates))
+    from util.discovery_context import annotate_discovery_candidates
+    source_ids = {r["path"]: r["recording_id"] for r in test.records}
+    source_ids.update(test.source_recording_ids or {})
+    annotate_discovery_candidates(candidates, results, source_ids)
+    options = discovery_kwargs(args)
+    key = (backend, tuple((c["path"], c["track"]["track_id"]) for c in candidates),
+           json.dumps(options, sort_keys=True),
+           (args.smooth_k, args.smooth_blend) if backend == "smooth_hdbscan" else None)
     if key in cluster_cache:
         discovery, assignments = copy.deepcopy(cluster_cache[key])
         for c, update in zip(candidates, assignments):
             c["track"].update(update)
     else:
-        options = discovery_kwargs(args)
         options["backend"] = "hdbscan" if backend == "smooth_hdbscan" else backend
         clustering_inputs = smooth_candidates(candidates, args.smooth_k, args.smooth_blend) if backend == "smooth_hdbscan" else candidates
         discovery = discover_unknown(clustering_inputs, **options)
@@ -125,7 +131,8 @@ def predict_case(test, scores, threshold, args, backend, cluster_cache):
             discovery.update(method="one-step record-neighbor smoothing + sklearn.HDBSCAN",
                              smoothing={"k": args.smooth_k, "blend": args.smooth_blend,
                                         "interpretation": "frozen-feature adaptation, not a CMS reproduction"})
-        fields = ("unknown_cluster_id", "cluster_status", "cluster_membership", "cluster_similarity", "display_label")
+        fields = ("unknown_cluster_id", "cluster_status", "cluster_membership", "cluster_similarity", "display_label",
+                  "discovery_role", "cluster_assignment_source")
         assignments = [{k: c["track"].get(k) for k in fields} for c in candidates]
         cluster_cache[key] = copy.deepcopy((discovery, assignments))
     return results, discovery

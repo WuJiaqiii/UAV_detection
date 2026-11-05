@@ -11,7 +11,9 @@
 | 校准 | 独立已知校准集，每条原始记录选一个主轨迹；经验上分位数 `method=higher`，目标误拒率 0.01 |
 | 已知类别 | 保留分类头投票类别；最近统计类别只写入 `profile_class_name` 供诊断 |
 | DAT 多切片 | 每个有效观测 L2 → 轨迹均值 → L2，再判定轨迹是否未知；默认不附加逐切片一致性否决 |
-| 未知发现 | HDBSCAN，min_cluster_size=5、min_samples=3、min_recordings=2、allow_single_cluster=true |
+| 未知发现 | HDBSCAN auto：独立记录密度、单根检查；min_cluster_size=5、min_samples=3、min_recordings=2、allow_single_cluster=true |
+
+通过 `unknown_input_mode: single / multi` 指定原始记录中的设备/类别假设。实验默认single，导出的部署infer默认multi；完整说明、归档重评分及输出含义见 [单信号与多信号未知发现](unknown_discovery_modes.md)。
 
 这是项目的记录平衡、小样本协方差收缩适配。其数学实现由正式 profile 和离线 `ablate` 共用；不是原论文基准的直接复现。原有框分组、轨迹关联和频率计算保持原实现。多信号推理继续输出每条轨迹的类别、时间、频率和匿名未知簇。
 
@@ -51,7 +53,7 @@ inference.yaml                # 已导出的配套无标签推理参数
 
 ```bash
 bash run.sh infer --config experiment/open_set_experiment_YYYYMMDD_HHMMSS/inference.yaml \
-  --inputs /path/to/unlabeled_test
+  --inputs /path/to/unlabeled_test --unknown_input_mode multi
 ```
 
 输入可以是目录、多个 MAT/PNG/DAT 文件或通配符。无标签 infer 不从父目录推断真实类别。分数方法、类别空间和阈值来自 profile，不需要再次传入 profile_score_method，不需要 `ablate`。
@@ -100,4 +102,4 @@ profile:
 
 `global_knn` 对应 track 校准；`ablate` 继续支持九种分数和各种校准/聚类对照。修改标准配置中的 supcon_weight 时，若 experiment.training_variant 仍为 primary_ce，该配方会强制使用 primary CE；自定义训练设置需选择 `training_variant: configured`，组件对照则用 all_ce / all_supcon。
 
-HDBSCAN 保留允许单簇：实际未知可能只有一类。关闭单簇的历史诊断只缓解了某些表示下的整体合并，不能保证真实类别数。历史对照见 [组件训练结果](component_training_results_20261103.md)。当前实验配置中未知测试比例仍由类别和文件划分决定，不等同于实际 10% 未知应用场景。
+HDBSCAN auto保留允许单簇，并通过独立记录密度与支持/分离度检查缓解根簇合并；不强制多个类别。legacy策略保留原始行为。历史对照见 [组件训练结果](component_training_results_20261103.md)，其数值仍对应旧策略。当前实验配置中未知测试比例由类别和文件划分决定，不等同于实际10%未知应用场景。
