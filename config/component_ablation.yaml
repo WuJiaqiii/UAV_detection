@@ -28,6 +28,7 @@ train:
   bbox_cache_mode: "off"
 evaluation:
   signal_mode: multi
+  unknown_input_mode: single
   novelty_policy: calibrated_track
   iq_stride_ms: 50.0
   max_slices: 0
@@ -40,6 +41,7 @@ profile:
   known_false_reject_rate: 0.01
   min_calibration_per_class: 5
 discovery:
+  unknown_cluster_policy: auto
   unknown_cluster_backend: hdbscan
   unknown_min_cluster_size: 5
   unknown_min_samples: 3

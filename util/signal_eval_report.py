@@ -137,6 +137,9 @@ def write_html_report(output_dir, report, rows_by_file):
         f'{report["metrics"]["total_accepted_tracks"]} accepted tracks</p>']
     if report.get("discovery"):
         discovery = report["discovery"]
+        mode = discovery.get("input_mode", "multi")
+        parts.append('<p>Input assumption: <b>'+('one signal/device class per recording' if mode == 'single' else
+                     'multiple signal tracks per recording')+'</b>. All track positions remain available.</p>')
         parts += [f'<h2>Unknown discovery — {escape(discovery["method"])}</h2><p>Estimated anonymous classes: <b>{discovery["estimated_unknown_class_count"]}</b> · '
                   f'{discovery["unknown_candidate_tracks"]} candidate tracks · {discovery["unassigned_unknown_tracks"]} unassigned</p>',
                   '<p class="muted">These are batch-local feature clusters. No unknown percentage or class count is forced. '
@@ -163,6 +166,11 @@ def write_html_report(output_dir, report, rows_by_file):
         if report.get("discovery"):
             parts.append(f'<p>Unknown classes: {escape(", ".join(result.get("predicted_unknown_classes", [])) or "none assigned")} · '
                          f'{result.get("novel_track_count", 0)} novel candidates · {result.get("uncertain_track_count", 0)} uncertain tracks</p>')
+        if result.get("single_signal_prediction"):
+            decision = result["single_signal_prediction"]
+            parts.append('<p>Single-signal recording prediction: <b>'+escape(decision["display_label"])+
+                         '</b> · '+escape(decision["recognition_status"])+
+                         ' (primary track; component positions retained below)</p>')
         if result.get("error"):
             parts.append(f'<p>{escape(result["error"])}</p>')
         if result.get("class_evidence"):

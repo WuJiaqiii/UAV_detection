@@ -1,8 +1,12 @@
 cluster:
+  unknown_input_mode: multi  # single requires source results or archived primary annotations.
+  unknown_cluster_policy: auto
   feature_plot_method: pca  # pca / tsne / both; does not change clustering
-  # results_json: /data/uav/experiment/test/results.json  # Optional file-truth colors
+  # results_json: /data/uav/experiment/test/results.json  # Primary context + post-hoc metrics + colors
   features: /data/uav/unknown_features.npz  # Candidate archive from an earlier inference/discovery run
-  unknown_cluster_backend: dcg
+  unknown_cluster_backend: hdbscan
+  unknown_min_samples: 3
+  unknown_allow_single_cluster: true
   unknown_min_cluster_size: 5
   unknown_min_recordings: 2
   dcg_topk: 15

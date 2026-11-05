@@ -28,6 +28,8 @@ profile:
   max_reference_per_class: 2000
   ignore_classes: []     # Use [Background] only when it exists in the model head
 discovery:
+  unknown_input_mode: multi
+  unknown_cluster_policy: auto
   test_inputs: [/data/uav/fold1/dev_mixed]
   unknown_cluster_backend: hdbscan
   unknown_min_cluster_size: 5
@@ -38,6 +40,8 @@ discovery:
   # test_labels_json: /data/uav/fold1/test_labels.json
   # test_label_mode: filename
 predict:
+  unknown_input_mode: multi
+  unknown_cluster_policy: auto
   inputs: [/data/uav/fold1/test_mixed]
   open_set_profile: /models/known_profile.npz  # Copy the profile path printed by the profile task
   unknown_cluster_backend: hdbscan

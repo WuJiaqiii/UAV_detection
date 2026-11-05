@@ -232,6 +232,8 @@ class ExperimentTests(unittest.TestCase):
         self.assertTrue(Path(report["profile_path"]).is_file())
         config = args.output_dir / "inference.yaml"
         contents = yaml.safe_load(config.read_text())
+        self.assertEqual(contents["infer"]["unknown_input_mode"], "multi")
+        self.assertEqual(contents["evaluation"]["unknown_input_mode"], "single")
         self.assertNotIn("labels_json", contents["evaluation"])
         self.assertNotIn("class_names", contents["evaluation"])
         # Use the exported config on the same files without exposing their labels.

@@ -121,6 +121,7 @@ class MainlineMahalanobisTests(unittest.TestCase):
         self.assertEqual((profile.profile_score_method,profile.profile_calibration_unit,profile.profile_covariance_shrinkage),
                          ("maha_pp_shrink","primary",.1))
         self.assertEqual(profile.known_false_reject_rate,.01)
+        self.assertEqual((profile.unknown_input_mode,profile.unknown_cluster_policy),("single","auto"))
         self.assertEqual((profile.unknown_cluster_backend,profile.unknown_min_cluster_size,profile.unknown_min_samples,
                           profile.unknown_min_recordings,profile.unknown_allow_single_cluster),("hdbscan",5,3,2,True))
 
