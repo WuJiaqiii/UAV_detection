@@ -15,6 +15,11 @@ class GroupPredictor:
         self.config, self.device = config, device
         self.batch_size, self.return_features = batch_size, return_features
         self.frontend = FrontendConfig.from_config(config)
+        self.source_type=None
+
+    def set_source(self,path):
+        from pathlib import Path
+        self.source_type=Path(path).suffix.lower()
 
     @torch.inference_mode()
     def detect_groups(self, spectrum, domain):
@@ -23,7 +28,15 @@ class GroupPredictor:
         result = {"status": "no_detection", "detected_boxes": len(boxes), "group_count": 0}
         if not len(boxes):
             return result, []
-        groups = self.preprocessor.select_signal_groups(boxes, spectrogram=spectrum) or []
+        if getattr(self.config,'event_mode','legacy')=='physical':
+            from util.event_detection import select_event_groups
+            details=getattr(self.detector,'last_detections',[])
+            scores=[d['confidence'] for d in details] if len(details)==len(boxes) else None
+            groups,decisions=select_event_groups(self.preprocessor,boxes,spectrum,self.config,scores,
+                self.config.iq_sample_rate if self.source_type=='.dat' else None)
+            result['detection_decisions']=decisions
+        else:
+            groups = self.preprocessor.select_signal_groups(boxes, spectrogram=spectrum) or []
         result.update(group_count=len(groups), status="ok" if groups else "no_group")
         return result, groups
 

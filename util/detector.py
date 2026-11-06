@@ -34,6 +34,7 @@ class YoloV5Detector:
         self.model.classes = getattr(config, "yolo_classes", None)
         self.model.max_det = int(config.yolo_max_det)
         self.imgsz = self.frontend.image_size
+        self.last_detections = []
 
     def prepare_rgb(self, spec):
         if torch.is_tensor(spec):
@@ -47,15 +48,21 @@ class YoloV5Detector:
         # resize. Annotation PNGs themselves remain native 512x750.
         result = self.model(prepared.image, size=self.imgsz)
         det = result.xyxy[0]
+        self.last_detections = []
         if det is None or len(det) == 0:
             return []
-        boxes = prepared.to_source(det.detach().cpu().numpy()[:, :4])
-        boxes = boxes[(boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])]
+        native=det.detach().cpu().numpy()
+        boxes = prepared.to_source(native[:, :4])
+        keep=(boxes[:,2]>boxes[:,0]) & (boxes[:,3]>boxes[:,1])
+        boxes=boxes[keep]
+        confidences=native[keep,4]
         # Stabilize exact integer round trips against float32 interpolation error.
         boxes = np.round(boxes, decimals=4)
         boxes[:, :2] = np.floor(boxes[:, :2])
         boxes[:, 2:] = np.ceil(boxes[:, 2:])
-        return boxes.astype(np.int32).tolist()
+        output=boxes.astype(np.int32).tolist()
+        self.last_detections=[{'box':b,'confidence':float(p)} for b,p in zip(output,confidences)]
+        return output
 
     def detect(self, spec):
         return self.detect_rgb(self.prepare_rgb(spec))

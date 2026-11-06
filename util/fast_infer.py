@@ -27,6 +27,9 @@ class _ProgressPredictor:
         finally:
             self.bar.update(1)
 
+    def set_source(self,path):
+        if hasattr(self.predictor,'set_source'):self.predictor.set_source(path)
+
 
 class InferenceProgress(AbstractContextManager):
     """File and slice bars on stderr, with deterministic cleanup on failures."""
@@ -91,18 +94,14 @@ def input_recording_identity(result, recording_ids):
 
 def retain_submission_bursts(result, rows):
     """Keep per-box offsets before releasing slice details; never merge repeated bursts."""
-    tracks = {track["track_id"]: track for track in result["signals"]}
-    for track in tracks.values():
-        track["_submission_bursts"] = []
-    fields = ("frequency_low_offset_mhz", "frequency_high_offset_mhz", "start_ms", "end_ms")
-    for row in rows:
-        for group in row.get("groups", []):
-            tracks[group["track_id"]]["_submission_bursts"].extend(
-                {key: pulse.get(key) for key in fields} for pulse in group.get("pulses", []))
+    from util.burst_normalization import collect_raw_bursts
+    collect_raw_bursts(result,rows)
 
 
 def write_predictions(output, results, input_mode, discovery):
     """One row per file in single mode; one row per frequency track in multi."""
+    from util.burst_normalization import finalize_bursts
+    finalize_bursts(results)
     target = output / "predictions.csv"
     columns = ["path", "label", "status", "error"]
     if input_mode == "multi":
@@ -128,14 +127,16 @@ def write_predictions(output, results, input_mode, discovery):
             else:
                 rows = [{**base, "track_id": track["track_id"], "label": track["display_label"],
                          "status": track["recognition_status"],
-                         "bursts_json": json.dumps(track.get("_submission_bursts", []), separators=(",", ":"), allow_nan=False),
+                         "bursts_json": json.dumps(track.get("submission_bursts", []), separators=(",", ":"), allow_nan=False),
                          **{key: track.get(key) for key in columns if key.startswith("frequency_")}}
-                        for track in result["signals"]]
+                        for track in result["signals"] if track.get('submission_bursts')]
             for row in rows:
                 writer.writerow(row)
                 count += 1
     metrics = {"total_files": len(results), "output_rows": count,
                "error_files": sum(row["status"] == "error" for row in results),
                "files_with_slice_errors": sum(row.get("error_slices", 0) > 0 for row in results),
-               "estimated_unknown_class_count": discovery["estimated_unknown_class_count"]}
+               "estimated_unknown_class_count": discovery["estimated_unknown_class_count"],
+               'discovery_constraint_failures':int(discovery.get('constraint_satisfied') is False),
+               'burst_label_conflicts':sum(r.get('burst_diagnostics',{}).get('label_conflicts',0) for r in results)}
     return {"metrics": metrics, "predictions_csv": str(target), "files": results, "discovery": discovery}

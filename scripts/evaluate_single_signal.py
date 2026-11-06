@@ -26,6 +26,8 @@ def build_parser():
                    help="Unlabeled open-set inference: only predictions.csv and run metadata; no plots or detailed archives")
     p.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True,
                    help="Fast mode: show file/slice progress on stderr; --no-progress disables it")
+    p.add_argument('--save_discovery_cache',action=argparse.BooleanOptionalAction,default=False,
+                   help='Fast mode: retain a small unknown_features.npz for offline discovery')
     p.add_argument("--frontend_config", type=Path, help="Optional explicit frontend manifest, overriding saved rendering settings")
     p.add_argument("--grouping_mode", choices=["frequency", "hopping"], default=None)
     p.add_argument("--hop_association", choices=["shape", "periodic"], default=None)
@@ -50,6 +52,8 @@ def build_parser():
     p.add_argument("--track_freq_tolerance_mhz", type=float, default=3.)
     p.add_argument("--track_min_band_iou", type=float, default=.1)
     p.add_argument("--track_max_gap_ms", type=float, default=150.)
+    p.add_argument('--track_feature_cosine_min',type=float,default=None,
+                   help='Optional appearance gate for same-carrier association; requires open-set features')
     p.add_argument("--save_visuals", action=argparse.BooleanOptionalAction, default=True, help="Multi-mode annotated slice PNGs; HTML timeline is always written")
     p.add_argument("--max_visualizations", type=int, default=24, help="Per file, evenly spaced; 0 saves all slices")
     p.add_argument("--labels_json", type=Path, help="Input-path-to-class-name mapping; multi mode also accepts lists of class names")
@@ -69,6 +73,8 @@ def build_parser():
 
 
 def run(args, predictor=None):
+    from util.competition_protocol import resolve_protocol
+    resolve_protocol(args.competition_profile,args.unknown_input_mode,args.test_item)
     if getattr(args, "fast", False):
         from util.fast_infer import configure_fast_inference
         configure_fast_inference(args)
@@ -86,6 +92,9 @@ def run(args, predictor=None):
     from util.feature_visualization import plot_options
     plot_options(args)
     inputs = collect_inputs(args.inputs, args.recursive)
+    if args.test_item is not None:
+        if any(p.suffix.lower()=='.dat' and not p.stem.startswith(args.test_item+'_') for p in inputs):
+            raise ValueError('One bounded inference run must contain only its declared test_item')
     checkpoint_path = args.checkpoint_path.expanduser().resolve()
     if not checkpoint_path.is_file():
         raise FileNotFoundError(checkpoint_path)
@@ -111,6 +120,8 @@ def run(args, predictor=None):
     cfg = resolve_config(checkpoint, classes, overrides, args.frontend_config, logger)
     options = validate_prediction_options(args, cfg.classes)
     feature_mode = args.export_features or args.open_set_profile is not None
+    if args.track_feature_cosine_min is not None and not feature_mode:
+        raise ValueError('Track feature gate requires export_features or an open_set_profile')
     if feature_mode and args.signal_mode != "multi":
         raise ValueError("Open-set profiles and feature export require --signal_mode multi")
     if args.label_from_filename and args.signal_mode != "multi":
@@ -223,7 +234,8 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
 
     centers = resolve_rf_centers(args.rf_centers_json, args.rf_center_mhz)
     track_options = dict(frequency_tolerance_mhz=args.track_freq_tolerance_mhz,
-                         min_band_iou=args.track_min_band_iou, max_gap_ms=args.track_max_gap_ms)
+                         min_band_iou=args.track_min_band_iou, max_gap_ms=args.track_max_gap_ms,
+                         feature_cosine_min=args.track_feature_cosine_min)
     results, rows_by_file, candidates, plot_items = [], {}, [], []
     fast = getattr(args, "fast", False)
     for path in progress if progress is not None else inputs:
@@ -311,6 +323,14 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
         if fast:
             from util.fast_infer import write_predictions
             refresh_open_set_results(results, rows_by_file)
+            if args.save_discovery_cache:
+                import numpy as np
+                from util.open_set import save_npz
+                records=[candidate_record(c) for c in candidates]
+                features=np.stack([c['feature'] for c in candidates]) if candidates else np.empty((0,profile.reference.shape[1]),dtype=np.float32)
+                save_npz(output/'unknown_features.npz',{'kind':'unknown_candidates','schema_version':1,
+                    'feature_version':FEATURE_VERSION,'signature':signature,'records':records,
+                    'discovery_parameters':discovery['parameters']},features=features)
             return write_predictions(output, results, discovery["input_mode"], discovery)
         save_unknown_prototypes(output/"unknown_prototypes.npz", discovery, signature, profile.reference.shape[1])
         discovery["prototype_archive"] = "unknown_prototypes.npz"
@@ -385,8 +405,19 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
             track.pop("_feature", None)
     from util.class_evidence import summarize_class_evidence
     summarize_class_evidence(results, rows_by_file)
+    from util.burst_normalization import finalize_bursts
+    finalize_bursts(results,rows_by_file)
+    with (output/'bursts.jsonl').open('w',encoding='utf-8') as stream:
+        for result in results:
+            for event in result['bursts']:
+                stream.write(json.dumps({'path':result['path'],**event},ensure_ascii=False,allow_nan=False)+'\n')
     metrics = multi_evaluation_metrics(results, cfg.classes)
+    metrics['burst_label_conflicts']=sum(r['burst_diagnostics']['label_conflicts'] for r in results)
     if profile:
+        metrics['discovery_constraint_failures']=int(discovery.get('constraint_satisfied') is False)
+        # One canonical submission schema in both modes; detailed reports remain.
+        from util.fast_infer import write_predictions
+        write_predictions(output,results,discovery['input_mode'],discovery)
         metrics["feature_plot_errors"] = int(feature_visualization is not None and feature_visualization["status"] == "error")
         from util.open_set_metrics import evaluate_open_set
         evaluation = evaluate_open_set(results, cfg.classes, discovery, recording_ids)
@@ -472,8 +503,8 @@ def main():
     report = run(args)
     print(json.dumps(report["metrics"], ensure_ascii=False, indent=2))
     print("Reports: " + str(args.output_dir.resolve()))
-    return 2 if (report["metrics"]["error_files"] or report["metrics"]["files_with_slice_errors"]
-                 or report["metrics"].get("visualization_errors", 0) or report["metrics"].get("feature_plot_errors", 0)) else 0
+    from util.run_context import metric_error_count
+    return 2 if metric_error_count(report['metrics']) else 0
 
 
 if __name__ == "__main__":

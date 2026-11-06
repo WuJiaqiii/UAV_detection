@@ -1,0 +1,29 @@
+# Rebuild a matching v2 profile before use. Paths belong to that SAME training run.
+evaluation:
+  checkpoint_path: /path/to/v2_training/training/models/best.pth
+  yolo_weights: /path/to/detector.pt
+  signal_mode: multi
+  recursive: true
+  iq_sample_rate: 100000000
+  iq_stride_ms: 50.0
+  max_slices: 0
+  min_votes: 1
+  track_feature_cosine_min: 0.8
+  settings:
+    event_mode: physical
+    valid_band_policy: source
+    singleton_min_confidence: 0.5
+    singleton_min_contrast_z: 1.0
+    event_context_gap_ms: 5.0
+infer:
+  inputs: [/path/to/1-1]
+  open_set_profile: /path/to/v2_training/open_set/known_profile.npz
+  fast: true
+  save_discovery_cache: true
+  unknown_input_mode: single
+  competition_profile: task1_n1
+  test_item: 1-1
+  unknown_cluster_policy: auto
+  unknown_min_cluster_size: 5
+  unknown_min_recordings: 2
+  unknown_min_silhouette: 0.15

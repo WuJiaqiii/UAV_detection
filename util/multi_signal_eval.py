@@ -85,11 +85,14 @@ class FrequencyTracker:
     Tracks are local candidates, not transmitter identities. Disjoint carriers are
     deliberately not joined merely because their predicted classes are the same.
     """
-    def __init__(self, frequency_tolerance_mhz=3., min_band_iou=.1, max_gap_ms=150.):
+    def __init__(self, frequency_tolerance_mhz=3., min_band_iou=.1, max_gap_ms=150.,feature_cosine_min=None):
         if (not math.isfinite(frequency_tolerance_mhz) or frequency_tolerance_mhz <= 0
                 or not 0 <= min_band_iou <= 1 or not math.isfinite(max_gap_ms) or max_gap_ms < 0):
             raise ValueError("Invalid frequency tracking gates")
         self.tolerance, self.min_iou, self.max_gap = frequency_tolerance_mhz, min_band_iou, max_gap_ms
+        if feature_cosine_min is not None and (not math.isfinite(feature_cosine_min) or not -1<=feature_cosine_min<=1):
+            raise ValueError('track_feature_cosine_min must be within [-1,1]')
+        self.feature_cosine_min=feature_cosine_min
         self.tracks = []
 
     def update(self, observations):
@@ -107,6 +110,12 @@ class FrequencyTracker:
             for j, current in enumerate(observations):
                 if previous["slice_index"] >= current["slice_index"]:
                     continue
+                if self.feature_cosine_min is not None:
+                    if 'embedding' not in previous or 'embedding' not in current:
+                        raise ValueError('Track appearance gate requires embeddings')
+                    a,b=np.asarray(previous['embedding']),np.asarray(current['embedding'])
+                    similarity=float(a @ b/(np.linalg.norm(a)*np.linalg.norm(b)))
+                    if not math.isfinite(similarity) or similarity<self.feature_cosine_min:continue
                 distance = abs(previous["frequency_center_offset_mhz"] - current["frequency_center_offset_mhz"])
                 overlap = band_iou(previous["frequency_bands_offset_mhz"], current["frequency_bands_offset_mhz"])
                 gap = max(0., current["start_ms"] - previous["end_ms"])
@@ -155,6 +164,7 @@ def evaluate_multi_file(path, predictor, config, vote_options=None, stride_ms=50
                         max_slices=0, fail_fast=False, rf_center_mhz=None, track_options=None,
                         visualization_dir=None, max_visualizations=24):
     path = Path(path).resolve()
+    if hasattr(predictor,'set_source'):predictor.set_source(path)
     if max_visualizations < 0:
         raise ValueError("max_visualizations must be >= 0")
     if path.suffix.lower() == ".dat":

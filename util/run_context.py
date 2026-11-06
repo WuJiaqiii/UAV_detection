@@ -103,7 +103,7 @@ def check_output_directory(args):
 
 
 def metric_error_count(metrics):
-    return sum(int(metrics.get(key, 0) or 0) for key in ("error_files", "files_with_slice_errors", "visualization_errors", "feature_plot_errors"))
+    return sum(int(metrics.get(key, 0) or 0) for key in ("error_files", "files_with_slice_errors", "visualization_errors", "feature_plot_errors",'discovery_constraint_failures','burst_label_conflicts'))
 
 
 def command_exit_code(result):

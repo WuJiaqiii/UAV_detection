@@ -268,6 +268,9 @@ def main(argv=None):
         parser.parse_args(["--help"])
     settings, path = load_settings(controls.config, task)
     args = parser.parse_args([*settings_tokens(parser, settings), *explicit])
+    if hasattr(args,'competition_profile'):
+        from util.competition_protocol import resolve_protocol
+        resolve_protocol(args.competition_profile,args.unknown_input_mode,args.test_item)
     args._config_path = path
     if getattr(args, "fast", False):
         from util.fast_infer import configure_fast_inference

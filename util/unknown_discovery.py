@@ -8,6 +8,10 @@ from util.open_set import FEATURE_VERSION, normalize_features, save_npz
 
 
 def add_discovery_arguments(parser):
+    parser.add_argument('--competition_profile', choices=['unconstrained','task1_n1','task1_n2','task2'], default='unconstrained')
+    parser.add_argument('--test_item', choices=['1-1','1-2','1-3','1-4','2-1','2-2'])
+    parser.add_argument('--unknown_fixed_k', type=int, help='Optional label-free joint-selection result, within protocol bounds')
+    parser.add_argument('--unknown_min_silhouette', type=float, default=.15)
     parser.add_argument("--unknown_input_mode", choices=["single", "multi"], default="multi",
                         help="single: one primary discovery seed per recording; multi: keep every signal track")
     parser.add_argument("--unknown_cluster_policy", choices=["auto", "legacy"], default="auto",
@@ -28,6 +32,10 @@ def discovery_kwargs(args):
     return {"backend": args.unknown_cluster_backend, "min_cluster_size": args.unknown_min_cluster_size,
             "input_mode": getattr(args, "unknown_input_mode", "multi"),
             "cluster_policy": getattr(args, "unknown_cluster_policy", "auto"),
+            'competition_profile':getattr(args,'competition_profile','unconstrained'),
+            'test_item':getattr(args,'test_item',None),
+            'fixed_k':getattr(args,'unknown_fixed_k',None),
+            'min_silhouette':getattr(args,'unknown_min_silhouette',.15),
             "min_samples": args.unknown_min_samples, "min_recordings": args.unknown_min_recordings,
             "allow_single_cluster": args.unknown_allow_single_cluster,
             "dcg_options": {"topk": args.dcg_topk, "cosine_threshold": args.dcg_cosine_threshold,
@@ -56,7 +64,12 @@ def validate_discovery_options(backend="hdbscan", min_cluster_size=5, min_sample
 
 def discover_unknown(candidates, min_cluster_size=5, min_samples=3, min_recordings=2,
                      allow_single_cluster=True, backend="hdbscan", dcg_options=None,
-                     input_mode="multi", cluster_policy="auto"):
+                     input_mode="multi", cluster_policy="auto", competition_profile='unconstrained',
+                     test_item=None, fixed_k=None, min_silhouette=.15):
+    from util.competition_protocol import resolve_protocol
+    protocol = resolve_protocol(competition_profile,input_mode,test_item)
+    if fixed_k is not None and protocol is None:
+        raise ValueError('unknown_fixed_k requires a bounded competition profile')
     validate_discovery_options(backend, min_cluster_size, min_samples, min_recordings,
                                dcg_options, input_mode, cluster_policy)
     if not isinstance(allow_single_cluster, bool):
@@ -90,7 +103,13 @@ def discover_unknown(candidates, min_cluster_size=5, min_samples=3, min_recordin
                            "recording_primary" if item["track"]["discovery_is_primary"] else "recording_secondary")
     fit_features = features[selected] if len(selected) else None
     fit_ids = [identities[i] for i in selected]
-    if len(selected) and backend == "dcg":
+    if protocol is not None:
+        from util.bounded_discovery import bounded_partition
+        fit = fit_features if fit_features is not None else np.empty((0,features.shape[1] if features is not None else 1))
+        labels, bounded_info = bounded_partition(fit,fit_ids,protocol.minimum,protocol.maximum,
+            min_cluster_size,min_recordings,min_silhouette,fixed_k=fixed_k)
+        diagnostics.update(bounded_info)
+    elif len(selected) and backend == "dcg":
         from util.dcg_discovery import cluster_dcg
         labels, dcg_info = cluster_dcg(fit_features, **(dcg_options or {}))
         diagnostics.update(dcg_info)
@@ -143,25 +162,28 @@ def discover_unknown(candidates, min_cluster_size=5, min_samples=3, min_recordin
     fit_lookup = {int(index): rank for rank, index in enumerate(selected)}
     for index, item in enumerate(candidates):
         item["track"]["cluster_membership"] = (float(membership[fit_lookup[index]])
-            if backend == "hdbscan" and index in fit_lookup else None)
+            if backend == "hdbscan" and protocol is None and index in fit_lookup else None)
         if item["track"]["unknown_cluster_id"] is None:
             item["track"]["cluster_status"] = item["track"].get("cluster_status") or (
                 "secondary_without_clustered_primary" if index not in fit_lookup else "noise_or_insufficient_support")
     clustered = sum(cluster["track_count"] for cluster in clusters)
     parameters = {"min_cluster_size": min_cluster_size, "min_recordings": min_recordings,
-                  "input_mode": input_mode, "cluster_policy": cluster_policy}
+                  "input_mode": input_mode, "cluster_policy": cluster_policy,
+                  'competition_profile':competition_profile,'test_item':test_item,
+                  'fixed_k':fixed_k,'min_silhouette':min_silhouette}
     if backend == "hdbscan":
         parameters.update(min_samples=min_samples, allow_single_cluster=allow_single_cluster)
     else:
         parameters.update(topk=15, cosine_threshold=.85, resolution=1., mutual=True, seed=42)
         parameters.update(dcg_options or {})
-    return {"method": "sklearn.HDBSCAN" if backend == "hdbscan" else "DCG-Louvain", "backend": backend,
+    return {"method": 'bounded-average-cosine' if protocol else "sklearn.HDBSCAN" if backend == "hdbscan" else "DCG-Louvain", "backend": backend,
             "unit": "one primary seed per recording; secondary labels inherited" if input_mode == "single" else "one feature per accepted track",
             "prototype_space": FEATURE_VERSION, "input_mode": input_mode, "cluster_policy": cluster_policy,
             "fit_tracks": len(selected), "clustered_fit_tracks": fit_clustered,
             "inherited_secondary_tracks": sum(c["track"]["cluster_assignment_source"] == "recording_primary" for c in candidates),
             "unknown_candidate_tracks": len(candidates), "estimated_unknown_class_count": len(clusters),
             "clustered_unknown_tracks": clustered, "unassigned_unknown_tracks": len(candidates)-clustered,
+            'constraint_satisfied':diagnostics.get('constraint_satisfied'),
             "parameters": parameters, "diagnostics": diagnostics, "clusters": clusters,
             "interpretation": "Batch-local anonymous feature clusters, not verified physical class identities."}
 

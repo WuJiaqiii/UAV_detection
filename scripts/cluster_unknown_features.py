@@ -23,6 +23,7 @@ def build_parser():
     add_discovery_arguments(parser)
     parser.add_argument("--results_json", type=Path,
                         help="Source results.json: primary selection context, optional post-hoc scoring and truth colors")
+    parser.add_argument('--predictions_csv',type=Path,help='Optional original fast CSV; write updated predictions.csv with matched track identities')
     from util.feature_visualization import add_feature_plot_arguments
     add_feature_plot_arguments(parser)
     return parser
@@ -109,6 +110,21 @@ def run(args):
             for t in r.get("signals", []) for kind in (t.get("component_types") or ["unspecified"])]}]
             for r in refreshed["files"]}
         summarize_class_evidence(refreshed["files"], type_context)
+        has_raw=any('_submission_bursts' in t for r in refreshed['files'] for t in r.get('signals',[]))
+        slice_path=args.results_json.parent/'slices.jsonl'
+        if has_raw or slice_path.is_file():
+            from util.burst_normalization import finalize_bursts
+            details={r['path']:[] for r in refreshed['files']}
+            if not has_raw:
+                with slice_path.open(encoding='utf-8') as stream:
+                    for line in stream:
+                        if line.strip():
+                            row=json.loads(line)
+                            if row['path'] in details:details[row['path']].append(row)
+            finalize_bursts(refreshed['files'],details)
+            if not args.predictions_csv:
+                from util.fast_infer import write_predictions
+                write_predictions(output,refreshed['files'],discovery['input_mode'],discovery)
         evaluation = evaluate_open_set(refreshed["files"], refreshed["effective_config"]["classes"],
                                        discovery, recording_ids)
         refreshed.update(discovery=discovery, recording_ids=recording_ids,
@@ -133,6 +149,45 @@ def run(args):
         summary = write_feature_plots(output/"feature_plots", features, plot_records, **plot_options(args))
         write_plot_gallery(output, summary)
         discovery["feature_visualization"] = summary
+    if args.predictions_csv:
+        assignments={(r['path'],r['track_id']):r for r in updated}
+        primaries={r['path']:r for r in updated if r.get('discovery_is_primary')}
+        for r in updated:
+            primary=assignments.get((r.get('discovery_primary_path'),r.get('discovery_primary_track_id')))
+            if primary is not None:primaries[r['path']]=primary
+        with args.predictions_csv.open(encoding='utf-8-sig',newline='') as stream:
+            reader=csv.DictReader(stream);columns=reader.fieldnames;table=list(reader)
+        if 'track_id' in columns:
+            csv_novel={(r['path'],r['track_id']) for r in table if r['status']=='novel_candidate'}
+            if csv_novel!=set(assignments):raise ValueError('CSV/archive novel track sets differ')
+        else:
+            csv_novel=set()
+            for r in table:
+                decision=json.loads(r['single_signal_prediction']) if 'single_signal_prediction' in r else r
+                if isinstance(decision,dict) and decision.get('recognition_status',decision.get('status'))=='novel_candidate':csv_novel.add(r['path'])
+            if csv_novel!=set(primaries):raise ValueError('CSV/archive novel primary recording sets differ')
+        discovery['source_predictions_sha256']=file_sha256(args.predictions_csv)
+        for row in table:
+            if 'single_signal_prediction' in row:
+                decision=json.loads(row['single_signal_prediction'])
+                if isinstance(decision,dict) and decision.get('recognition_status')=='novel_candidate':
+                    record=assignments.get((decision.get('primary_path',row['path']),decision.get('primary_track_id',''))) or primaries.get(row['path'])
+                    if record is None:raise ValueError('Primary CSV decision has no candidate feature')
+                    decision.update(display_label=record['unknown_cluster_id'] or 'Unknown_unassigned',unknown_cluster_id=record['unknown_cluster_id'])
+                    row['single_signal_prediction']=json.dumps(decision,ensure_ascii=False,allow_nan=False)
+                continue
+            if row['status']!='novel_candidate':continue
+            key=(row['path'],row.get('track_id',''))
+            record=assignments.get(key) if row.get('track_id') else primaries.get(row['path'])
+            if record is None:raise ValueError(f'CSV candidate is absent from the archive: {key}')
+            row['label']=record['unknown_cluster_id'] or 'Unknown_unassigned'
+            if row.get('bursts_json'):
+                bursts=json.loads(row['bursts_json'])
+                for b in bursts:b.update(label=row['label'],recognition_status=row['status'])
+                row['bursts_json']=json.dumps(bursts,ensure_ascii=False,allow_nan=False,separators=(',',':'))
+        with (output/'predictions.csv').open('w',encoding='utf-8-sig',newline='') as stream:
+            writer=csv.DictWriter(stream,fieldnames=columns);writer.writeheader();writer.writerows(table)
+    discovery['metrics']={'discovery_constraint_failures':int(discovery.get('constraint_satisfied') is False)}
     (output/"unknown_clusters.json").write_text(json.dumps(discovery, ensure_ascii=False, indent=2,
         allow_nan=False)+"\n", encoding="utf-8")
     return discovery

@@ -1,5 +1,7 @@
 # UAV_detection
 
+竞赛 v2 已加入类别数约束、物理突发处理与严格提交。请先阅读 [v2 迁移与运行说明](docs/competition_v2.md)，旧 profile 需要重建。
+
 当前主线为 **主分组 CE + 记录平衡 Maha++ 适配 + 主轨迹校准 + HDBSCAN**，已接入正式 profile 与无标签 infer。直接从头实验使用 `bash run.sh experiment --config config/experiment_iq.yaml`；训练后使用导出的 inference.yaml。配置、迁移及完整命令见 [主线运行说明](docs/mainline_open_set.md)。
 
 未知发现支持 `--unknown_input_mode single|multi`：单设备记录以主轨迹拟合，多信号保留全部轨迹。默认 `unknown_cluster_policy=auto` 按独立记录计算HDBSCAN密度，并依据无标签几何证据检查单个大簇。已有实验可直接离线重聚类和重评分，详见 [单信号与多信号未知发现](docs/unknown_discovery_modes.md)。

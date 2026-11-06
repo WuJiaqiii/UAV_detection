@@ -170,7 +170,14 @@ class Trainer:
         if not hasattr(self.preprocessor, "select_signal_groups"):
             raise AttributeError("preprocessor must provide select_signal_groups()")
 
-        groups = self.preprocessor.select_signal_groups(yolo_boxes, spectrogram=spec)
+        if getattr(self.config,'event_mode','legacy')=='physical':
+            from util.event_detection import select_event_groups
+            details=getattr(self.detector,'last_detections',[])
+            scores=[x['confidence'] for x in details] if len(details)==len(yolo_boxes) else None
+            groups,_=select_event_groups(self.preprocessor,yolo_boxes,spec,self.config,scores,
+                self.config.iq_sample_rate if self.config.input_type=='iq_dat' else None)
+        else:
+            groups = self.preprocessor.select_signal_groups(yolo_boxes, spectrogram=spec)
         return groups or []
 
     @staticmethod

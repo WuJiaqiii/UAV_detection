@@ -1,0 +1,55 @@
+{
+  "version": "2.0.0-competition",
+  "base_main": "47ab9d5f54f2f70d3d082798a4536e062cc14d23",
+  "client_date": "2026-11-06",
+  "tests": {
+    "run": 291,
+    "passed": 290,
+    "skipped": 1,
+    "failed": 0,
+    "duration_seconds": 13.504,
+    "skip_reason": "Actual YOLO backend tensor contract requires UAV_TEST_REAL_YOLO=1 and complete optional runtime dependencies."
+  },
+  "checks": [
+    "Full parent-repository unittest suite",
+    "36 new competition/event/strict-submission tests including pipeline and joint-selection integration",
+    "Python compilation",
+    "New training/inference configs dry-run",
+    "Git patch whitespace check respecting source CRLF",
+    "Original three uploaded CSVs rejected by strict checks without producing submission workbooks"
+  ],
+  "runtime": {
+    "python": "3.9.21",
+    "platform": "macOS-15.3-arm64-arm-64bit",
+    "torch": "2.8.0.dev20250424",
+    "torchvision": "0.22.0.dev20250424",
+    "numpy": "2.0.2",
+    "scipy": "1.13.1",
+    "scikit_learn": "1.6.1",
+    "opencv": "4.12.0"
+  },
+  "environment_matches_pinned_requirements": false,
+  "not_run": [
+    "Real model training and known-profile recalibration",
+    "RF detection/classification accuracy evaluation with actual weights",
+    "Hosted CI"
+  ],
+  "real_input_validation": {
+    "valid_format": false,
+    "ready": false,
+    "coverage_complete": false,
+    "class_budget_valid": false,
+    "class_budget_errors": [
+      "1-1: unknown class count 8 outside [2,3]",
+      "1-3: unknown class count 1 outside [2,3]",
+      "1-1 and 1-3 must share N1"
+    ],
+    "burst_complete": false,
+    "has_fallbacks": true,
+    "frequency_valid": false,
+    "written_workbooks": 0,
+    "error_count": 4665,
+    "expected_exit_code": 2
+  },
+  "pinned_yolov5": "17cfa633999107857a337d51c9c8271fef97edc7"
+}

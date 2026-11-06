@@ -8,8 +8,12 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import sys
+import hashlib
+import tempfile
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile, ZIP_DEFLATED
+from util.competition_protocol import validate_counts
+from util.burst_normalization import normalize_bursts
 
 
 # Official supplied workbook: model name -> submission ID, never checkpoint IDs.
@@ -179,7 +183,7 @@ def build_plan(args):
     report = {"errors": [], "warnings": [], "datasets": {}, "unknown_labels": {},
               "task2_level": args.task2_level, "unresolved_policy": args.unresolved,
               "frequency_policy": args.frequency_policy, "clipped_intervals": 0,
-              "dropped_outside_band": 0, "unresolved_items": []}
+              "dropped_outside_band": 0, "unresolved_items": [],'task2_row_errors':0}
     error = report["errors"].append
     records, seen, owners, details = [], set(), {}, set(args.details or [])
     for source in args.predictions:
@@ -188,10 +192,19 @@ def build_plan(args):
             details.add(source.parent/"slices.jsonl")
         with source.open(encoding="utf-8-sig", newline="") as stream:
             reader = csv.DictReader(stream)
-            if not {"path", "label", "status"} <= set(reader.fieldnames or []):
+            if len(reader.fieldnames or [])!=len(set(reader.fieldnames or [])):
+                raise ValueError('Duplicate CSV headers')
+            detailed='single_signal_prediction' in (reader.fieldnames or [])
+            if not {'path'} <= set(reader.fieldnames or []) or (not detailed and not {"label", "status"} <= set(reader.fieldnames or [])):
                 raise ValueError(f"{source}: expected path,label,status columns")
             for line, row in enumerate(reader, 2):
                 try:
+                    if None in row or any(v is None for v in row.values()):raise ValueError('Malformed CSV row width')
+                    if detailed:
+                        decision=json.loads(row['single_signal_prediction'])
+                        if not isinstance(decision,dict):raise ValueError('Missing single-signal decision')
+                        if int(row.get('error_slices') or 0)>0 and not args.allow_partial_errors:raise ValueError('Upstream slice errors')
+                        row.update(label=decision.get('display_label',''),status=decision.get('recognition_status',''))
                     sample, dataset = identify(row["path"])
                     owner = owners.setdefault(dataset, source_key)
                     if owner != source_key:
@@ -201,13 +214,14 @@ def build_plan(args):
                         raise ValueError(f"Duplicate file/track: {key}")
                     seen.add(key)
                     records.append({**row, "sample": sample, "dataset": dataset, "where": f"{source.name}:{line}"})
-                except ValueError as exc:
+                except (ValueError,TypeError) as exc:
                     error(f"{source.name}:{line}: {exc}")
     if not records:
         error("No prediction rows")
     wanted = {r["sample"] for r in records if r["dataset"].startswith("2")}
     burst_map = load_details(sorted(details), wanted) if args.task2_level == "burst" else {}
     files = defaultdict(list)
+    event_files = defaultdict(list)
     class_keys = defaultdict(set)
     for row in records:
         sample, dataset = row["sample"], row["dataset"]
@@ -245,17 +259,35 @@ def build_plan(args):
                 pulses = burst_map.get((sample, row["track_id"]), [])
             if not isinstance(pulses, list) or not pulses:
                 raise ValueError("Burst data missing: provide --details slices.jsonl, rerun updated fast mode, or explicitly use --task2-level track (envelopes only)")
-            for pulse in pulses:
+            if args.task2_level=='track':
+                normalized_events,diagnostics=pulses,{'track_envelope_preview':True}
+            else:
+                normalized_events,diagnostics=normalize_bursts([{**p,'track_id':row.get('track_id'),'label':str(cls),'recognition_status':row['status']} for p in pulses],sample)
+            report.setdefault('burst_normalization',[]).append({'sample':sample,'track_id':row.get('track_id'),**diagnostics})
+            for pulse in normalized_events:
+                if args.task2_level=='burst' and pulse['end_ms']>100.000001:raise ValueError('Burst end exceeds the 100ms recording')
                 lo, hi, clipped = frequency(pulse.get("frequency_low_offset_mhz"), pulse.get("frequency_high_offset_mhz"), args.frequency_policy)
                 report["clipped_intervals"] += clipped
                 if lo is None:
                     report["dropped_outside_band"] += 1
                     continue
                 files[(dataset, sample)].append([cls, lo, hi])
+                if args.task2_level=='burst':
+                    event_files[(dataset,sample)].append({**pulse,'label':cls,
+                        'frequency_low_offset_mhz':lo/1e6,'frequency_high_offset_mhz':hi/1e6})
         except (ValueError, TypeError, AttributeError) as exc:
+            if dataset.startswith('2'):report['task2_row_errors']+=1
             error(f"{row['where']} {sample}/{row.get('track_id', '')}: {exc}")
+    for key,events in event_files.items():
+        events,diagnostics=normalize_bursts(events,key[1])
+        if diagnostics['label_conflicts']:error(f'{key[1]}: conflicting labels on duplicate burst observations')
+        files[key]=[[e['label'],int(round(e['frequency_low_offset_mhz']*1e6)),int(round(e['frequency_high_offset_mhz']*1e6))] for e in events]
+    statuses=defaultdict(set)
+    for row in records:statuses[row['sample']].add(row['status'])
+    for sample,values in statuses.items():
+        if 'no_signal' in values and len(values)>1:error(f'{sample}: no_signal conflicts with detections')
     if args.input_root:
-        expected = {identify(p.name)[0] for root in args.input_root for p in root.rglob("*.dat")}
+        expected = {identify(p.name)[0] for root in args.input_root for p in root.rglob('*') if p.is_file() and p.suffix.lower()=='.dat'}
         actual = {r["sample"] for r in records}
         if expected != actual:
             error(f"CSV/source coverage mismatch: missing={sorted(expected-actual)[:20]}, extra={sorted(actual-expected)[:20]}")
@@ -277,6 +309,23 @@ def build_plan(args):
         report["warnings"].append("Task 2 uses track envelopes; repeated bursts and hopping sub-bands cannot be recovered. This does not fully implement the burst-list requirement.")
     if report["unresolved_items"] and args.unresolved != "error":
         report["warnings"].append("Unresolved predictions were explicitly assigned artificial unknown IDs; this is a fallback, not inferred class evidence.")
+    counts={item:len({r[0] for (ds,_),rows in files.items() if ds==item for r in rows if isinstance(r[0],int) and r[0]>=20}) for item in report['datasets']}
+    report['class_budget_errors']=validate_counts(counts)
+    for (dataset,sample),values in files.items():
+        if dataset.startswith('2') and len({r[0] for r in values})>3:
+            report['class_budget_errors'].append(f'{sample}: more than three distinct classes')
+    coverage=True
+    for dataset,info in report['datasets'].items():
+        ids=sorted(int(r['sample'].split('_')[1]) for r in records if r['dataset']==dataset)
+        ids=sorted(set(ids))
+        if ids!=list(range(len(ids))):coverage=False
+        expected=args.expected_count if args.expected_count is not None else (1750 if dataset.startswith('2') else None)
+        if expected is not None and len(ids)!=expected:coverage=False
+        if dataset.startswith('2') and len(ids)!=1750:coverage=False
+        if expected is None and not args.input_root:coverage=False
+    report.update(coverage_complete=coverage,class_budget_valid=not report['class_budget_errors'],
+        has_fallbacks=bool(report['unresolved_items']),frequency_valid=not (report['clipped_intervals'] or report['dropped_outside_band'] or report['task2_row_errors']),
+        upstream_error_rows=sum(bool(r.get('error','').strip()) or r.get('status')=='error' or int(r.get('error_slices') or 0)>0 for r in records))
     return files, report
 
 
@@ -288,45 +337,69 @@ def build_parser():
     p.add_argument("--aliases", type=Path, help="JSON of model-name alias -> official model name")
     p.add_argument("--details", type=Path, nargs="+", help="Task 2 slices.jsonl; otherwise automatically look beside each CSV")
     p.add_argument("--task2-level", choices=["burst", "track"], default="burst")
-    p.add_argument("--unresolved", choices=["error", "singleton", "shared"], default="shared",
+    p.add_argument("--unresolved", choices=["error", "singleton", "shared"], default="error",
                    help="Default shared matches the requested common unknown ID for unresolved predictions")
     p.add_argument("--frequency-policy", choices=["error", "clip"], default="error")
     p.add_argument("--allow-partial-errors", action="store_true")
     p.add_argument("--input-root", type=Path, nargs="+", help="Optional local DAT roots for missing/extra file checks")
     p.add_argument("--check", action="store_true", help="Validate and write only the sidecar report, without XLSX files")
+    p.add_argument('--preview',action='store_true',help='Allow non-ready previews, always flagged in the report')
+    p.add_argument('--expected-count',type=int,help='Expected files per test item; task 2 defaults to 1750')
     return p
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.expected_count is not None and args.expected_count<1:raise ValueError('expected-count must be positive')
     output = args.output.expanduser().resolve()
     report_path = output.parent/(output.name+"_report.json")
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError(f"Output must be new or empty: {output}")
     files, report = build_plan(args)
-    burst_complete = args.task2_level == "burst" or not any(ds.startswith("2") for ds, _ in files)
+    burst_complete = (args.task2_level == "burst" and not report['task2_row_errors']) or not any(ds.startswith("2") for ds, _ in files)
+    ready=not report['errors'] and burst_complete and report['coverage_complete'] and report['class_budget_valid'] and not report['has_fallbacks'] and report['frequency_valid'] and not report['upstream_error_rows']
     report.update(output=str(output), report=str(report_path), valid_format=not report["errors"],
-                  burst_complete=burst_complete, ready=not report["errors"] and burst_complete, written_workbooks=0)
-    if not args.check and report["valid_format"]:
-        output.mkdir(parents=True, exist_ok=True)
+                  burst_complete=burst_complete, ready=ready,preview=args.preview,written_workbooks=0)
+    if not args.check and report["valid_format"] and (ready or args.preview):
+        output.parent.mkdir(parents=True,exist_ok=True)
+        staging=Path(tempfile.mkdtemp(prefix='.submission-',dir=output.parent))
         task1 = defaultdict(list)
         for (dataset, sample), rows in sorted(files.items()):
             if dataset.startswith("1"):
                 task1[dataset].append([sample, rows[0][0]])
             else:
-                folder = output/dataset
+                folder = staging/dataset
                 folder.mkdir(exist_ok=True)
                 write_xlsx(folder/(sample+".xlsx"), ["无人机类别", "起始频率(Hz)", "终止频率(Hz)"], rows)
                 report["written_workbooks"] += 1
         for dataset, rows in task1.items():
-            write_xlsx(output/(dataset+".xlsx"), ["序号", "无人机类别"], rows)
+            write_xlsx(staging/(dataset+".xlsx"), ["序号", "无人机类别"], rows)
             report["written_workbooks"] += 1
+        # Independent OOXML read-back: typed numeric values, literal IDs, headers/counts.
+        for pth in staging.rglob('*.xlsx'):
+            with ZipFile(pth) as archive:
+                root=ET.fromstring(archive.read('xl/worksheets/sheet1.xml'))
+                data=root.find(f'{{{NS}}}sheetData')
+                assert data is not None and len(data)>=1
+                for row in list(data)[1:]:
+                    numeric=list(row)[1:] if pth.stem.startswith('1-') else list(row)
+                    if any(c.get('t') is not None or c.find(f'{{{NS}}}v') is None for c in numeric):
+                        raise ValueError(f'Numeric cell verification failed: {pth.name}')
+                actual=[]
+                for row in data:
+                    actual.append([''.join(t.text or '' for t in c.iter(f'{{{NS}}}t')) if c.get('t')=='inlineStr' else int(c.findtext(f'{{{NS}}}v')) for c in row])
+                headers=['序号','无人机类别'] if pth.stem.startswith('1-') else ['无人机类别','起始频率(Hz)','终止频率(Hz)']
+                expected=task1[pth.stem] if pth.stem.startswith('1-') else files[(pth.parent.name,pth.stem)]
+                if actual != [headers,*expected]:raise ValueError(f'Workbook round-trip mismatch: {pth.name}')
+        report['xlsx_sha256']={p.relative_to(staging).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in staging.rglob('*.xlsx')}
+        if output.exists():output.rmdir()  # only the pre-checked empty directory
+        staging.rename(output)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
-    print(json.dumps({key: report[key] for key in ("valid_format", "burst_complete", "ready", "datasets", "written_workbooks", "warnings", "report")}, ensure_ascii=False, indent=2))
+    print(json.dumps({key: report[key] for key in ("valid_format", "burst_complete", "ready",'coverage_complete','class_budget_valid','class_budget_errors','has_fallbacks','frequency_valid','upstream_error_rows', "datasets", "written_workbooks", "warnings", "report")}, ensure_ascii=False, indent=2))
     for message in report["errors"][:8]:
         print("ERROR: "+message)
-    return 2 if report["errors"] else 0
+    return 2 if report['errors'] or (not ready and not args.preview) else 0
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 """Audited frozen-run inputs and exact binary-mask replay; never reruns detection."""
+from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path

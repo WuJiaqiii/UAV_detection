@@ -18,6 +18,8 @@ from util.spectrogram_frontend import (
 
 
 INFERENCE_DEFAULTS = {
+    'event_mode':'legacy','valid_band_policy':'off','singleton_min_confidence':.5,
+    'singleton_min_contrast_z':1.,'event_context_gap_ms':0.,
     "backbone": "resnet18", "cnn_dropout": 0.,
     "mask_img_size": 224, "mask_in_chans": 1, "mask_fill_value": 255,
     "sampling_rate": float(TARGET_SAMPLE_RATE), "frequency_axis": "fft",
@@ -116,6 +118,10 @@ def resolve_config(checkpoint, classes=None, overrides=None, frontend_config=Non
     if cfg.iq_byte_order not in {"<", ">"}:
         raise ValueError("iq_byte_order must be '<' or '>'")
     validate_iq_settings(cfg.iq_sample_rate, cfg.iq_segment_ms, cfg.iq_n_fft, cfg.iq_hop_length)
+    if cfg.event_mode not in ('legacy','physical') or cfg.valid_band_policy not in ('off','source'):
+        raise ValueError('Invalid event_mode/valid_band_policy')
+    if not 0<=cfg.singleton_min_confidence<=1 or not math.isfinite(cfg.singleton_min_contrast_z) or not math.isfinite(cfg.event_context_gap_ms) or cfg.event_context_gap_ms<0:
+        raise ValueError('Invalid detection acceptance thresholds')
     return cfg
 
 

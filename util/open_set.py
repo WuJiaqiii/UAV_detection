@@ -38,13 +38,14 @@ def inference_signature(args, config):
                "util/single_signal_eval.py", "util/multi_signal_eval.py", "util/open_set.py",
                "util/eval_common.py", "util/group_predictor.py", "util/recordings.py",
                "util/known_reference.py", "util/class_evidence.py", "util/mahalanobis.py",
-               "util/recording_features.py"]
+               "util/recording_features.py",'util/event_detection.py']
     settings = {key: value for key, value in vars(config).items()
                 if key not in {"device", "yolo_weights", "frontend_config"}}
     options = {key: getattr(args, key) for key in (
         "iq_stride_ms", "tail_policy", "max_slices", "vote_method", "min_slice_confidence",
         "min_votes", "min_vote_share", "exclude_vote_classes", "track_freq_tolerance_mhz",
         "track_min_band_iou", "track_max_gap_ms")}
+    options['track_feature_cosine_min']=getattr(args,'track_feature_cosine_min',None)
     payload = {"feature_version": FEATURE_VERSION, "config": settings, "options": options,
                "checkpoint_sha256": file_sha256(args.checkpoint_path),
                "detector_sha256": file_sha256(args.yolo_weights),

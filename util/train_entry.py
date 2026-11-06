@@ -23,6 +23,11 @@ def build_parser():
     )
 
     add_frontend_arguments(parser)
+    parser.add_argument('--event_mode',choices=['legacy','physical'],default='legacy')
+    parser.add_argument('--valid_band_policy',choices=['off','source'],default='off')
+    parser.add_argument('--singleton_min_confidence',type=float,default=.5)
+    parser.add_argument('--singleton_min_contrast_z',type=float,default=1.)
+    parser.add_argument('--event_context_gap_ms',type=float,default=0.)
 
     # Runtime / Mode
     g_run = parser.add_argument_group("Runtime")
@@ -317,6 +322,10 @@ def setup_incremental_class_split(config, logger=None):
 def validate_training_options(args):
     from model.representation import validate_representation_options
     validate_representation_options(args)
+    if not 0<=args.singleton_min_confidence<=1 or not math.isfinite(args.singleton_min_contrast_z) or not math.isfinite(args.event_context_gap_ms) or args.event_context_gap_ms<0:
+        raise ValueError('Invalid event acceptance options')
+    if args.event_mode=='physical' and args.bbox_cache_mode!='off':
+        raise ValueError('Physical event acceptance needs live detector confidences; set bbox_cache_mode=off')
     if int(getattr(args, "iq_preprocess_threads", 3)) < 1:
         raise ValueError("iq_preprocess_threads must be >= 1")
     for name in ("epochs", "batch_size", "save_interval", "early_stop_patience", "cosine_annealing_T0", "cosine_annealing_mult"):
