@@ -11,6 +11,8 @@
 
 开集结果默认提供 PCA 特征点分布图，可选 t-SNE 和真值着色对照；`visualize` 可从已有特征归档离线补图。配置、输出与解释范围见 [特征可视化](docs/feature_visualization.md)。
 
+仅需结果表时，在 `infer` 命令加 `--fast`：关闭全部绘图和详细归档，保留文件/切片进度条，只写 predictions.csv 和运行记录。single 每文件一行，multi 每条信号轨迹一行并包含频率上下界；用 `--no-progress` 关闭进度条。详见 [快速推理与其他加速方法](docs/fast_inference.md)。
+
 已知 profile 默认保存记录平衡的类别均值、共享协方差逆矩阵和主轨迹校准阈值；接受为已知时保留分类头投票类别。推理保留每条链路的时间/频率，在 `class_evidence.csv` 汇总同类别组件。旧类别尺度 kNN 作为兼容对照保留，见 [记录平衡参考库](docs/record_balanced_profiles.md)。
 
 无人机信号的已知类训练、多信号分类、开集拒识与未知类别发现。主线为：MAT/PNG/DAT → 统一频谱 → YOLO 框 → 信号分组 → 二值 mask CNN → DAT 轨迹投票 → 已知 profile 拒识 → 未知候选聚类。输出类别、时间和频率位置。

@@ -22,6 +22,10 @@ def build_parser():
     p.add_argument("--classes_json", type=Path, help="Name-to-ID mapping for legacy checkpoints; must agree with saved metadata if present")
     p.add_argument("--device", default="auto", help="auto, cpu, cuda or cuda:0")
     p.add_argument("--signal_mode", choices=["multi", "single"], default="multi", help="multi classifies every valid group; single retains the previous file-level voter")
+    p.add_argument("--fast", action=argparse.BooleanOptionalAction, default=False,
+                   help="Unlabeled open-set inference: only predictions.csv and run metadata; no plots or detailed archives")
+    p.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True,
+                   help="Fast mode: show file/slice progress on stderr; --no-progress disables it")
     p.add_argument("--frontend_config", type=Path, help="Optional explicit frontend manifest, overriding saved rendering settings")
     p.add_argument("--grouping_mode", choices=["frequency", "hopping"], default=None)
     p.add_argument("--hop_association", choices=["shape", "periodic"], default=None)
@@ -65,9 +69,14 @@ def build_parser():
 
 
 def run(args, predictor=None):
+    if getattr(args, "fast", False):
+        from util.fast_infer import configure_fast_inference
+        configure_fast_inference(args)
     if not getattr(args, "output_dir", None):
         from util.run_context import execute_run
         return execute_run("predict", args, lambda managed: run(managed, predictor))
+    if getattr(args, "fast", False) and args.progress:
+        print("Loading model/profile...", file=sys.stderr)
     import torch
     from util.single_signal_eval import SingleSignalPredictor, evaluate_file, load_truth, evaluation_metrics
     from util.eval_common import collect_inputs, resolve_config, validate_prediction_options
@@ -199,6 +208,16 @@ def run(args, predictor=None):
 
 
 def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, signature=None, profile=None, recording_ids=None):
+    if getattr(args, "fast", False):
+        from util.fast_infer import InferenceProgress
+        with InferenceProgress(inputs, args, cfg) as progress:
+            return _run_multi(args, predictor, cfg, inputs, output, options, truth, logger,
+                              signature, profile, recording_ids, progress)
+    return _run_multi(args, predictor, cfg, inputs, output, options, truth, logger,
+                      signature, profile, recording_ids)
+
+
+def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, signature=None, profile=None, recording_ids=None, progress=None):
     from util.multi_signal_eval import evaluate_multi_file, multi_evaluation_metrics, resolve_rf_centers
     from util.signal_eval_report import frequency_text, write_html_report
 
@@ -206,10 +225,12 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
     track_options = dict(frequency_tolerance_mhz=args.track_freq_tolerance_mhz,
                          min_band_iou=args.track_min_band_iou, max_gap_ms=args.track_max_gap_ms)
     results, rows_by_file, candidates, plot_items = [], {}, [], []
-    for path in inputs:
+    fast = getattr(args, "fast", False)
+    for path in progress if progress is not None else inputs:
         rf = centers.get(str(path), args.rf_center_mhz)
         try:
-            result, rows = evaluate_multi_file(path, predictor, cfg, options, args.iq_stride_ms,
+            active_predictor = progress.predictor(predictor, path) if progress is not None else predictor
+            result, rows = evaluate_multi_file(path, active_predictor, cfg, options, args.iq_stride_ms,
                 args.tail_policy, args.max_slices, args.fail_fast, rf, track_options,
                 output/"visualizations" if args.save_visuals else None, args.max_visualizations)
         except Exception as exc:
@@ -220,6 +241,9 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
                 "total_slices": 0, "observation_count": 0, "track_count": 0, "accepted_track_count": 0,
                 "error_slices": 0, "visualization_errors": 0, "rf_center_mhz": rf}
             rows = []
+        finally:
+            if progress is not None:
+                progress.finish_file()
         for row in rows:
             if row.get("visualization"):
                 row["visualization"] = Path(row["visualization"]).relative_to(output).as_posix()
@@ -243,8 +267,18 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
         elif args.export_features:
             from util.open_set import cache_track_features
             cache_track_features([result], {str(path): rows})
-        logger.info("%s | %s | %s observations, %s tracks", path.name, result["status"],
-                    result["observation_count"], result["track_count"])
+        if fast:
+            if args.unknown_input_mode == "multi":
+                from util.fast_infer import retain_submission_bursts
+                retain_submission_bursts(result, rows)
+            from util.class_evidence import summarize_class_evidence
+            summarize_class_evidence([result], {str(path): rows})
+            # Decisions are already attached to tracks; release slice details now.
+            # Keep the detection summary used by refresh_open_set_results.
+            rows_by_file[str(path)] = [{"detected_boxes": any(row.get("detected_boxes", 0) for row in rows)}]
+        if not fast:
+            logger.info("%s | %s | %s observations, %s tracks", path.name, result["status"],
+                        result["observation_count"], result["track_count"])
 
     feature_archive, discovery = None, None
     if args.export_features:
@@ -256,16 +290,28 @@ def run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sign
         from util.unknown_discovery import discover_unknown, discovery_kwargs, save_unknown_prototypes
         from util.discovery_context import annotate_discovery_candidates, attach_recording_predictions, candidate_record
         from util.class_evidence import summarize_class_evidence
-        summarize_class_evidence(results, rows_by_file)
-        identities = {result["path"]: (recording_identity(result["path"], file_sha256(result["path"]), recording_ids)
+        if not fast:
+            summarize_class_evidence(results, rows_by_file)
+        if fast:
+            from util.fast_infer import input_recording_identity
+            identities = {result["path"]: input_recording_identity(result, recording_ids)
+                          for result in progress.identities(results)}
+        else:
+            identities = {result["path"]: (recording_identity(result["path"], file_sha256(result["path"]), recording_ids)
                       if result["signals"] else (recording_ids or {}).get(result["path"], result["path"]))
                       for result in results}
         for candidate in candidates:
             path = candidate["path"]
             candidate["recording_id"] = identities[path]
         annotate_discovery_candidates(candidates, results, identities)
+        if progress is not None:
+            progress.clustering(len(candidates))
         discovery = discover_unknown(candidates, **discovery_kwargs(args))
         attach_recording_predictions(results, identities, discovery["input_mode"])
+        if fast:
+            from util.fast_infer import write_predictions
+            refresh_open_set_results(results, rows_by_file)
+            return write_predictions(output, results, discovery["input_mode"], discovery)
         save_unknown_prototypes(output/"unknown_prototypes.npz", discovery, signature, profile.reference.shape[1])
         discovery["prototype_archive"] = "unknown_prototypes.npz"
         import numpy as np

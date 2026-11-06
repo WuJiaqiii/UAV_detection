@@ -269,6 +269,9 @@ def main(argv=None):
     settings, path = load_settings(controls.config, task)
     args = parser.parse_args([*settings_tokens(parser, settings), *explicit])
     args._config_path = path
+    if getattr(args, "fast", False):
+        from util.fast_infer import configure_fast_inference
+        configure_fast_inference(args)
     if hasattr(args, "feature_plot_method"):
         from util.feature_visualization import plot_options
         plot_options(args)

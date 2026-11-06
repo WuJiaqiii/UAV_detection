@@ -11,6 +11,7 @@ evaluation:
   max_slices: 0
   min_votes: 1
 infer:
+  # fast: true  # CSV only; file/slice progress is enabled. CLI: --fast / --no-progress
   unknown_input_mode: multi  # Use single only when each original recording has one device/class.
   unknown_cluster_policy: auto
   inputs: [/data/uav/unlabeled_test]
