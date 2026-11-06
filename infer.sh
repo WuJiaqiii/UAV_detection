@@ -1,3 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 REPO="/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code"
 DATA="/media/kaneki/05E4235537EC7AC2/dataset_wjq"
 
@@ -25,8 +28,8 @@ infer_item() {
     "$@"
 }
 
-infer_item 1-1 task1_n1 single
-infer_item 1-2 task1_n2 single
+# infer_item 1-1 task1_n1 single
+# infer_item 1-2 task1_n2 single
 infer_item 1-3 task1_n1 single
 infer_item 1-4 task1_n2 single
 

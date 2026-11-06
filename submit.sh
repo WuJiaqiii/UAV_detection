@@ -1,3 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO="/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code"
+DATA="/media/kaneki/05E4235537EC7AC2/dataset_wjq"
+
+cd "$REPO"
+
 R11="$REPO/experiment/open_set_inference_替换为1-1实际时间"
 R12="$REPO/experiment/open_set_inference_替换为1-2实际时间"
 R13="$REPO/experiment/open_set_inference_替换为1-3实际时间"
