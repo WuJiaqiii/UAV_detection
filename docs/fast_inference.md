@@ -21,8 +21,10 @@ bash run.sh infer \
 
 - **predictions.csv**：最终结果表，UTF-8 BOM，可直接用常见表格软件打开。
 - **run.json**：参数、时间、完成状态等小体积运行记录。发生致命异常时还会写 error.log。
+- **unknown_clusters.json**：候选类别数、支持数、分离程度及失败原因。
+- **known_recheck_decisions.json**：启用已知类二次复核时保存逐记录的复核证据。
 
-快速模式不保存预览图、PCA/t-SNE、HTML、逐切片 JSONL、详细 CSV/JSON、未知特征或原型 NPZ。已有切片详情在每个文件完成拒识后释放，只保留后续聚类需要的轨迹和特征。未知聚类需要整个输入批次的候选，最终 CSV 在聚类结束后写入；可以用进度条查看中途进展。需要离线重聚类、补图或详细诊断时，应使用完整模式重新运行。
+快速模式不保存预览图、PCA/t-SNE、HTML、逐切片 JSONL 或原型 NPZ。启用 `--save_discovery_cache` 后会保存 unknown_features.npz，可用于离线重聚类。已有切片详情在每个文件完成拒识后释放，逐突发信息保存在 multi CSV 的 bursts_json 中。未知聚类需要整个输入批次的候选，最终 CSV 在聚类结束后写入。
 
 ## single：每个文件一行
 
@@ -46,7 +48,7 @@ bash run.sh infer \
   --recursive --unknown_input_mode multi --fast
 ```
 
-列为 path、track_id、label、frequency_low_offset_mhz、frequency_high_offset_mhz、frequency_low_absolute_mhz、frequency_high_absolute_mhz、status、error。同一文件中的多个信号保留为多行，track_id 是文件内轨迹编号。
+列为 path、track_id、label、frequency_low_offset_mhz、frequency_high_offset_mhz、frequency_low_absolute_mhz、frequency_high_absolute_mhz、status、error、bursts_json。同一文件中的多个信号保留为多行，track_id 是文件内轨迹编号。
 
 offset 两列是相对采集中心的 MHz 偏移。提供 `--rf_center_mhz 2400` 或逐文件 rf_centers_json 后，absolute 两列才有真实 RF 频率；未声明中心时留空。跳频轨迹的上下界是其全部观测频段的外包范围，中间可能包含未占用频段。轨迹表示频率链路候选，不能直接当作物理设备 ID。
 
@@ -54,7 +56,7 @@ offset 两列是相对采集中心的 MHz 偏移。提供 `--rf_center_mhz 2400`
 
 ## 已有 profile 的兼容性
 
-本次没有修改被 inference_signature 绑定的特征前端、检测器、分组、mask、网络、投票和 profile 算法源码；新增的 fast / progress 开关也不进入特征签名。同环境、同权重和同特征设置下，原 profile 可以直接使用。若原 profile 本来就与当前 main 或环境不匹配，仍需按原有规则重新生成。
+fast / progress / known_recheck 运行开关不进入特征签名，同一代码版本的完整/fast 使用同一 profile。已知类复核版本修改了拒识源码并增加源码签名，跨版本旧 profile 需要重新生成；开启 known_recheck 还要求 profile 包含冻结的复核参考库与门槛。具体见 [A/B 实验说明](known_recheck_ab.md)。
 
 只优化绘图、输出、切片详情存储，以及不必要的输入哈希。显式录制 ID 或 Figure 来源 ID 已能确定身份时，不再为了丢弃其结果而扫描整个大文件；其余输入仍计算内容哈希，保持相同内容和同录制的聚类语义。
 

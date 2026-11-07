@@ -114,6 +114,11 @@ def profile_parser(discover=False):
     parser.add_argument("--profile_calibration_unit",choices=["primary","record_max","record_balanced","track"],default=None,
                         help="Method default: Maha++ primary, class kNN record_max, global kNN track")
     parser.add_argument("--profile_scale_prior_records", type=float, default=5.)
+    parser.add_argument('--profile_recheck', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--recheck_k', type=int, default=3)
+    parser.add_argument('--recheck_scale_prior_records', type=float, default=5.)
+    parser.add_argument('--recheck_radius_frr', type=float, default=.01)
+    parser.add_argument('--recheck_margin_tail', type=float, default=.05)
     parser.add_argument("--ignore_classes", nargs="*", default=[], help="Explicit abstention head classes, e.g. Background")
     if discover:
         parser.description += "; then predict a mixed batch and discover anonymous classes"
@@ -172,6 +177,13 @@ def run_profile(args, discover=False, predictor=None):
     args.profile_calibration_unit=validate_profile_options(args.knn_k,args.known_false_reject_rate,
         args.min_calibration_per_class,args.max_reference_per_class,args.profile_score_method,
         args.profile_scale_prior_records,args.profile_covariance_shrinkage,args.profile_calibration_unit)
+    from util.known_recheck import RecheckConfig
+    recheck = (RecheckConfig(args.recheck_k, args.recheck_scale_prior_records,
+                args.recheck_radius_frr, args.recheck_margin_tail).validate() if args.profile_recheck else None)
+    if recheck is not None and (args.profile_score_method != 'maha_pp_shrink' or args.profile_calibration_unit != 'primary'):
+        raise ValueError('Known recheck requires Maha++ primary calibration')
+    if args.known_recheck and (recheck is None or args.unknown_input_mode != 'single'):
+        raise ValueError('known_recheck needs profile_recheck and single-device mode')
     if discover and getattr(args, "test_output_dir", None):
         test_output = args.test_output_dir.expanduser().resolve()
         if test_output.exists() and (not test_output.is_dir() or any(test_output.iterdir())):
@@ -182,6 +194,7 @@ def run_profile(args, discover=False, predictor=None):
         extraction.inputs = getattr(args, split+"_inputs")
         extraction.output_dir = output/split
         extraction.export_features, extraction.open_set_profile = True, None
+        extraction.known_recheck = False
         extraction.save_visuals = False
         extraction.label_from_filename = args.label_mode == "filename"
         extraction.label_from_parent = args.label_mode == "parent"
@@ -194,7 +207,8 @@ def run_profile(args, discover=False, predictor=None):
         args.knn_k, args.known_false_reject_rate, args.min_calibration_per_class,
         args.max_reference_per_class, args.ignore_classes,
         score_method=args.profile_score_method, scale_prior_records=args.profile_scale_prior_records,
-        covariance_shrinkage=args.profile_covariance_shrinkage,calibration_unit=args.profile_calibration_unit)
+        covariance_shrinkage=args.profile_covariance_shrinkage,calibration_unit=args.profile_calibration_unit,
+        recheck_config=recheck)
     if not discover:
         return {"profile":str(target),"threshold":metadata["threshold"],"score_method":metadata["score_method"],
                 "calibration_unit":metadata["calibration_unit"],"known_label_policy":metadata.get("known_label_policy","legacy"),
@@ -210,6 +224,8 @@ def run_profile(args, discover=False, predictor=None):
 
 
 def validate_infer_args(args):
+    if getattr(args, 'known_recheck', False) and args.unknown_input_mode != 'single':
+        raise ValueError('known_recheck is calibrated for primary single-device records only')
     if args.signal_mode != "multi" or args.export_features or args.labels_json or args.label_from_parent or args.label_from_filename:
         raise ValueError("infer requires multi mode and unlabeled inputs; use predict/discover for labeled evaluation")
 

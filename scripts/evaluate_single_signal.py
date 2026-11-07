@@ -23,7 +23,7 @@ def build_parser():
     p.add_argument("--device", default="auto", help="auto, cpu, cuda or cuda:0")
     p.add_argument("--signal_mode", choices=["multi", "single"], default="multi", help="multi classifies every valid group; single retains the previous file-level voter")
     p.add_argument("--fast", action=argparse.BooleanOptionalAction, default=False,
-                   help="Unlabeled open-set inference: only predictions.csv and run metadata; no plots or detailed archives")
+                   help="Compact unlabeled open-set output: CSV, discovery diagnostics, optional feature cache; no plots")
     p.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True,
                    help="Fast mode: show file/slice progress on stderr; --no-progress disables it")
     p.add_argument('--save_discovery_cache',action=argparse.BooleanOptionalAction,default=False,
@@ -63,6 +63,8 @@ def build_parser():
     p.add_argument("--export_features", action=argparse.BooleanOptionalAction, default=False, help="Multi mode: save one penultimate feature per accepted track to features.npz")
     p.add_argument("--recording_ids_json", type=Path, help="Input-path-to-original-recording-ID mapping; required for crops/slices sharing a recording")
     p.add_argument("--open_set_profile", type=Path, help="Frozen known-only profile; enables rejection and global unknown discovery in multi mode")
+    p.add_argument('--known_recheck', action=argparse.BooleanOptionalAction, default=False,
+                   help='Optional calibrated local known recovery; requires single unknown_input_mode and an enhanced profile')
     p.add_argument("--novelty_policy", choices=["calibrated_track", "observation_guard"], default="calibrated_track", help="Default uses the calibrated track score; guard is an optional stricter ablation")
     p.add_argument("--min_novel_observation_share", type=float, default=.5, help="Only vetoes unknowns under novelty_policy observation_guard; always reported diagnostically")
     from util.unknown_discovery import add_discovery_arguments
@@ -73,6 +75,8 @@ def build_parser():
 
 
 def run(args, predictor=None):
+    if getattr(args, 'known_recheck', False) and (args.unknown_input_mode != 'single' or not args.open_set_profile):
+        raise ValueError('known_recheck requires a frozen profile and unknown_input_mode single')
     from util.competition_protocol import resolve_protocol
     resolve_protocol(args.competition_profile,args.unknown_input_mode,args.test_item)
     if getattr(args, "fast", False):
@@ -135,6 +139,8 @@ def run(args, predictor=None):
         signature = inference_signature(args, cfg)
         if args.open_set_profile:
             profile = OpenSetProfile(args.open_set_profile, signature, cfg.classes)
+            if getattr(args, 'known_recheck', False) and profile.rechecker is None:
+                raise ValueError('Rebuild profile with --profile_recheck before enabling known_recheck')
             from util.unknown_discovery import validate_discovery_options, discovery_kwargs
             cluster_options = discovery_kwargs(args)
             validate_discovery_options(cluster_options["backend"], cluster_options["min_cluster_size"],
@@ -272,7 +278,8 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
                         plot_items.append({"path": str(path), "track": track, "feature": feature,
                                            "component_types": sorted({g.get("group_type", "unspecified") for g in accepted})})
             from util.open_set import apply_open_set
-            candidates.extend(apply_open_set(profile, [result], {str(path): rows}, args.min_novel_observation_share, args.novelty_policy))
+            candidates.extend(apply_open_set(profile, [result], {str(path): rows}, args.min_novel_observation_share,
+                                            args.novelty_policy, getattr(args, 'known_recheck', False)))
             for row in rows:
                 for group in row.get("groups", []):
                     group.pop("embedding", None)
@@ -320,6 +327,11 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
             progress.clustering(len(candidates))
         discovery = discover_unknown(candidates, **discovery_kwargs(args))
         attach_recording_predictions(results, identities, discovery["input_mode"])
+        recheck_rows = [{'path': r['path'], 'track_id': t['track_id'], **t['known_recheck']}
+                        for r in results for t in r['signals'] if 'known_recheck' in t]
+        if getattr(args, 'known_recheck', False):
+            (output/'known_recheck_decisions.json').write_text(json.dumps(recheck_rows,
+                ensure_ascii=False, indent=2, allow_nan=False)+'\n', encoding='utf-8')
         if fast:
             from util.fast_infer import write_predictions
             refresh_open_set_results(results, rows_by_file)
@@ -331,7 +343,13 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
                 save_npz(output/'unknown_features.npz',{'kind':'unknown_candidates','schema_version':1,
                     'feature_version':FEATURE_VERSION,'signature':signature,'records':records,
                     'discovery_parameters':discovery['parameters']},features=features)
-            return write_predictions(output, results, discovery["input_mode"], discovery)
+            # Persist failure reasons in fast mode as well as full mode.
+            (output/'unknown_clusters.json').write_text(json.dumps(discovery,
+                ensure_ascii=False, indent=2, allow_nan=False)+'\n', encoding='utf-8')
+            compact = write_predictions(output, results, discovery["input_mode"], discovery)
+            compact['metrics']['known_recheck_evaluated'] = len(recheck_rows)
+            compact['metrics']['known_recheck_recovered'] = sum(d['accepted'] for d in recheck_rows)
+            return compact
         save_unknown_prototypes(output/"unknown_prototypes.npz", discovery, signature, profile.reference.shape[1])
         discovery["prototype_archive"] = "unknown_prototypes.npz"
         import numpy as np
@@ -412,6 +430,9 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
             for event in result['bursts']:
                 stream.write(json.dumps({'path':result['path'],**event},ensure_ascii=False,allow_nan=False)+'\n')
     metrics = multi_evaluation_metrics(results, cfg.classes)
+    if profile:
+        metrics['known_recheck_evaluated'] = len(recheck_rows)
+        metrics['known_recheck_recovered'] = sum(d['accepted'] for d in recheck_rows)
     metrics['burst_label_conflicts']=sum(r['burst_diagnostics']['label_conflicts'] for r in results)
     if profile:
         metrics['discovery_constraint_failures']=int(discovery.get('constraint_satisfied') is False)
