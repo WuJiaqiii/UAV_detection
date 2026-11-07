@@ -167,6 +167,47 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(pipeline.infer(self.args(['1-1'],dry=True)),0)
         self.assertFalse((self.root/'experiment').exists())
 
+    def test_observed_short_capture_is_accepted_and_reported_without_rewriting(self):
+        p=self.dat('1-1',size=39_845_888);details={}
+        _,counts,_=pipeline.inspect_inputs(self.data,['1-1'],diagnostics=details)
+        self.assertEqual(counts,{'1-1':1});self.assertEqual(p.stat().st_size,39_845_888)
+        self.assertAlmostEqual(details['1-1']['min_duration_ms'],99.61472)
+        self.assertEqual(details['1-1']['non_nominal_files'][0]['size_bytes'],39_845_888)
+        for n in (pipeline.MIN_IQ_BYTES,pipeline.NOMINAL_IQ_BYTES):
+            with self.subTest(size=n):
+                self.dat('1-1',size=n)
+                self.assertEqual(pipeline.inspect_inputs(self.data,['1-1'])[1],{'1-1':1})
+
+    def test_partial_iq_pair_is_rejected_even_with_near_nominal_duration(self):
+        self.dat('1-1',size=39_999_998)
+        with self.assertRaisesRegex(ValueError,'whole int16 I/Q pairs.*39,999,998'):
+            pipeline.inspect_inputs(self.data,['1-1'])
+
+    def test_duration_compatibility_does_not_accept_grossly_short_or_long_captures(self):
+        for n in (pipeline.MIN_IQ_BYTES-4,pipeline.NOMINAL_IQ_BYTES+4,20_000_000):
+            with self.subTest(size=n):
+                self.dat('1-1',size=n)
+                with self.assertRaisesRegex(ValueError,'got .* bytes'):
+                    pipeline.inspect_inputs(self.data,['1-1'])
+
+    def test_item_id_validation_is_independent_of_iq_length(self):
+        p=self.dat('1-1');p.rename(p.with_name('1-2_0000.dat'))
+        with self.assertRaisesRegex(ValueError,'Expected a 1-1 file ID, got 1-2_0000'):
+            pipeline.inspect_inputs(self.data,['1-1'])
+
+    def test_short_capture_dry_run_exposes_drop_coverage_and_cover_plan(self):
+        self.dat('1-1',size=39_845_888);out=io.StringIO();err=io.StringIO()
+        with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
+            self.assertEqual(pipeline.infer(self.args(['1-1'],dry=True)),0)
+        data=json.loads(out.getvalue());gap=data['input_sampling']['1-1']['coverage_gaps'][0]
+        self.assertAlmostEqual(gap['unobserved_ms'],49.61472)
+        self.assertIn('49.61472 ms unobserved',err.getvalue())
+        self.assertFalse((self.root/'experiment').exists())
+        details=data['input_duration_diagnostics']
+        coverage=pipeline.input_sampling_diagnostics(details,SimpleNamespace(iq_sample_rate=100_000_000,
+            iq_stride_ms=50,tail_policy='cover',max_slices=0))
+        self.assertEqual(coverage['1-1']['uncovered_file_count'],0)
+
     def test_large_burst_json_field_does_not_break_batch_csv_review(self):
         p=self.root/'multi.csv'
         bursts=json.dumps([dict(start_ms=i/1000,end_ms=i/1000+.0005,

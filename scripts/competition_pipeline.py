@@ -17,6 +17,10 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 ITEMS = ('1-1', '1-2', '1-3', '1-4', '2-1', '2-2')
+NOMINAL_IQ_BYTES = 40_000_000
+# Converted captures may end at the last acquisition block (observed: 99.61472 ms).
+# This is an input-compatibility allowance, not an official competition tolerance.
+MIN_IQ_BYTES = 39_600_000  # 99 ms; keep the official 100-ms upper bound.
 PIPELINE_SOURCES = ('util/bounded_density.py','util/unknown_discovery.py','util/unknown_density.py',
     'util/burst_normalization.py','util/competition_protocol.py','util/fast_infer.py',
     'scripts/evaluate_single_signal.py','scripts/recluster_competition_batch.py',
@@ -84,7 +88,7 @@ def training_artifacts(directory, yolo=None):
         detector_sha256=file_sha256(detector))
 
 
-def inspect_inputs(root, items):
+def inspect_inputs(root, items, *, diagnostics=None):
     from prepare_submission import identify
     root = Path(root).expanduser().resolve()
     import hashlib
@@ -94,14 +98,25 @@ def inspect_inputs(root, items):
         if not folder.is_dir():
             raise ValueError(f'Missing input directory: {folder}')
         paths = sorted(p for p in folder.rglob('*') if p.is_file() and p.suffix.lower() == '.dat')
-        ids = []
+        ids, non_nominal, sizes = [], [], []
         digest = hashlib.sha256()
         for path in paths:
             sample, dataset = identify(path.name)
-            if dataset != item or path.stat().st_size != 40_000_000:
-                raise ValueError(f'Expected {item} 100-ms, 100-MSps int16 IQ file: {path}')
-            ids.append(int(sample.split('_')[1]))
             stat = path.stat()
+            if dataset != item:
+                raise ValueError(f'Expected a {item} file ID, got {sample}: {path}')
+            if stat.st_size % 4:
+                raise ValueError(f'DAT must contain whole int16 I/Q pairs (4 bytes/pair); '
+                                 f'got {stat.st_size:,} bytes: {path}')
+            if not MIN_IQ_BYTES <= stat.st_size <= NOMINAL_IQ_BYTES:
+                raise ValueError(f'Expected a nominal 100-ms, 100-MSps int16 IQ file '
+                    f'({MIN_IQ_BYTES:,}..{NOMINAL_IQ_BYTES:,} bytes; 99..100 ms); '
+                    f'got {stat.st_size:,} bytes ({stat.st_size/400_000:.8g} ms): {path}')
+            sizes.append(stat.st_size)
+            if stat.st_size != NOMINAL_IQ_BYTES:
+                non_nominal.append(dict(path=str(path), size_bytes=stat.st_size,
+                                        duration_ms=stat.st_size/400_000))
+            ids.append(int(sample.split('_')[1]))
             digest.update(f'{path.relative_to(root)}:{stat.st_size}:{stat.st_mtime_ns}\n'.encode())
         if not ids or sorted(ids) != list(range(len(ids))):
             raise ValueError(f'Empty, duplicate, missing or noncontiguous input IDs in {folder}')
@@ -109,7 +124,34 @@ def inspect_inputs(root, items):
             raise ValueError(f'{item} must contain 1750 DAT files, got {len(ids)}')
         counts[item] = len(ids)
         signatures[item] = digest.hexdigest()
+        if diagnostics is not None:
+            diagnostics[item] = dict(nominal_duration_ms=100, minimum_accepted_ms=99,
+                min_duration_ms=min(sizes)/400_000, max_duration_ms=max(sizes)/400_000,
+                size_histogram={str(n): sizes.count(n) for n in sorted(set(sizes))},
+                non_nominal_files=non_nominal)
     return root, counts, signatures
+
+
+def input_sampling_diagnostics(inputs, frozen):
+    """Report actual coverage without silently changing a signed profile policy."""
+    from util.eval_common import plan_iq_slices
+    # The public parser leaves unspecified frontend fields as None; resolve_config
+    # supplies this same source-rate default before actual inference.
+    sample_rate = 100_000_000 if frozen.iq_sample_rate is None else frozen.iq_sample_rate
+    if sample_rate != 100_000_000:
+        raise ValueError('Competition IQ input requires iq_sample_rate=100000000')
+    result = {}
+    for item, details in inputs.items():
+        gaps = []
+        for size, count in details['size_histogram'].items():
+            _, sampling = plan_iq_slices(int(size)//4, sample_rate,
+                frozen.iq_stride_ms, frozen.tail_policy, frozen.max_slices)
+            if sampling['unobserved_samples']:
+                gaps.append(dict(size_bytes=int(size), files=count,
+                    unobserved_ms=sampling['unobserved_samples']/100_000))
+        result[item] = dict(tail_policy=frozen.tail_policy, uncovered_file_count=sum(g['files'] for g in gaps),
+                            coverage_gaps=gaps)
+    return result
 
 
 def run_command(command, env, log):
@@ -162,18 +204,30 @@ def infer(args, runner=run_command):
     from util.competition_protocol import protocol_for_item
     from util.run_context import create_directory
     artifacts = training_artifacts(args.training_run, args.yolo_weights)
-    data, counts, input_signatures = inspect_inputs(args.data_root, args.items)
+    input_details = {}
+    data, counts, input_signatures = inspect_inputs(args.data_root, args.items, diagnostics=input_details)
     config = (args.config or Path(artifacts['training_run'])/'inference.yaml').resolve()
     # Parse the real schema now, before any long-running model work.
     settings, _ = load_settings(config, 'infer')
     parser = build_task_parser('infer')
     frozen = parser.parse_args([*settings_tokens(parser, settings), '--checkpoint_path', artifacts['checkpoint'],
         '--open_set_profile', artifacts['profile'], '--yolo_weights', artifacts['yolo']])
+    sampling_details = input_sampling_diagnostics(input_details, frozen)
+    for item, details in input_details.items():
+        if details['non_nominal_files']:
+            print(f"WARNING: {item}: {len(details['non_nominal_files'])} file(s) have "
+                f"99..100-ms aligned IQ captures; actual lengths are retained.", file=sys.stderr)
+        for gap in sampling_details[item]['coverage_gaps']:
+            print(f"WARNING: {item}: tail_policy={frozen.tail_policy}, max_slices={frozen.max_slices} "
+                f"leaves {gap['unobserved_ms']:.8g} ms unobserved in {gap['files']} file(s) "
+                f"of {gap['size_bytes']:,} bytes. Full tail coverage requires a matching "
+                "cover profile; do not change signed settings alone.", file=sys.stderr)
     fingerprint = {**artifacts, 'data_root': str(data), 'config_sha256': file_sha256(config),
                    'strategy': 'density_merge', 'known_recheck': False, 'full': args.full,
                    'pipeline_sources': source_fingerprint()}
     if args.dry_run:
-        print(json.dumps(dict(preflight='passed', **fingerprint, input_counts=counts), ensure_ascii=False, indent=2))
+        print(json.dumps(dict(preflight='passed', **fingerprint, input_counts=counts,
+            input_duration_diagnostics=input_details, input_sampling=sampling_details), ensure_ascii=False, indent=2))
         return 0
     if args.resume:
         manifest = args.resume.expanduser().resolve();batch = read(manifest)
@@ -221,7 +275,8 @@ def infer(args, runner=run_command):
                 '--unknown_cluster_policy', 'auto', '--no-known_recheck', '--save_discovery_cache',
                 '--no-fast' if args.full else '--fast']
             entry = dict(status='running', attempt=attempt, input_count=counts[item], log=str(log),
-                         input_signature=input_signatures[item])
+                         input_signature=input_signatures[item], input_duration=input_details[item],
+                         input_sampling=sampling_details[item])
             batch['runs'][item] = entry;save(manifest, batch)
             env = dict(os.environ, UAV_COMPETITION_RUN_POINTER=str(pointer))
             try:

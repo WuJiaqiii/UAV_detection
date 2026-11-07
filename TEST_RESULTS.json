@@ -1,26 +1,28 @@
 {
-  "version": "2.1.0-mainline-a",
-  "base_main": "3398f3af684b4519e6f972c66363f38c6c63a113",
-  "previous_temp": "a4362010c4db414f330b10315c051834c87ac32b",
+  "version": "2.1.1-mainline-a",
+  "base_main": "9b209156bb9bafc377d9fa2201598ab95f1b2f78",
+  "previous_temp": "4c83d219bc1870a994f64e2882d9d7c2751b7987",
   "client_date": "2026-11-07",
   "mainline": "original Maha++ rejection + bounded supported-density-core merging; known_recheck disabled",
   "tests": {
-    "run": 328,
-    "passed": 328,
+    "run": 333,
+    "passed": 333,
     "skipped": 0,
     "failed": 0,
-    "duration_seconds": 18.419,
+    "duration_seconds": 18.811,
     "actual_yolo_backend_enabled": true
   },
   "checks": [
     "Full parent-repository unittest suite",
     "Actual local YOLOv5n native-spectrum versus rendered-PNG input tensor contract",
-    "Fourteen mainline regression/integration tests",
+    "Nineteen mainline regression/integration tests",
     "Six-item manifest, real bounded clustering and joint count selection, 3504 strict XLSX exports",
     "Official task-two no-signal sentinel (-1,0,0), 1750-file coverage, conflicting no_signal rejection",
     "Overlapping distinct tracks, shared-observation conflicts and empty quantized detector boxes",
     "Large burst JSON CSV fields, input/cache mutation rejection, failed-item continuation and verified resume",
-    "Python compilation, mainline training configuration dry_run and Bash entrypoint syntax"
+    "Python compilation, mainline training configuration dry_run and Bash entrypoint syntax",
+    "Observed 39845888-byte IQ captures; 99..100-ms compatibility boundaries; partial-pair and gross-duration rejection; signed-policy sampling coverage diagnostics",
+    "Patched preflight executed read-only against all 18220 remote test files; 32 aligned 99.61472-ms captures accepted"
   ],
   "runtime": {
     "python": "3.9.21",
@@ -41,5 +43,29 @@
   ],
   "hosted_ci": "Configured for temp; inspect GitHub Actions for this commit separately",
   "integration_data": "Synthetic sparse IQ files and deterministic model substitutes; actual clustering/exporter; not competition predictions",
-  "pinned_yolov5": "17cfa633999107857a337d51c9c8271fef97edc7"
+  "pinned_yolov5": "17cfa633999107857a337d51c9c8271fef97edc7",
+  "profile_compatibility": "Only pipeline preflight/reporting and tests/docs changed; feature-producing source, weights and profile settings unchanged. Existing matching profiles need no rebuilding for this patch.",
+  "remote_input_preflight": {
+    "status": "passed",
+    "total_files": 18220,
+    "counts": {
+      "1-1": 3520,
+      "1-2": 3840,
+      "1-3": 3520,
+      "1-4": 3840,
+      "2-1": 1750,
+      "2-2": 1750
+    },
+    "non_nominal_counts": {
+      "1-1": 8,
+      "1-2": 8,
+      "1-3": 8,
+      "1-4": 8,
+      "2-1": 0,
+      "2-2": 0
+    },
+    "short_size_bytes": 39845888,
+    "short_duration_ms": 99.61472,
+    "metadata_only": true
+  }
 }
