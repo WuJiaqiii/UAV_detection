@@ -104,6 +104,9 @@ def stage_arguments(args, config_path):
         raise ValueError("Training and evaluation must use the same IQ capture rate/byte order")
     from util.unknown_discovery import discovery_kwargs, validate_discovery_options
     options = discovery_kwargs(profile)
+    from util.unknown_discovery import validate_bounded_strategy
+    validate_bounded_strategy(options['bounded_strategy'], options['competition_profile'],
+                              options['backend'], options['cluster_policy'])
     validate_discovery_options(options["backend"], options["min_cluster_size"], options["min_samples"],
                                options["min_recordings"], options["dcg_options"],
                                options["input_mode"], options["cluster_policy"])
@@ -111,6 +114,14 @@ def stage_arguments(args, config_path):
     profile.profile_calibration_unit=validate_profile_options(profile.knn_k,profile.known_false_reject_rate,
         profile.min_calibration_per_class,profile.max_reference_per_class,profile.profile_score_method,
         profile.profile_scale_prior_records,profile.profile_covariance_shrinkage,profile.profile_calibration_unit)
+    if profile.profile_recheck:
+        from util.known_recheck import RecheckConfig
+        RecheckConfig(profile.recheck_k, profile.recheck_scale_prior_records,
+                      profile.recheck_radius_frr, profile.recheck_margin_tail).validate()
+        if profile.profile_score_method != 'maha_pp_shrink' or profile.profile_calibration_unit != 'primary':
+            raise ValueError('Known recheck requires Maha++ primary calibration')
+    if profile.known_recheck and (not profile.profile_recheck or profile.unknown_input_mode != 'single'):
+        raise ValueError('Known recheck requires profile_recheck and single-device mode')
     return train, profile
 
 
@@ -131,7 +142,7 @@ def _write_stage_config(output, train, profile):
     settings = json.loads(json.dumps(settings, default=str))
     deployment = {"evaluation": settings, "infer": {
         "inputs": ["/path/to/unlabeled_test"],
-        "unknown_input_mode": "multi",  # Deployment retains all signals; single is an explicit assumption.
+        "unknown_input_mode": "single" if profile.known_recheck else "multi",
         "open_set_profile": str(output / "open_set/known_profile.npz")}}
     (output / "inference.yaml").write_text(yaml.safe_dump(deployment, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
@@ -152,6 +163,8 @@ def run_experiment(args, config_path=None, train_runner=None, predictor=None):
         counts = manifest["summary"][name]
         from util.mahalanobis import MIN_REFERENCE_RECORDINGS
         minimum_reference = MIN_REFERENCE_RECORDINGS if profile.profile_score_method=="maha_pp_shrink" else profile.knn_k
+        if profile.profile_recheck:
+            minimum_reference = max(minimum_reference, profile.recheck_k + 1)
         if counts["train"]["recordings"] < minimum_reference or counts["calibration"]["recordings"] < profile.min_calibration_per_class:
             raise ValueError(f"Insufficient independent reference/calibration recordings for {name!r}: {counts}; "
                              "adjust split ratios or profile counts before training")

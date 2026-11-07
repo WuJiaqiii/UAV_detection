@@ -22,6 +22,11 @@ def select_event_groups(preprocessor, boxes, spectrum, config, scores=None, sour
         if reason:
             decisions.append({'box':original.tolist(),'confidence':score,'accepted':False,'reason':reason});continue
         box=np.asarray([np.floor(box[0]),np.ceil(box[1]),np.ceil(box[2]),np.floor(box[3])],dtype=int)
+        box[[0,2]] = np.clip(box[[0,2]], 0, width)
+        box[[1,3]] = np.clip(box[[1,3]], 0, height)
+        if box[2] <= box[0] or box[3] <= box[1]:
+            decisions.append({'box':original.tolist(),'confidence':score,'accepted':False,
+                              'reason':'empty_after_quantization'});continue
         kept.append(box);confidence.append(score)
         decisions.append({'box':original.tolist(),'accepted_box':box.tolist(),'confidence':score,
                           'source_band_truncated':not np.array_equal(box,original),'accepted':True})

@@ -85,7 +85,9 @@ class FastInferenceTests(unittest.TestCase):
                 patch("util.signal_eval_report.write_html_report", side_effect=AssertionError("html called")), \
                 patch("util.feature_visualization.write_feature_plots", side_effect=AssertionError("plot called")):
             fast = run(fast_args, Predictor())
-        self.assertEqual({p.name for p in fast_args.output_dir.iterdir()}, {"predictions.csv"})
+        self.assertEqual({p.name for p in fast_args.output_dir.iterdir()}, {"predictions.csv", "unknown_clusters.json"})
+        self.assertEqual(json.loads((fast_args.output_dir/'unknown_clusters.json').read_text())['estimated_unknown_class_count'],
+                         fast['discovery']['estimated_unknown_class_count'])
         self.assertGreater(fast["discovery"]["estimated_unknown_class_count"], 0)
         self.assertEqual(full["discovery"]["estimated_unknown_class_count"], fast["discovery"]["estimated_unknown_class_count"])
         expected = {(row["path"], track["track_id"]): track for row in full["files"] for track in row["signals"]}
@@ -125,7 +127,7 @@ class FastInferenceTests(unittest.TestCase):
         with patch("util.run_context.EXPERIMENT_ROOT", self.root/"runs"), contextlib.redirect_stderr(stderr):
             result = execute_run("infer", args, lambda managed: run(managed, Predictor()))
         output = Path(result["run_dir"])
-        self.assertEqual({p.name for p in output.iterdir()}, {"predictions.csv", "run.json"})
+        self.assertEqual({p.name for p in output.iterdir()}, {"predictions.csv", "run.json", "unknown_clusters.json"})
         self.assertEqual(json.loads((output/"run.json").read_text())["status"], "completed_with_errors")
         self.assertEqual(command_exit_code(result), 2)
         error = next(row for row in self.read_table(output) if row["path"].endswith("broken.png"))

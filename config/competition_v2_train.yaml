@@ -1,4 +1,4 @@
-# Full 20-known-class training/profile with the v2 event policy. Adjust input/YOLO paths.
+# Mainline A: original Maha++ rejection; 20 known classes.
 experiment:
   protocol: all_known
   inputs:
@@ -41,6 +41,7 @@ evaluation:
   max_slices: 0
   min_votes: 1
   track_feature_cosine_min: 0.8
+  known_recheck: false
 profile:
   profile_score_method: maha_pp_shrink
   profile_covariance_shrinkage: 0.1
@@ -48,6 +49,7 @@ profile:
   known_false_reject_rate: 0.01
   min_calibration_per_class: 5
   max_reference_per_class: 2000
+  profile_recheck: false
 discovery:
   unknown_cluster_backend: hdbscan
   unknown_cluster_policy: auto
@@ -55,6 +57,6 @@ discovery:
   unknown_min_samples: 3
   unknown_min_recordings: 2
   unknown_allow_single_cluster: true
-  save_visuals: true
-  save_feature_plots: true
+  save_visuals: false
+  save_feature_plots: false
   feature_plot_method: pca

@@ -12,6 +12,8 @@ def add_discovery_arguments(parser):
     parser.add_argument('--test_item', choices=['1-1','1-2','1-3','1-4','2-1','2-2'])
     parser.add_argument('--unknown_fixed_k', type=int, help='Optional label-free joint-selection result, within protocol bounds')
     parser.add_argument('--unknown_min_silhouette', type=float, default=.15)
+    parser.add_argument('--unknown_bounded_strategy', choices=['average', 'density_merge'], default='average',
+                        help='Bounded protocols only: original point hierarchy or quality-scored density-core merging')
     parser.add_argument("--unknown_input_mode", choices=["single", "multi"], default="multi",
                         help="single: one primary discovery seed per recording; multi: keep every signal track")
     parser.add_argument("--unknown_cluster_policy", choices=["auto", "legacy"], default="auto",
@@ -36,6 +38,7 @@ def discovery_kwargs(args):
             'test_item':getattr(args,'test_item',None),
             'fixed_k':getattr(args,'unknown_fixed_k',None),
             'min_silhouette':getattr(args,'unknown_min_silhouette',.15),
+            'bounded_strategy':getattr(args,'unknown_bounded_strategy','average'),
             "min_samples": args.unknown_min_samples, "min_recordings": args.unknown_min_recordings,
             "allow_single_cluster": args.unknown_allow_single_cluster,
             "dcg_options": {"topk": args.dcg_topk, "cosine_threshold": args.dcg_cosine_threshold,
@@ -62,12 +65,20 @@ def validate_discovery_options(backend="hdbscan", min_cluster_size=5, min_sample
             raise ImportError("Unknown discovery requires scikit-learn >= 1.3 (sklearn.cluster.HDBSCAN)") from exc
 
 
+def validate_bounded_strategy(strategy, profile, backend='hdbscan', policy='auto'):
+    if strategy not in ('average', 'density_merge'):
+        raise ValueError('Unknown bounded discovery strategy')
+    if strategy == 'density_merge' and (profile == 'unconstrained' or backend != 'hdbscan' or policy != 'auto'):
+        raise ValueError('density_merge requires a bounded competition_profile, hdbscan backend and auto policy')
+
+
 def discover_unknown(candidates, min_cluster_size=5, min_samples=3, min_recordings=2,
                      allow_single_cluster=True, backend="hdbscan", dcg_options=None,
                      input_mode="multi", cluster_policy="auto", competition_profile='unconstrained',
-                     test_item=None, fixed_k=None, min_silhouette=.15):
+                     test_item=None, fixed_k=None, min_silhouette=.15, bounded_strategy='average'):
     from util.competition_protocol import resolve_protocol
     protocol = resolve_protocol(competition_profile,input_mode,test_item)
+    validate_bounded_strategy(bounded_strategy, competition_profile, backend, cluster_policy)
     if fixed_k is not None and protocol is None:
         raise ValueError('unknown_fixed_k requires a bounded competition profile')
     validate_discovery_options(backend, min_cluster_size, min_samples, min_recordings,
@@ -104,10 +115,15 @@ def discover_unknown(candidates, min_cluster_size=5, min_samples=3, min_recordin
     fit_features = features[selected] if len(selected) else None
     fit_ids = [identities[i] for i in selected]
     if protocol is not None:
-        from util.bounded_discovery import bounded_partition
         fit = fit_features if fit_features is not None else np.empty((0,features.shape[1] if features is not None else 1))
-        labels, bounded_info = bounded_partition(fit,fit_ids,protocol.minimum,protocol.maximum,
-            min_cluster_size,min_recordings,min_silhouette,fixed_k=fixed_k)
+        if bounded_strategy == 'density_merge':
+            from util.bounded_density import bounded_density_partition
+            labels, bounded_info = bounded_density_partition(fit, fit_ids, protocol.minimum, protocol.maximum,
+                min_cluster_size, min_recordings, min_silhouette, min_samples, allow_single_cluster, fixed_k=fixed_k)
+        else:
+            from util.bounded_discovery import bounded_partition
+            labels, bounded_info = bounded_partition(fit,fit_ids,protocol.minimum,protocol.maximum,
+                min_cluster_size,min_recordings,min_silhouette,fixed_k=fixed_k)
         diagnostics.update(bounded_info)
     elif len(selected) and backend == "dcg":
         from util.dcg_discovery import cluster_dcg
@@ -171,12 +187,15 @@ def discover_unknown(candidates, min_cluster_size=5, min_samples=3, min_recordin
                   "input_mode": input_mode, "cluster_policy": cluster_policy,
                   'competition_profile':competition_profile,'test_item':test_item,
                   'fixed_k':fixed_k,'min_silhouette':min_silhouette}
+    parameters['bounded_strategy'] = bounded_strategy
     if backend == "hdbscan":
         parameters.update(min_samples=min_samples, allow_single_cluster=allow_single_cluster)
     else:
         parameters.update(topk=15, cosine_threshold=.85, resolution=1., mutual=True, seed=42)
         parameters.update(dcg_options or {})
-    return {"method": 'bounded-average-cosine' if protocol else "sklearn.HDBSCAN" if backend == "hdbscan" else "DCG-Louvain", "backend": backend,
+    method = ('bounded-density-global-silhouette-merge' if bounded_strategy == 'density_merge' else 'bounded-average-cosine') if protocol else (
+        'sklearn.HDBSCAN' if backend == 'hdbscan' else 'DCG-Louvain')
+    return {"method": method, "backend": backend,
             "unit": "one primary seed per recording; secondary labels inherited" if input_mode == "single" else "one feature per accepted track",
             "prototype_space": FEATURE_VERSION, "input_mode": input_mode, "cluster_policy": cluster_policy,
             "fit_tracks": len(selected), "clustered_fit_tracks": fit_clustered,

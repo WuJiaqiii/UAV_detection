@@ -2,7 +2,7 @@
 
 竞赛 v2 已加入类别数约束、物理突发处理与严格提交。请先阅读 [v2 迁移与运行说明](docs/competition_v2.md)，旧 profile 需要重建。
 
-当前主线为 **主分组 CE + 记录平衡 Maha++ 适配 + 主轨迹校准 + HDBSCAN**，已接入正式 profile 与无标签 infer。直接从头实验使用 `bash run.sh experiment --config config/experiment_iq.yaml`；训练后使用导出的 inference.yaml。配置、迁移及完整命令见 [主线运行说明](docs/mainline_open_set.md)。
+当前竞赛主线为 **A：原 Maha++ 拒识＋公开类别数量范围下的密度核心合并**；已知类二次复核默认关闭。正式完整流程请先阅读 [主线检查与运行说明](docs/competition_mainline.md)：先训练全部 20 类，再用 `bash infer.sh TRAINING_RUN DATA_ROOT` 运行六项，最后用 `bash submit.sh BATCH_MANIFEST` 联合选类并严格导出。不要复用旧的固定时间戳模型，也不要用 16 类伪未知开发模型正式提交。
 
 未知发现支持 `--unknown_input_mode single|multi`：单设备记录以主轨迹拟合，多信号保留全部轨迹。默认 `unknown_cluster_policy=auto` 按独立记录计算HDBSCAN密度，并依据无标签几何证据检查单个大簇。已有实验可直接离线重聚类和重评分，详见 [单信号与多信号未知发现](docs/unknown_discovery_modes.md)。
 
@@ -13,7 +13,7 @@
 
 开集结果默认提供 PCA 特征点分布图，可选 t-SNE 和真值着色对照；`visualize` 可从已有特征归档离线补图。配置、输出与解释范围见 [特征可视化](docs/feature_visualization.md)。
 
-仅需结果表时，在 `infer` 命令加 `--fast`：关闭全部绘图和详细归档，保留文件/切片进度条，只写 predictions.csv 和运行记录。single 每文件一行，multi 每条信号轨迹一行并包含频率上下界；用 `--no-progress` 关闭进度条。详见 [快速推理与其他加速方法](docs/fast_inference.md)。
+仅需结果表时，在 `infer` 命令加 `--fast`：保留进度、predictions.csv、聚类诊断及可选未知缓存。single 每文件一行，multi 保留逐突发信息。任务二空场景按官方示例导出 `[-1,0,0]`。详见 [快速推理与其他加速方法](docs/fast_inference.md)。
 
 已知 profile 默认保存记录平衡的类别均值、共享协方差逆矩阵和主轨迹校准阈值；接受为已知时保留分类头投票类别。推理保留每条链路的时间/频率，在 `class_evidence.csv` 汇总同类别组件。旧类别尺度 kNN 作为兼容对照保留，见 [记录平衡参考库](docs/record_balanced_profiles.md)。
 

@@ -15,6 +15,10 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--min-cluster-size',type=int,default=5)
     p.add_argument('--min-recordings',type=int,default=2)
+    p.add_argument('--bounded-strategy', choices=['average','density_merge'], default='average')
+    p.add_argument('--min-samples', type=int, default=3)
+    p.add_argument('--min-silhouette', type=float, default=.15)
+    p.add_argument('--allow-single-cluster', action=argparse.BooleanOptionalAction, default=True)
     a=p.parse_args()
     items={item:(features,csv) for item,features,csv in a.item}
     if len(items)!=len(a.item) or any(not item.startswith('1-') for item in items):raise ValueError('Unique task-one test items are required')
@@ -24,6 +28,9 @@ def main():
         tokens=['--features',features,'--predictions_csv',predictions,
             '--competition_profile',protocol_for_item(item).name,'--unknown_input_mode','single','--test_item',item,
             '--unknown_min_cluster_size',str(a.min_cluster_size),'--unknown_min_recordings',str(a.min_recordings),
+            '--unknown_min_samples',str(a.min_samples),'--unknown_min_silhouette',str(a.min_silhouette),
+            '--unknown_bounded_strategy',a.bounded_strategy,
+            '--unknown_allow_single_cluster' if a.allow_single_cluster else '--no-unknown_allow_single_cluster',
             '--no-save_feature_plots']
         if fixed is not None:tokens.extend(['--unknown_fixed_k',str(fixed)])
         args=build_parser().parse_args(tokens);args.output_dir=a.output/item/stage

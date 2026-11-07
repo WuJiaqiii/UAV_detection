@@ -45,7 +45,8 @@ def normalize_bursts(events, file_identity='', duplicate_iou=.8, frequency_iou=.
         prepared.append(e)
     sort_key=lambda e:(e['start_ms'],e['end_ms'],e['frequency_low_offset_mhz'],str(e.get('label','')),str(e.get('track_id','')))
     prepared.sort(key=sort_key)
-    result=[];diagnostics={'input_observations':len(prepared),'duplicates_removed':0,'boundary_fragments_joined':0,'label_conflicts':0}
+    result=[];diagnostics={'input_observations':len(prepared),'duplicates_removed':0,'boundary_fragments_joined':0,
+                          'label_conflicts':0,'overlapping_distinct_tracks':0}
     for event in prepared:
         matched=False
         for previous in reversed(result):
@@ -72,6 +73,14 @@ def normalize_bursts(events, file_identity='', duplicate_iou=.8, frequency_iou=.
                     abs(edge-event['window_start_ms'])<=1e-9 and
                     abs(previous['end_ms']-edge)<=edge_tolerance_ms and
                     abs(event['start_ms']-edge)<=edge_tolerance_ms)
+            # Separate accepted tracks can legitimately overlap in frequency
+            # and time. Geometry alone does not prove duplicate observations.
+            separate_tracks=(previous.get('track_id') and event.get('track_id') and
+                             previous['track_id'] != event['track_id'])
+            shared_observation=bool(set(previous['source_observation_ids']) & set(event['source_observation_ids']))
+            if (duplicate or boundary or overlap_fragment) and separate_tracks and not shared_observation:
+                diagnostics['overlapping_distinct_tracks']+=1
+                continue
             if (duplicate or boundary or overlap_fragment) and not same_label:
                 diagnostics['label_conflicts']+=1
                 continue

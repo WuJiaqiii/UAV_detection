@@ -38,7 +38,7 @@ def inference_signature(args, config):
                "util/single_signal_eval.py", "util/multi_signal_eval.py", "util/open_set.py",
                "util/eval_common.py", "util/group_predictor.py", "util/recordings.py",
                "util/known_reference.py", "util/class_evidence.py", "util/mahalanobis.py",
-               "util/recording_features.py",'util/event_detection.py']
+               "util/recording_features.py",'util/event_detection.py', 'util/known_recheck.py']
     settings = {key: value for key, value in vars(config).items()
                 if key not in {"device", "yolo_weights", "frontend_config"}}
     options = {key: getattr(args, key) for key in (
@@ -213,7 +213,9 @@ def validate_profile_options(k, false_reject_rate, minimum_calibration, maximum_
 def build_profile(reference_path, calibration_path, output_path, k=5, known_false_reject_rate=.01,
                   min_calibration_per_class=5, max_reference_per_class=2000, ignore_classes=(),
                   score_method="maha_pp_shrink", scale_prior_records=5.,
-                  covariance_shrinkage=.1, calibration_unit=None):
+                  covariance_shrinkage=.1, calibration_unit=None, recheck_config=None):
+    if recheck_config is not None and (score_method != 'maha_pp_shrink' or calibration_unit not in (None, 'primary')):
+        raise ValueError('Known recheck requires Maha++ with primary calibration')
     calibration_unit=validate_profile_options(k,known_false_reject_rate,min_calibration_per_class,
         max_reference_per_class,score_method,scale_prior_records,covariance_shrinkage,calibration_unit)
     ref_meta, ref_arrays = load_npz(reference_path, "track_features")
@@ -259,6 +261,12 @@ def build_profile(reference_path, calibration_path, output_path, k=5, known_fals
         metadata.update(schema_version=1,kind="open_set_profile",feature_version=FEATURE_VERSION,
             signature=ref_meta["signature"],classes=classes,ignore_classes=sorted(ignored),k=int(k),
             reference_archive_sha256=file_sha256(reference_path),calibration_archive_sha256=file_sha256(calibration_path))
+        if recheck_config is not None:
+            from util.known_recheck import fit_known_rechecker
+            recheck_meta, recheck_arrays = fit_known_rechecker(reference, ref_records, calibration,
+                cal_records, active_classes, recheck_config, min_calibration_per_class, max_reference_per_class)
+            metadata['known_recheck'] = recheck_meta
+            arrays.update(recheck_arrays)
         save_npz(output_path,metadata,**arrays)
         return metadata
     if score_method == "record_class_knn":
@@ -330,6 +338,12 @@ class OpenSetProfile:
         if isinstance(self.k,bool) or not isinstance(self.k, int) or self.k < 1 or not math.isfinite(self.threshold):
             raise ValueError("Invalid profile k/threshold")
         self.classes = dict(classes)
+        self.rechecker = None
+        if 'known_recheck' in self.metadata:
+            from util.known_recheck import KnownRechecker
+            self.rechecker = KnownRechecker(self.metadata['known_recheck'], arrays)
+            if set(self.rechecker.names) != set(classes) - self.ignore_classes:
+                raise ValueError('Known recheck classes differ from profile')
         self.score_method = self.metadata.get("score_method", "global_knn")
         self.known_label_policy = self.metadata.get("known_label_policy",
             "nearest_reference" if self.score_method=="record_class_knn" else "head")
@@ -381,13 +395,23 @@ class OpenSetProfile:
         return scores, names
 
 
-def apply_open_set(profile, results, rows_by_file, min_novel_observation_share=.5, novelty_policy="calibrated_track"):
+def apply_open_set(profile, results, rows_by_file, min_novel_observation_share=.5, novelty_policy="calibrated_track",
+                   known_recheck=False):
+    if known_recheck and getattr(profile, 'rechecker', None) is None:
+        raise ValueError('known_recheck needs a profile built with profile_recheck')
     if not 0 <= min_novel_observation_share <= 1:
         raise ValueError("min_novel_observation_share must be in [0, 1]")
     if novelty_policy not in {"calibrated_track", "observation_guard"}:
         raise ValueError("Unknown novelty policy")
     candidates = []
     items = list(iter_track_features(results, rows_by_file))
+    primary = set()
+    if known_recheck:
+        for result in results:
+            if result['signals']:
+                winner = min(result['signals'], key=lambda t: (-t.get('valid_votes', 0),
+                    -t.get('observation_count', 0), str(t['track_id'])))
+                primary.add((result['path'], winner['track_id']))
     ignored = getattr(profile, "ignore_classes", set())
     valid = [item for item in items if item[2] is not None and item[1].get("class_name") not in ignored]
     if valid:
@@ -412,9 +436,18 @@ def apply_open_set(profile, results, rows_by_file, min_novel_observation_share=.
                     track.update(class_name=profile_name, class_id=profile.classes[profile_name])
                 track.update(recognition_status="known", display_label=track["class_name"])
             elif novelty_policy == "calibrated_track" or share >= min_novel_observation_share:
-                track.update(status="unknown", recognition_status="novel_candidate", display_label="Unknown_unassigned",
-                             class_name=None, class_id=None, unknown_reason="outside_known_feature_distribution")
-                candidates.append({"path": result["path"], "track": track, "feature": center})
+                decision = None
+                if known_recheck and (result['path'], track['track_id']) in primary:
+                    decision = profile.rechecker.decide([center], [track['known_candidate_class']])[0]
+                    track['known_recheck'] = decision
+                if decision and decision['accepted']:
+                    name = decision['candidate_class']
+                    track.update(recognition_status='known', display_label=name, class_name=name,
+                        class_id=profile.classes[name], known_recheck_recovered=True)
+                else:
+                    track.update(status="unknown", recognition_status="novel_candidate", display_label="Unknown_unassigned",
+                                 class_name=None, class_id=None, unknown_reason="outside_known_feature_distribution")
+                    candidates.append({"path": result["path"], "track": track, "feature": center})
             else:
                 track.update(status="unknown", class_name=None, class_id=None, unknown_reason="inconsistent_novelty_across_observations")
         if track["recognition_status"] == "uncertain":

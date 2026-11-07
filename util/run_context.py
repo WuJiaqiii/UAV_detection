@@ -4,6 +4,7 @@ import json
 import math
 from pathlib import Path
 import sys
+import os
 import traceback
 from time import monotonic
 
@@ -75,6 +76,10 @@ def execute_run(task, args, callback):
     save()
     print(f"Experiment directory: {path}", file=sys.stderr)
     try:
+        pointer = os.environ.get('UAV_COMPETITION_RUN_POINTER') if task == 'infer' else None
+        if pointer:
+            with Path(pointer).open('x', encoding='utf-8') as stream:
+                json.dump({'run_dir': str(path), 'task': task}, stream)
         result = callback(args)
         metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
         record["status"] = "completed_with_errors" if metric_error_count(metrics) else "complete"
@@ -103,7 +108,10 @@ def check_output_directory(args):
 
 
 def metric_error_count(metrics):
-    return sum(int(metrics.get(key, 0) or 0) for key in ("error_files", "files_with_slice_errors", "visualization_errors", "feature_plot_errors",'discovery_constraint_failures','burst_label_conflicts'))
+    keys = ("error_files", "files_with_slice_errors", "visualization_errors", "feature_plot_errors",
+            'discovery_constraint_failures', 'burst_label_conflicts')
+    return sum(int(metrics.get(key, 0) or 0) for key in keys
+        if not (key == 'burst_label_conflicts' and metrics.get('submission_unit') == 'recording'))
 
 
 def command_exit_code(result):
