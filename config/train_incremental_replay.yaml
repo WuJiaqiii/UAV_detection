@@ -1,0 +1,45 @@
+# Replace paths and class names, or use scripts/lwf_replay_experiment.py to
+# generate configurations from the completed 12+3+3+2 experiment automatically.
+train:
+  run_mode: train
+  trainer_type: lwf
+  input_type: iq_dat
+  train_dataset_path: [/data/uav/current_new_train]
+  val_dataset_path: [/data/uav/all_seen_val]
+  yolo_weights: /models/detector.pt
+  lwf_teacher_checkpoint: /models/previous_stage_best.pth
+  incremental_split_mode: incremental
+  incremental_new_classes: [Ocusync3]
+  lwf_old_num_classes: 0
+  lwf_replay_manifest: /data/uav/split_manifest.json
+  lwf_replay_per_class: 4
+  lwf_replay_fraction: 0.5
+  lwf_temperature: 2.0
+  lwf_lambda_kd: 1.0
+  lwf_kd_new_weight: 0.0
+  lwf_feature_kd_weight: 0.1
+  lwf_backbone_lr_multiplier: 0.1
+  lwf_freeze_bn: true
+  checkpoint_selection: old_new_hmean
+  early_stop_min_epochs: 30
+  early_stop_patience: 20
+  backbone: resnet18
+  mask_pretrained: false
+  train_group_policy: primary
+  supcon_weight: 0.0
+  grouping_mode: hopping
+  hop_association: shape
+  hop_shape_log_tol: 0.5
+  event_mode: physical
+  valid_band_policy: source
+  singleton_min_confidence: 0.5
+  singleton_min_contrast_z: 1.0
+  event_context_gap_ms: 5.0
+  iq_sample_rate: 100000000
+  epochs: 100
+  batch_size: 32
+  num_workers: 1
+  sample_ratio: 1.0
+  lr: 0.0001
+  seed: 42
+  bbox_cache_mode: "off"

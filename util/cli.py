@@ -15,7 +15,7 @@ PATH_OPTIONS = {
     "classes_json", "inputs", "features", "reference_inputs", "calibration_inputs",
     "test_inputs", "reference_labels_json", "calibration_labels_json",
     "test_labels_json", "labels_json", "recording_ids_json", "rf_centers_json", "open_set_profile", "results_json",
-    "source_experiment", "replay_cache",
+    "source_experiment", "replay_cache", "lwf_replay_manifest",
 }
 
 
