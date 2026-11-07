@@ -157,6 +157,8 @@ def build_parser():
     g_train.add_argument("--lr", type=float, default=1e-4)
     g_train.add_argument("--weight_decay", type=float, default=1e-2)
     g_train.add_argument("--early_stop_patience", type=int, default=20)
+    g_train.add_argument("--early_stop_min_epochs", type=int, default=0)
+    g_train.add_argument("--checkpoint_selection", choices=["acc", "old_new_hmean"], default="acc")
     g_train.add_argument("--cosine_annealing_T0", type=int, default=50)
     g_train.add_argument("--cosine_annealing_mult", type=int, default=2)
 
@@ -175,6 +177,18 @@ def build_parser():
     g_train.add_argument("--lwf_temperature", type=float, default=4.0)
     g_train.add_argument("--lwf_lambda_kd", type=float, default=10.0)
     g_train.add_argument("--lwf_freeze_backbone", action=argparse.BooleanOptionalAction, default=False)
+    g_train.add_argument("--lwf_replay_manifest", type=Path, default=None,
+                         help="Partition manifest with records/path/class_name/split/recording_id/source_sha256")
+    g_train.add_argument("--lwf_replay_per_class", type=int, default=0,
+                         help="Independent old TRAIN recordings per class; 0 preserves original LwF")
+    g_train.add_argument("--lwf_replay_fraction", type=float, default=.5)
+    g_train.add_argument("--lwf_kd_new_weight", type=float, default=1.,
+                         help="Relative KD weight on new examples; 0 distills replayed old examples only")
+    g_train.add_argument("--lwf_feature_kd_weight", type=float, default=0.,
+                         help="Cosine feature preservation on replayed old examples only")
+    g_train.add_argument("--lwf_backbone_lr_multiplier", type=float, default=1.)
+    g_train.add_argument("--lwf_freeze_bn", action=argparse.BooleanOptionalAction, default=False,
+                         help="Keep pretrained BN running statistics during small incremental updates")
 
     g_io = parser.add_argument_group("Checkpoint / Cache")
     g_io.add_argument("--checkpoint_path", type=str, default=None)
@@ -320,6 +334,31 @@ def setup_incremental_class_split(config, logger=None):
         )
 
 def validate_training_options(args):
+    for name, default in (("early_stop_min_epochs", 0), ("lwf_replay_per_class", 0)):
+        if int(getattr(args, name, default)) < 0:
+            raise ValueError(f"{name} must be nonnegative")
+    if getattr(args, "early_stop_min_epochs", 0) > args.epochs:
+        raise ValueError("early_stop_min_epochs cannot exceed epochs")
+    for name, default, positive in (("lwf_feature_kd_weight", 0., False),
+                                    ("lwf_backbone_lr_multiplier", 1., True)):
+        value = float(getattr(args, name, default))
+        if not math.isfinite(value) or value < 0 or (positive and value == 0):
+            raise ValueError(f"Invalid {name}")
+    value = float(getattr(args, "lwf_kd_new_weight", 1.))
+    if not math.isfinite(value) or not 0 <= value <= 1:
+        raise ValueError("lwf_kd_new_weight must be in [0, 1]")
+    replay = int(getattr(args, "lwf_replay_per_class", 0))
+    fraction = float(getattr(args, "lwf_replay_fraction", .5))
+    if not math.isfinite(fraction) or not 0 < fraction < 1:
+        raise ValueError("lwf_replay_fraction must be in (0, 1)")
+    if replay:
+        if (args.trainer_type != "lwf" or args.input_type != "iq_dat" or
+                not getattr(args, "lwf_replay_manifest", None) or args.batch_size < 2 or args.sample_ratio != 1.):
+            raise ValueError("Replay requires IQ LwF, a replay manifest, batch_size>=2 and sample_ratio=1")
+    if getattr(args, "lwf_feature_kd_weight", 0.) and not replay:
+        raise ValueError("Feature KD requires old-record replay")
+    if getattr(args, "checkpoint_selection", "acc") == "old_new_hmean" and args.trainer_type != "lwf":
+        raise ValueError("old_new_hmean requires the LwF old/new class boundary")
     from model.representation import validate_representation_options
     validate_representation_options(args)
     if not 0<=args.singleton_min_confidence<=1 or not math.isfinite(args.singleton_min_contrast_z) or not math.isfinite(args.event_context_gap_ms) or args.event_context_gap_ms<0:
@@ -418,7 +457,11 @@ def main(args):
             dataset_cls = RawIQDataset if config.input_type == "iq_dat" else UAVDataset
             train_dataset = dataset_cls(config, logger, dataset_path=config.train_dataset_path, split_name="train")
             val_dataset = dataset_cls(config, logger, dataset_path=config.val_dataset_path, split_name="val")
-            train_loader = create_dataloader(train_dataset, config, shuffle=True, sample_ratio=float(config.sample_ratio))
+            if getattr(config, "lwf_replay_per_class", 0):
+                from data.incremental_replay import create_replay_loader
+                train_loader = create_replay_loader(config, train_dataset, val_dataset, logger)
+            else:
+                train_loader = create_dataloader(train_dataset, config, shuffle=True, sample_ratio=float(config.sample_ratio))
             val_loader = create_dataloader(val_dataset, config, shuffle=False, sample_ratio=1.0)
         elif config.input_type == "iq_dat":
             train_loader, val_loader = create_iq_train_val_loaders(config, logger)

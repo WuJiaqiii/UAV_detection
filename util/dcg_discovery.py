@@ -34,6 +34,9 @@ def cluster_dcg(features, topk=15, cosine_threshold=.85, resolution=1., mutual=T
     # Identical masks can give identical embeddings. Collapse exact duplicates so
     # mutual-kNN tie breaking cannot arbitrarily strand most of those samples.
     values, inverse, multiplicity = np.unique(values, axis=0, return_inverse=True, return_counts=True)
+    # NumPy releases differ in the shape of return_inverse with axis specified.
+    # Each input track must map to one scalar community label in either case.
+    inverse = np.asarray(inverse).reshape(-1)
     count = len(values)
     labels = np.full(count, -1, dtype=int)
     graph = nx.Graph()

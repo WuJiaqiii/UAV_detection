@@ -63,6 +63,7 @@ class Trainer:
         self.visualizer = DetectionVisualizer(config=self.config, logger=self.logger)
 
         self.best_val_acc = -1.0
+        self.best_selection_score = -1.0
         self.no_improve_epochs = 0
         self.start_epoch = 0
 
@@ -831,7 +832,7 @@ class Trainer:
     # ------------------------------------------------------------------
     # Train / validation
     # ------------------------------------------------------------------
-    def _training_objective(self, images, labels, metas):
+    def _training_objective(self, images, labels, metas, return_features=False):
         """Known-only CE/SupCon; feature interface has no additional parameters."""
         weights = None
         if getattr(self.config, "train_group_policy", "primary") == "all":
@@ -846,9 +847,13 @@ class Trainer:
             losses = nn.functional.cross_entropy(logits, targets, reduction="none")
             return (losses*sample_weights).sum()/sample_weights.sum()
         if not self.supcon_weight:
-            logits = self.classifier(images)
+            if return_features:
+                logits, features = self.classifier(images, return_features=True)
+            else:
+                logits = self.classifier(images)
             ce = cross_entropy(logits, labels, weights)
-            return logits, ce, ce, ce.detach().new_zeros(())
+            result = (logits, ce, ce, ce.detach().new_zeros(()))
+            return (*result, features) if return_features else result
         from model.representation import contrastive_mask_batch
         alternative = contrastive_mask_batch(metas, self.config).to(images.device, non_blocking=True)
         count = len(images)
@@ -856,7 +861,8 @@ class Trainer:
         ce = cross_entropy(logits, labels.repeat(2), weights.repeat(2) if weights is not None else None)
         views = torch.stack([features[:count], features[count:]], dim=1)
         supcon = self.supcon_criterion(views, labels, sample_weights=weights)
-        return logits[:count], ce + self.supcon_weight * supcon, ce, supcon
+        result = (logits[:count], ce + self.supcon_weight * supcon, ce, supcon)
+        return (*result, features[:count]) if return_features else result
 
     def train_one_epoch(self, epoch):
         self.classifier.train()
@@ -944,6 +950,8 @@ class Trainer:
         all_preds = []
         all_targets = []
         instance_rows = []
+        from collections import Counter
+        class_totals, class_correct = Counter(), Counter()
 
         val_vis_fp_set = None
 
@@ -967,6 +975,10 @@ class Trainer:
 
         for batch in pbar:
             inputs, targets_list, snrs, fps = batch
+
+            for targets in targets_list:
+                if len(targets) == 1 and not self._should_skip_eval_label(int(targets[0]["label"])):
+                    class_totals[int(targets[0]["label"])] += 1
 
             need_save_detect_result = (val_vis_fp_set is not None and len(val_vis_fp_set) > 0)
 
@@ -1020,6 +1032,7 @@ class Trainer:
 
             correct += int((preds_cpu == labels_cpu).sum())
             total += int(labels_cpu.shape[0])
+            class_correct.update(int(y) for y, prediction in zip(labels_cpu, preds_cpu) if y == prediction)
 
             all_preds.append(preds_cpu)
             all_targets.append(labels_cpu)
@@ -1072,6 +1085,12 @@ class Trainer:
             epoch=epoch,
         )
 
+        self.last_validation_metrics = {}
+        if getattr(self.config, "checkpoint_selection", "acc") == "old_new_hmean":
+            from util.incremental_metrics import incremental_validation_metrics
+            self.last_validation_metrics = incremental_validation_metrics(self.config.classes,
+                int(self.config.lwf_old_num_classes), class_totals, class_correct)
+
         save_eval_summary(
             result_dir=self.config.result_dir,
             split_name='val',
@@ -1084,6 +1103,7 @@ class Trainer:
                 "num_instances": int(total),
                 "num_targets": int(target_total),
                 "num_matched": int(matched_total),
+                **self.last_validation_metrics,
             },
             eval_exclude_classes=self.config.eval_exclude_classes,
         )
@@ -1276,8 +1296,14 @@ class Trainer:
             self.logger.info(f"[Train] loss={train_loss:.4f}, acc={train_acc:.2f}, match={train_match_recall:.3f}")
             self.logger.info(f"[Val]   loss={val_loss:.4f}, acc={val_acc:.2f}, match={val_match_recall:.3f}" )
 
-            is_best = val_acc > self.best_val_acc
+            metric = getattr(self.config, "checkpoint_selection", "acc")
+            metrics = getattr(self, "last_validation_metrics", {})
+            score = val_acc if metric == "acc" else metrics[metric]
+            self.writer.add_scalar("val/selection_score", score, epoch)
+            self.logger.info(f"[Selection] {metric}={score:.4f}; old={metrics.get('old_macro_recall')}, new={metrics.get('new_macro_recall')}")
+            is_best = score > self.best_selection_score
             if is_best:
+                self.best_selection_score = score
                 self.best_val_acc = val_acc
                 self.no_improve_epochs = 0
             else:
@@ -1294,9 +1320,11 @@ class Trainer:
                     config=self.config,
                     logger=self.logger,
                     is_best=is_best,
+                    selection_metric=metric, selection_score=score, validation_metrics=metrics,
                 )
 
-            if self.no_improve_epochs >= self.config.early_stop_patience:
+            if (self.no_improve_epochs >= self.config.early_stop_patience and
+                    epoch + 1 >= getattr(self.config, "early_stop_min_epochs", 0)):
                 self.logger.info(f"Early stopping triggered at epoch {epoch + 1}")
                 break
 

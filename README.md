@@ -1,5 +1,7 @@
 # UAV_detection
 
+增量识别新增回放增强 LwF：旧训练记录回放、旧样本蒸馏与特征保持、新旧类调和平均选模，以及复用现有 12→15→18 类划分的 A/B 入口。详见 [LwF 回放策略与实验命令](docs/lwf_replay.md)。
+
 竞赛 v2 已加入类别数约束、物理突发处理与严格提交。请先阅读 [v2 迁移与运行说明](docs/competition_v2.md)，旧 profile 需要重建。
 
 当前竞赛主线为 **A：原 Maha++ 拒识＋公开类别数量范围下的密度核心合并**；已知类二次复核默认关闭。正式完整流程请先阅读 [主线检查与运行说明](docs/competition_mainline.md)：先训练全部 20 类，再用 `bash infer.sh TRAINING_RUN DATA_ROOT` 运行六项，最后用 `bash submit.sh BATCH_MANIFEST` 联合选类并严格导出。不要复用旧的固定时间戳模型，也不要用 16 类伪未知开发模型正式提交。

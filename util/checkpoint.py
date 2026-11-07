@@ -62,7 +62,8 @@ def _validate_checkpoint_classes(ckpt, expected_classes, logger=None):
         )
 
 
-def save_training_checkpoint(model, optimizer, scheduler, epoch: int, best_val_acc: float, model_dir, config=None, logger=None, is_best: bool = False):
+def save_training_checkpoint(model, optimizer, scheduler, epoch: int, best_val_acc: float, model_dir, config=None, logger=None, is_best: bool = False,
+                             selection_metric="acc", selection_score=None, validation_metrics=None):
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -72,6 +73,9 @@ def save_training_checkpoint(model, optimizer, scheduler, epoch: int, best_val_a
         "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
         "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
         "best_val_acc": float(best_val_acc),
+        "selection_metric": selection_metric,
+        "selection_score": float(best_val_acc if selection_score is None else selection_score),
+        "validation_metrics": validation_metrics or {},
         "config": vars(config) if hasattr(config, "__dict__") else {},
     }
 
