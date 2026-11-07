@@ -104,6 +104,9 @@ def stage_arguments(args, config_path):
         raise ValueError("Training and evaluation must use the same IQ capture rate/byte order")
     from util.unknown_discovery import discovery_kwargs, validate_discovery_options
     options = discovery_kwargs(profile)
+    from util.unknown_discovery import validate_bounded_strategy
+    validate_bounded_strategy(options['bounded_strategy'], options['competition_profile'],
+                              options['backend'], options['cluster_policy'])
     validate_discovery_options(options["backend"], options["min_cluster_size"], options["min_samples"],
                                options["min_recordings"], options["dcg_options"],
                                options["input_mode"], options["cluster_policy"])

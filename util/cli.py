@@ -287,6 +287,9 @@ def main(argv=None):
     if hasattr(args,'competition_profile'):
         from util.competition_protocol import resolve_protocol
         resolve_protocol(args.competition_profile,args.unknown_input_mode,args.test_item)
+        from util.unknown_discovery import validate_bounded_strategy
+        validate_bounded_strategy(args.unknown_bounded_strategy, args.competition_profile,
+                                  args.unknown_cluster_backend, args.unknown_cluster_policy)
     args._config_path = path
     if getattr(args, "fast", False):
         from util.fast_infer import configure_fast_inference

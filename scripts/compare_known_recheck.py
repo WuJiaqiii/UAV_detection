@@ -188,12 +188,12 @@ def run_comparison(source, output, config):
         newly_false_accepted_unknown=sum(r['is_unknown'] for r in accepted),
         interpretation='One paired held-out-class test; no test-dependent threshold fitting or automatic winner selection.')
     from util.run_context import metric_error_count
-    comparison['source_error_count'] = metric_error_count(baseline.get('metrics', {}))
-    comparison['comparison_has_upstream_errors'] = bool(comparison['source_error_count'])
     keys = ('error_files', 'files_with_slice_errors', 'visualization_errors', 'feature_plot_errors',
             'discovery_constraint_failures', 'burst_label_conflicts')
     comparison['source_error_breakdown'] = {
         key: int(baseline.get('metrics', {}).get(key, 0) or 0) for key in keys}
+    comparison['source_error_count'] = sum(comparison['source_error_breakdown'].values())
+    comparison['comparison_has_upstream_errors'] = bool(comparison['source_error_count'])
     comparison['source_non_event_error_count'] = (comparison['source_error_count'] -
         comparison['source_error_breakdown']['burst_label_conflicts'])
     comparison['source_burst_conflict_files'] = [

@@ -79,6 +79,9 @@ def run(args, predictor=None):
         raise ValueError('known_recheck requires a frozen profile and unknown_input_mode single')
     from util.competition_protocol import resolve_protocol
     resolve_protocol(args.competition_profile,args.unknown_input_mode,args.test_item)
+    from util.unknown_discovery import validate_bounded_strategy
+    validate_bounded_strategy(getattr(args, 'unknown_bounded_strategy', 'average'), args.competition_profile,
+                              args.unknown_cluster_backend, args.unknown_cluster_policy)
     if getattr(args, "fast", False):
         from util.fast_infer import configure_fast_inference
         configure_fast_inference(args)
@@ -430,10 +433,12 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
             for event in result['bursts']:
                 stream.write(json.dumps({'path':result['path'],**event},ensure_ascii=False,allow_nan=False)+'\n')
     metrics = multi_evaluation_metrics(results, cfg.classes)
+    metrics['submission_unit'] = 'recording' if args.unknown_input_mode == 'single' else 'burst'
     if profile:
         metrics['known_recheck_evaluated'] = len(recheck_rows)
         metrics['known_recheck_recovered'] = sum(d['accepted'] for d in recheck_rows)
     metrics['burst_label_conflicts']=sum(r['burst_diagnostics']['label_conflicts'] for r in results)
+    metrics['event_export_valid'] = not bool(metrics['burst_label_conflicts'])
     if profile:
         metrics['discovery_constraint_failures']=int(discovery.get('constraint_satisfied') is False)
         # One canonical submission schema in both modes; detailed reports remain.

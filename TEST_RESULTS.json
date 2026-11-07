@@ -1,22 +1,26 @@
 {
-  "version": "2.0.0-competition",
-  "base_main": "47ab9d5f54f2f70d3d082798a4536e062cc14d23",
-  "client_date": "2026-11-06",
+  "version": "2.1.0-mainline-a",
+  "base_main": "3398f3af684b4519e6f972c66363f38c6c63a113",
+  "previous_temp": "a4362010c4db414f330b10315c051834c87ac32b",
+  "client_date": "2026-11-07",
+  "mainline": "original Maha++ rejection + bounded supported-density-core merging; known_recheck disabled",
   "tests": {
-    "run": 291,
-    "passed": 290,
-    "skipped": 1,
+    "run": 328,
+    "passed": 328,
+    "skipped": 0,
     "failed": 0,
-    "duration_seconds": 13.504,
-    "skip_reason": "Actual YOLO backend tensor contract requires UAV_TEST_REAL_YOLO=1 and complete optional runtime dependencies."
+    "duration_seconds": 18.419,
+    "actual_yolo_backend_enabled": true
   },
   "checks": [
     "Full parent-repository unittest suite",
-    "36 new competition/event/strict-submission tests including pipeline and joint-selection integration",
-    "Python compilation",
-    "New training/inference configs dry-run",
-    "Git patch whitespace check respecting source CRLF",
-    "Original three uploaded CSVs rejected by strict checks without producing submission workbooks"
+    "Actual local YOLOv5n native-spectrum versus rendered-PNG input tensor contract",
+    "Fourteen mainline regression/integration tests",
+    "Six-item manifest, real bounded clustering and joint count selection, 3504 strict XLSX exports",
+    "Official task-two no-signal sentinel (-1,0,0), 1750-file coverage, conflicting no_signal rejection",
+    "Overlapping distinct tracks, shared-observation conflicts and empty quantized detector boxes",
+    "Large burst JSON CSV fields, input/cache mutation rejection, failed-item continuation and verified resume",
+    "Python compilation, mainline training configuration dry_run and Bash entrypoint syntax"
   ],
   "runtime": {
     "python": "3.9.21",
@@ -26,30 +30,16 @@
     "numpy": "2.0.2",
     "scipy": "1.13.1",
     "scikit_learn": "1.6.1",
-    "opencv": "4.12.0"
+    "opencv_python": "4.12.0.88",
+    "ultralytics": "8.3.0"
   },
   "environment_matches_pinned_requirements": false,
   "not_run": [
-    "Real model training and known-profile recalibration",
-    "RF detection/classification accuracy evaluation with actual weights",
-    "Hosted CI"
+    "Fresh model training and known-profile calibration on the server",
+    "RF detection/classification performance evaluation with newly trained weights",
+    "Full task-three online database/update/monitoring/rollback closed loop"
   ],
-  "real_input_validation": {
-    "valid_format": false,
-    "ready": false,
-    "coverage_complete": false,
-    "class_budget_valid": false,
-    "class_budget_errors": [
-      "1-1: unknown class count 8 outside [2,3]",
-      "1-3: unknown class count 1 outside [2,3]",
-      "1-1 and 1-3 must share N1"
-    ],
-    "burst_complete": false,
-    "has_fallbacks": true,
-    "frequency_valid": false,
-    "written_workbooks": 0,
-    "error_count": 4665,
-    "expected_exit_code": 2
-  },
+  "hosted_ci": "Configured for temp; inspect GitHub Actions for this commit separately",
+  "integration_data": "Synthetic sparse IQ files and deterministic model substitutes; actual clustering/exporter; not competition predictions",
   "pinned_yolov5": "17cfa633999107857a337d51c9c8271fef97edc7"
 }

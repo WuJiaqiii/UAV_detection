@@ -1,6 +1,6 @@
-# Rebuild a matching v2 profile before use. Paths belong to that SAME training run.
+# Mainline A + public count bounds. Prefer infer.sh TRAINING_RUN DATA_ROOT.
 evaluation:
-  checkpoint_path: /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code/experiment/all_known_training_20261107_033606/training/models/best.pth
+  checkpoint_path: /path/to/new_training/training/models/best.pth
   yolo_weights: /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code/yolov5/runs/train/exp10/weights/best.pt
   signal_mode: multi
   recursive: true
@@ -16,8 +16,9 @@ evaluation:
     singleton_min_contrast_z: 1.0
     event_context_gap_ms: 5.0
 infer:
-  inputs: [/path/to/1-1]
-  open_set_profile: /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code/experiment/all_known_training_20261107_033606/open_set/known_profile.npz
+  inputs:
+  - /path/to/1-1
+  open_set_profile: /path/to/new_training/open_set/known_profile.npz
   fast: true
   save_discovery_cache: true
   unknown_input_mode: single
@@ -27,3 +28,7 @@ infer:
   unknown_min_cluster_size: 5
   unknown_min_recordings: 2
   unknown_min_silhouette: 0.15
+  known_recheck: false
+  unknown_bounded_strategy: density_merge
+  unknown_cluster_backend: hdbscan
+  unknown_min_samples: 3

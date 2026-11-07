@@ -134,9 +134,11 @@ def write_predictions(output, results, input_mode, discovery):
                 writer.writerow(row)
                 count += 1
     metrics = {"total_files": len(results), "output_rows": count,
+               'submission_unit': 'recording' if input_mode == 'single' else 'burst',
                "error_files": sum(row["status"] == "error" for row in results),
                "files_with_slice_errors": sum(row.get("error_slices", 0) > 0 for row in results),
                "estimated_unknown_class_count": discovery["estimated_unknown_class_count"],
                'discovery_constraint_failures':int(discovery.get('constraint_satisfied') is False),
                'burst_label_conflicts':sum(r.get('burst_diagnostics',{}).get('label_conflicts',0) for r in results)}
+    metrics['event_export_valid'] = not bool(metrics['burst_label_conflicts'])
     return {"metrics": metrics, "predictions_csv": str(target), "files": results, "discovery": discovery}

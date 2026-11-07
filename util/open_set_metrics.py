@@ -46,6 +46,7 @@ def evaluate_open_set(results, classes, discovery, recording_ids=None):
         rows, columns = linear_sum_assignment(-matrix)
         mapping = {cluster_names[c]: true_names[r] for r, c in zip(rows, columns) if matrix[r, c] > 0}
     known_correct = sum(s["predicted_class"] == s["true_class_name"] for s in known)
+    known_predictions = sum(s['recognition_status'] == 'known' for s in samples)
     novel_correct = sum(mapping.get(s["unknown_cluster_id"]) == s["true_class_name"] for s in novel)
     clustered = [s for s in novel if s["unknown_cluster_id"]]
     tp = sum(s["recognition_status"] == "novel_candidate" for s in novel)
@@ -62,6 +63,9 @@ def evaluate_open_set(results, classes, discovery, recording_ids=None):
                "evaluated_recordings": len(samples), "skipped_recordings": len(skipped),
                "known_recordings": len(known), "unknown_recordings": len(novel),
                "known_accuracy": ratio(known_correct, len(known)),
+               "known_micro_precision": ratio(known_correct, known_predictions),
+               "known_micro_recall": ratio(known_correct, len(known)),
+               "known_micro_f1": ratio(2*known_correct, known_predictions+len(known)),
                "unknown_accuracy": ratio(novel_correct, len(novel)),
                "all_accuracy": ratio(known_correct + novel_correct, len(samples)),
                "known_false_reject_rate": ratio(fp, len(known)),
@@ -76,6 +80,10 @@ def evaluate_open_set(results, classes, discovery, recording_ids=None):
                                                                  [s["unknown_cluster_id"] for s in clustered])) if len(clustered) >= 2 else None,
                "clustered_unknown_nmi": float(normalized_mutual_info_score([s["true_class_name"] for s in clustered],
                                                                           [s["unknown_cluster_id"] for s in clustered])) if len(clustered) >= 2 else None,
+               "unknown_ari_with_missing_singletons": float(adjusted_rand_score(
+                   [s['true_class_name'] for s in novel],
+                   [s['unknown_cluster_id'] or f'~missing:{s["recording_id"]}' for s in novel])) if len(novel) >= 2 else None,
+               "unknown_ari_missing_recordings": len(novel)-len(clustered),
                "ood_auroc": auc, "ood_scored_recordings": len(scored),
                "ood_auroc_score": "original frozen rejection score before optional known recheck",
                "class_count_comparison_scope": "complete_single_label_truth" if complete_truth else "incomplete_or_unsupported_truth",

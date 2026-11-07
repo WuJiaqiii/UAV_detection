@@ -230,7 +230,11 @@ def build_plan(args):
             if row.get("error", "").strip() and not args.allow_partial_errors:
                 raise ValueError("Inference error present; review or use --allow-partial-errors")
             if dataset.startswith("2") and row["status"] == "no_signal":
-                continue  # header-only workbook truthfully reports no detections
+                if (row.get('label', '').strip().lower() != 'no_signal' or row.get('track_id', '').strip() or
+                        row.get('bursts_json', '').strip() not in ('', '[]')):
+                    raise ValueError('no_signal must have label no_signal and no track/bursts')
+                files[(dataset, sample)] = [[-1, 0, 0]]  # official example: interference-only scene
+                continue
             label = row["label"].strip()
             match = UNKNOWN.fullmatch(label)
             if normalized(label) in mapping and row["status"] == "known":
@@ -286,10 +290,22 @@ def build_plan(args):
     for row in records:statuses[row['sample']].add(row['status'])
     for sample,values in statuses.items():
         if 'no_signal' in values and len(values)>1:error(f'{sample}: no_signal conflicts with detections')
+    source_coverage = True
     if args.input_root:
-        expected = {identify(p.name)[0] for root in args.input_root for p in root.rglob('*') if p.is_file() and p.suffix.lower()=='.dat'}
+        expected_list = []
+        for root in args.input_root:
+            if not root.is_dir():
+                error(f'Source DAT directory does not exist: {root}');source_coverage = False
+                continue
+            expected_list.extend(identify(p.name)[0] for p in root.rglob('*') if p.is_file() and p.suffix.lower()=='.dat')
+        expected = set(expected_list)
+        if len(expected) != len(expected_list):
+            error('Duplicate source DAT identifiers across input roots');source_coverage = False
+        if not expected:
+            error('No source DAT files found');source_coverage = False
         actual = {r["sample"] for r in records}
         if expected != actual:
+            source_coverage = False
             error(f"CSV/source coverage mismatch: missing={sorted(expected-actual)[:20]}, extra={sorted(actual-expected)[:20]}")
     for dataset in sorted({r["dataset"] for r in records}):
         rows = [r for r in records if r["dataset"] == dataset]
@@ -297,7 +313,8 @@ def build_plan(args):
         report["unknown_labels"][dataset] = codes
         report["datasets"][dataset] = {"files": len({r["sample"] for r in rows}), "input_rows": len(rows),
             "status_counts": dict(Counter(r["status"] for r in rows)),
-            "output_signal_rows": sum(len(values) for (ds, _), values in files.items() if ds == dataset)}
+            "output_signal_rows": sum(sum(v[0] != -1 for v in values) for (ds, _), values in files.items() if ds == dataset),
+            "no_signal_files": sum(ds == dataset and values == [[-1, 0, 0]] for (ds, _), values in files.items())}
         if dataset.startswith("2") and report["datasets"][dataset]["files"] != 1750:
             report["warnings"].append(f"{dataset}: {report['datasets'][dataset]['files']} files; the specification describes 1750. Use --input-root to check coverage.")
         for (ds, sample), values in files.items():
@@ -314,7 +331,7 @@ def build_plan(args):
     for (dataset,sample),values in files.items():
         if dataset.startswith('2') and len({r[0] for r in values})>3:
             report['class_budget_errors'].append(f'{sample}: more than three distinct classes')
-    coverage=True
+    coverage=source_coverage
     for dataset,info in report['datasets'].items():
         ids=sorted(int(r['sample'].split('_')[1]) for r in records if r['dataset']==dataset)
         ids=sorted(set(ids))
@@ -338,7 +355,7 @@ def build_parser():
     p.add_argument("--details", type=Path, nargs="+", help="Task 2 slices.jsonl; otherwise automatically look beside each CSV")
     p.add_argument("--task2-level", choices=["burst", "track"], default="burst")
     p.add_argument("--unresolved", choices=["error", "singleton", "shared"], default="error",
-                   help="Default shared matches the requested common unknown ID for unresolved predictions")
+                   help="Default error; artificial unknown IDs are allowed only in explicit previews")
     p.add_argument("--frequency-policy", choices=["error", "clip"], default="error")
     p.add_argument("--allow-partial-errors", action="store_true")
     p.add_argument("--input-root", type=Path, nargs="+", help="Optional local DAT roots for missing/extra file checks")
