@@ -120,10 +120,14 @@ def contrastive_mask_batch(metas, config):
             raise ValueError("SupCon requires selected native boxes and spec_shape in training metadata")
         shape = tuple(meta["spec_shape"])
         boxes = augment_group_boxes(meta["boxes"], shape, config)
-        tensor, _ = build_mask_input(np.zeros(shape, dtype=np.uint8), boxes, config)
+        spectrum = (meta.get('spectrum') if getattr(config, 'classifier_input_mode', 'mask') == 'mask_amplitude'
+                    else np.zeros(shape, dtype=np.uint8))
+        if spectrum is None:
+            raise ValueError('Amplitude SupCon views require the original scientific spectrum in metadata')
+        tensor, _ = build_mask_input(spectrum, boxes, config)
         if not torch.any(tensor):
             # A one-pixel translation can erase a very thin pulse at resize time.
-            tensor, _ = build_mask_input(np.zeros(shape, dtype=np.uint8), meta["boxes"], config)
+            tensor, _ = build_mask_input(spectrum, meta["boxes"], config)
         tensors.append(tensor)
     if not tensors:
         raise ValueError("Cannot build a contrastive view for an empty instance batch")

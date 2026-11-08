@@ -1,4 +1,5 @@
 import copy
+import json
 import logging
 from pathlib import Path
 import tempfile
@@ -121,7 +122,7 @@ class TrainingIntegrationTests(unittest.TestCase):
         boxes = np.array([[10, 100, 70, 110], [150, 100, 210, 110], [300, 100, 360, 110]])
         detector.detect.return_value = boxes
         preprocessor.select_signal_groups.return_value = [{"boxes": boxes, "score": 2.}]
-        classifier = MaskImageClassifier("resnet18", config.num_classes, 1, pretrained=False)
+        classifier = MaskImageClassifier("resnet18", config.num_classes, config.mask_in_chans, pretrained=False)
         trainer = trainer_type(config, ([batch], [batch]), logging.getLogger("repr-test"), detector, preprocessor, classifier)
         self.addCleanup(trainer.writer.close)
         return trainer
@@ -140,6 +141,20 @@ class TrainingIntegrationTests(unittest.TestCase):
         clone = MaskImageClassifier("resnet18", 2, 1, pretrained=False)
         clone.load_state_dict(torch.load(checkpoint, weights_only=False)["model_state_dict"], strict=True)
         torch.testing.assert_close(clone.net.layer4[0].conv1.weight, trainer.classifier.net.layer4[0].conv1.weight)
+
+    def test_dual_amplitude_supcon_real_training_and_shared_inference(self):
+        from util.multi_signal_eval import MultiSignalPredictor
+        config=self.config();config.classifier_input_mode='mask_amplitude';config.mask_in_chans=2
+        trainer=self.make_trainer(config)
+        loss,_,matched=trainer.train_one_epoch(0)
+        self.assertTrue(np.isfinite(loss));self.assertEqual(matched,1.)
+        saved=json.loads((Path(config.result_dir)/'train_metrics/epoch_1.json').read_text())
+        self.assertEqual(saved['optimizer_steps'],1);self.assertEqual(saved['classifier_input_mode'],'mask_amplitude')
+        trainer.detector.detect_rgb.return_value=trainer.detector.detect.return_value
+        predictor=MultiSignalPredictor(trainer.classifier,trainer.detector,trainer.preprocessor,config,return_features=True)
+        result=predictor.predict(np.zeros((512,750),np.float32),'amplitude')
+        self.assertEqual(len(result['groups']),1)
+        self.assertEqual(len(result['groups'][0]['embedding']),512)
 
     def test_zero_weight_preserves_original_ce_forward(self):
         trainer = self.make_trainer(self.config(weight=0.))

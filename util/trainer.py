@@ -1,6 +1,8 @@
 import numpy as np
 import cv2
 import re
+import json
+from time import perf_counter
 from pathlib import Path
 from PIL import Image
 import torch
@@ -293,6 +295,10 @@ class Trainer:
         else:
             x_np = np.asarray(x_tensor)
 
+        if x_np.ndim == 3 and x_np.shape[0] == 2:
+            Image.fromarray(np.rint(np.clip(x_np[1], 0, 1)*255).astype(np.uint8)).save(
+                root / f'{prefix}_amplitude_input.png')
+            x_np = x_np[0]
         x_np = np.squeeze(x_np)
         input_mask = (x_np > 0.5).astype(np.uint8) * 255
         Image.fromarray(input_mask).save(root / f"{prefix}_binary_input.png")
@@ -496,6 +502,7 @@ class Trainer:
                     "fp": fp, "target_idx": 0, "group_idx": group_idx, "label": label,
                     "target_name": self._label_name(label), "boxes": component_boxes.copy(),
                     "spec_shape": tuple(spec.shape), "loss_weight": 1./len(selected_groups),
+                    **({'spectrum': spec} if getattr(self.config, 'classifier_input_mode', 'mask') == 'mask_amplitude' else {}),
                 })
                 if should_save:
                     self._save_classifier_input_mask_vis(spec=spec, mask=mask, x_tensor=x, fp=fp,
@@ -865,6 +872,8 @@ class Trainer:
         return (*result, features[:count]) if return_features else result
 
     def train_one_epoch(self, epoch):
+        started = perf_counter()
+        optimizer_steps = 0
         self.classifier.train()
 
         loss_meter = AverageMeter()
@@ -901,6 +910,7 @@ class Trainer:
 
             loss.backward()
             self.optimizer.step()
+            optimizer_steps += 1
 
             preds = logits.argmax(dim=1)
 
@@ -934,6 +944,15 @@ class Trainer:
         self.writer.add_scalar("train/supcon_loss", supcon_meter.avg, epoch)
         self.writer.add_scalar("train/acc", train_acc, epoch)
         self.writer.add_scalar("train/match_recall", train_match_recall, epoch)
+        self.last_train_metrics = dict(epoch=epoch+1,optimizer_steps=optimizer_steps,
+            valid_instances=total,source_targets=target_total,matched_records=matched_total,
+            loss=train_loss,ce_loss=ce_meter.avg,supcon_loss=supcon_meter.avg,
+            classifier_input_mode=getattr(self.config,'classifier_input_mode','mask'),
+            supcon_weight=self.supcon_weight,wall_seconds=perf_counter()-started)
+        if getattr(self.config,'result_dir',None):
+            directory=Path(self.config.result_dir)/'train_metrics';directory.mkdir(parents=True,exist_ok=True)
+            (directory/f'epoch_{epoch+1}.json').write_text(
+                json.dumps(self.last_train_metrics,ensure_ascii=False,indent=2,allow_nan=False)+'\n',encoding='utf-8')
 
         return train_loss, train_acc, train_match_recall
 

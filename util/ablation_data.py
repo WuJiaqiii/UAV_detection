@@ -129,6 +129,8 @@ def replay_classifier(splits, checkpoint_path, output, batch_size=32, device="cp
     checkpoint = load_checkpoint_object(checkpoint_path)
     torch.set_num_threads(threads)
     cfg = resolve_config(checkpoint)
+    if cfg.classifier_input_mode != 'mask':
+        raise ValueError('Box-only offline replay cannot reconstruct amplitude inputs; re-extract from original IQ/MAT')
     if cfg.classes != splits[0].classes:
         raise ValueError("Replay checkpoint class mapping differs")
     model = MaskImageClassifier(cfg.backbone, cfg.num_classes, cfg.mask_in_chans,

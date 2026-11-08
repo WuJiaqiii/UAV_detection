@@ -1,6 +1,7 @@
 """Automatic recording splits, known training, calibration and optional testing."""
 import argparse
 import json
+import warnings
 from pathlib import Path
 
 import yaml
@@ -22,7 +23,7 @@ def build_parser():
     parser.add_argument("--test_ratio", type=float, default=None,
                         help="Known-record test fraction: default 0.20 for open_set, 0 for all_known")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--training_variant", choices=["configured", "primary_ce", "all_ce", "all_supcon"], default="configured",
+    parser.add_argument("--training_variant", choices=["configured", "primary_ce", "primary_supcon", "all_ce", "all_supcon"], default="configured",
                         help="Controlled component recipe; same seed/data splits; all_supcon uses weight 0.1")
     parser.add_argument("--recording_ids_json", type=Path)
     parser.add_argument("--split_only", action=argparse.BooleanOptionalAction, default=False,
@@ -45,8 +46,14 @@ def stage_arguments(args, config_path):
         train_settings["yolo_weights"] = args.yolo_weights
     variant = getattr(args, "training_variant", "configured")
     if variant != "configured":
-        train_settings.update(train_group_policy="primary" if variant == "primary_ce" else "all",
-                              supcon_weight=.1 if variant == "all_supcon" else 0.)
+        effective = dict(train_group_policy='primary' if variant.startswith('primary_') else 'all',
+                         supcon_weight=.1 if variant.endswith('_supcon') else 0.)
+        conflicts = {k: {'configured': train_settings[k], 'effective': v} for k, v in effective.items()
+                     if k in train_settings and train_settings[k] != v}
+        if conflicts:
+            warnings.warn(f'training_variant={variant} overrides explicit train settings: {conflicts}; '
+                          'use training_variant=configured to retain them', UserWarning, stacklevel=2)
+        train_settings.update(effective)
     managed_train = {"dataset_path", "train_dataset_path", "val_dataset_path", "class_names", "exclude_classes",
                      "incremental_new_classes", "incremental_split_mode", "checkpoint_path", "experiment_dir", "recording_ids_json"}
     if managed_train & train_settings.keys():

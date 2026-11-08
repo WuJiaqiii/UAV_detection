@@ -269,6 +269,8 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
             if row.get("visualization"):
                 row["visualization"] = Path(row["visualization"]).relative_to(output).as_posix()
         result["true_class_names"] = truth.get(str(path))
+        from util.pipeline_diagnostics import capture_stages
+        capture_stages(result, rows)
         result["class_set_correct"] = (result["status"] != "error" and set(result["predicted_classes"]) == set(result["true_class_names"])
                                         if result["true_class_names"] is not None else None)
         results.append(result)
@@ -349,7 +351,7 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
             # Persist failure reasons in fast mode as well as full mode.
             (output/'unknown_clusters.json').write_text(json.dumps(discovery,
                 ensure_ascii=False, indent=2, allow_nan=False)+'\n', encoding='utf-8')
-            compact = write_predictions(output, results, discovery["input_mode"], discovery)
+            compact = write_predictions(output, results, discovery["input_mode"], discovery, cfg.classes)
             compact['metrics']['known_recheck_evaluated'] = len(recheck_rows)
             compact['metrics']['known_recheck_recovered'] = sum(d['accepted'] for d in recheck_rows)
             return compact
@@ -443,7 +445,7 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
         metrics['discovery_constraint_failures']=int(discovery.get('constraint_satisfied') is False)
         # One canonical submission schema in both modes; detailed reports remain.
         from util.fast_infer import write_predictions
-        write_predictions(output,results,discovery['input_mode'],discovery)
+        write_predictions(output,results,discovery['input_mode'],discovery,cfg.classes)
         metrics["feature_plot_errors"] = int(feature_visualization is not None and feature_visualization["status"] == "error")
         from util.open_set_metrics import evaluate_open_set
         evaluation = evaluate_open_set(results, cfg.classes, discovery, recording_ids)
@@ -473,6 +475,8 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
                        uncertain_files=sum(row["status"] == "uncertain" for row in results),
                        **{key: discovery[key] for key in ("unknown_candidate_tracks", "estimated_unknown_class_count",
                                                            "clustered_unknown_tracks", "unassigned_unknown_tracks")})
+    from util.pipeline_diagnostics import write_diagnostics
+    metrics['pipeline_diagnostics']=write_diagnostics(output,results,cfg.classes)
     report = {"schema_version": 3 if profile or args.export_features else 2, "signal_mode": "multi", "created_at": datetime.now(timezone.utc).isoformat(),
         "checkpoint_path": str(args.checkpoint_path.expanduser().resolve()),
         "yolo_weights": str(args.yolo_weights.expanduser().resolve()),

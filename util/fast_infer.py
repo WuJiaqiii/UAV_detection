@@ -98,7 +98,7 @@ def retain_submission_bursts(result, rows):
     collect_raw_bursts(result,rows)
 
 
-def write_predictions(output, results, input_mode, discovery):
+def write_predictions(output, results, input_mode, discovery, classes=None):
     """One row per file in single mode; one row per frequency track in multi."""
     from util.burst_normalization import finalize_bursts
     finalize_bursts(results)
@@ -141,4 +141,6 @@ def write_predictions(output, results, input_mode, discovery):
                'discovery_constraint_failures':int(discovery.get('constraint_satisfied') is False),
                'burst_label_conflicts':sum(r.get('burst_diagnostics',{}).get('label_conflicts',0) for r in results)}
     metrics['event_export_valid'] = not bool(metrics['burst_label_conflicts'])
+    from util.pipeline_diagnostics import write_diagnostics
+    metrics['pipeline_diagnostics']=write_diagnostics(output,results,classes)
     return {"metrics": metrics, "predictions_csv": str(target), "files": results, "discovery": discovery}

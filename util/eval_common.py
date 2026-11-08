@@ -22,6 +22,7 @@ INFERENCE_DEFAULTS = {
     'singleton_min_contrast_z':1.,'event_context_gap_ms':0.,
     "backbone": "resnet18", "cnn_dropout": 0.,
     "mask_img_size": 224, "mask_in_chans": 1, "mask_fill_value": 255,
+    "classifier_input_mode": "mask",
     "sampling_rate": float(TARGET_SAMPLE_RATE), "frequency_axis": "fft",
     "mat_key": "summed_submatrices", "mat_spec_domain": "amplitude",
     "iq_sample_rate": 100_000_000, "iq_segment_ms": 50.,
@@ -111,7 +112,12 @@ def resolve_config(checkpoint, classes=None, overrides=None, frontend_config=Non
     FrontendConfig.from_config(cfg)
     if cfg.sampling_rate != TARGET_SAMPLE_RATE or cfg.frequency_axis != "fft":
         raise ValueError("Native output grid requires sampling_rate=122880000 and frequency_axis=fft")
-    if cfg.mask_in_chans != 1 or int(cfg.mask_img_size) <= 0 or not 0 <= cfg.mask_fill_value <= 255:
+    from util.mask_input import validate_classifier_input
+    validate_classifier_input(cfg)
+    if (cfg.classifier_input_mode != saved.get('classifier_input_mode', 'mask') or
+            cfg.mask_in_chans != saved.get('mask_in_chans', 1)):
+        raise ValueError('Classifier input mode/channels must match the checkpoint; retrain instead of overriding them')
+    if int(cfg.mask_img_size) <= 0 or not 0 <= cfg.mask_fill_value <= 255:
         raise ValueError("Need one mask channel, positive mask size and fill value in [0,255]")
     if cfg.mat_spec_domain not in {"amplitude", "power", "db", "image"}:
         raise ValueError("Unsupported mat_spec_domain")

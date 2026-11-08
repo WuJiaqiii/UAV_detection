@@ -146,6 +146,7 @@ def build_parser():
     g_model.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "mobilenet_v3_small"])
     g_model.add_argument("--mask_img_size", type=int, default=224)
     g_model.add_argument("--mask_in_chans", type=int, default=1)
+    g_model.add_argument('--classifier_input_mode', choices=['mask', 'mask_amplitude'], default='mask')
     g_model.add_argument("--mask_pretrained", action=argparse.BooleanOptionalAction, default=True)
     g_model.add_argument("--freeze_backbone", action=argparse.BooleanOptionalAction, default=False)
     g_model.add_argument("--cnn_dropout", type=float, default=0.0)
@@ -334,6 +335,10 @@ def setup_incremental_class_split(config, logger=None):
         )
 
 def validate_training_options(args):
+    from util.mask_input import validate_classifier_input
+    if validate_classifier_input(args) == 'mask_amplitude' and (
+            args.input_type == 'png' or (args.input_type == 'mat' and args.mat_spec_domain == 'image')):
+        raise ValueError('mask_amplitude requires scientific amplitude: IQ DAT or amplitude/power/db MAT')
     for name, default in (("early_stop_min_epochs", 0), ("lwf_replay_per_class", 0)):
         if int(getattr(args, name, default)) < 0:
             raise ValueError(f"{name} must be nonnegative")
@@ -400,8 +405,8 @@ def main(args):
         raise ValueError("--val_ratio must be in (0, 1)")
     if args.trainer_type == "lwf" and args.incremental_split_mode != "incremental":
         raise ValueError("LwF requires --incremental_split_mode incremental")
-    if args.mask_in_chans != 1:
-        raise ValueError("The current mask builder produces one channel; --mask_in_chans must be 1")
+    from util.mask_input import validate_classifier_input
+    validate_classifier_input(args)
     if args.mask_img_size < 1 or not (1 <= args.mask_fill_value <= 255):
         raise ValueError("mask_img_size must be positive and mask_fill_value must be in [1, 255]")
     if not (Path(__file__).resolve().parents[1] / "yolov5" / "hubconf.py").is_file():

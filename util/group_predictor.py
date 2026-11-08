@@ -23,6 +23,8 @@ class GroupPredictor:
 
     @torch.inference_mode()
     def detect_groups(self, spectrum, domain):
+        if getattr(self.config, 'classifier_input_mode', 'mask') == 'mask_amplitude' and domain == 'image':
+            raise ValueError('mask_amplitude needs scientific amplitude, not rendered PNG/image input')
         rgb = render_rgb(spectrum, self.frontend, domain)
         boxes = self.detector.detect_rgb(rgb)
         result = {"status": "no_detection", "detected_boxes": len(boxes), "group_count": 0}

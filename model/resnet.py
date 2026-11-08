@@ -89,6 +89,8 @@ class MaskImageClassifier(nn.Module):
         with torch.no_grad():
             if in_chans == 1:
                 new_conv.weight.copy_(old_conv.weight.mean(dim=1, keepdim=True))
+            elif in_chans == 2:
+                new_conv.weight.copy_(old_conv.weight.mean(dim=1, keepdim=True).repeat(1, 2, 1, 1) / 2)
             else:
                 if in_chans < 3:
                     new_conv.weight[:, :in_chans].copy_(old_conv.weight[:, :in_chans])
@@ -118,6 +120,8 @@ class MaskImageClassifier(nn.Module):
         with torch.no_grad():
             if in_chans == 1:
                 new_conv.weight.copy_(first.weight.mean(dim=1, keepdim=True))
+            elif in_chans == 2:
+                new_conv.weight.copy_(first.weight.mean(dim=1, keepdim=True).repeat(1, 2, 1, 1) / 2)
             else:
                 if in_chans < 3:
                     new_conv.weight[:, :in_chans].copy_(first.weight[:, :in_chans])
