@@ -110,6 +110,19 @@ class FastInferenceTests(unittest.TestCase):
                 self.assertAlmostEqual(float(row[key]), track[key])
         self.assertTrue(any(row["label"].startswith("Unknown_") for row in table))
 
+    def test_spectral_fast_and_full_keep_the_same_assignments_and_bursts(self):
+        extra=['--unknown_cluster_backend','spectral','--unknown_bounded_strategy','spectral','--unknown_min_silhouette','0']
+        full=run(self.args('spectral_full',extra=extra),Predictor())
+        fast_args=self.args('spectral_fast',fast=True,extra=extra+['--save_discovery_cache'])
+        fast=run(fast_args,Predictor())
+        expected={(r['path'],t['track_id']):t['display_label'] for r in full['files'] for t in r['signals']}
+        for row in self.read_table(fast_args.output_dir):
+            if row['track_id']:
+                self.assertEqual(row['label'],expected[(row['path'],row['track_id'])])
+                self.assertTrue(json.loads(row['bursts_json']))
+        self.assertEqual(full['discovery']['estimated_unknown_class_count'],fast['discovery']['estimated_unknown_class_count'])
+        self.assertTrue((fast_args.output_dir/'unknown_features.npz').is_file())
+
     def test_single_uses_recording_primary_and_retains_one_row_per_file(self):
         full_args, fast_args = self.args("full-single", "single"), self.args("fast-single", "single", True)
         full, fast = run(full_args, Predictor()), run(fast_args, Predictor())

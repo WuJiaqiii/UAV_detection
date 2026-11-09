@@ -1,0 +1,37 @@
+# Prefer infer.sh TRAIN DATA --profile-refresh REFRESH --cluster-method spectral.
+# Direct use requires paths and all signed sampling/frontend settings to match profile.
+infer:
+  inputs: [/path/to/competition/1-1]
+  checkpoint_path: /path/to/all_known_training/training/models/best.pth
+  yolo_weights: /path/to/yolov5/weights/best.pt
+  open_set_profile: /path/to/refreshed_profile/known_profile.npz
+  signal_mode: multi
+  iq_sample_rate: 100000000
+  iq_byte_order: '<'
+  iq_stride_ms: 50.0
+  tail_policy: cover
+  max_slices: 0
+  vote_method: majority
+  min_slice_confidence: 0.0
+  min_votes: 1
+  min_vote_share: 0.0
+  exclude_vote_classes: []
+  track_freq_tolerance_mhz: 3.0
+  track_min_band_iou: 0.1
+  track_max_gap_ms: 150.0
+  track_feature_cosine_min: 0.8
+  fast: true
+  save_discovery_cache: true
+  known_recheck: false
+  unknown_input_mode: single
+  competition_profile: task1_n1
+  test_item: 1-1
+  unknown_cluster_backend: spectral
+  unknown_bounded_strategy: spectral
+  unknown_cluster_policy: auto
+  spectral_neighbors: 10
+  spectral_seed: 42
+  spectral_n_init: 10
+  unknown_min_cluster_size: 5
+  unknown_min_recordings: 2
+  unknown_min_silhouette: 0.15

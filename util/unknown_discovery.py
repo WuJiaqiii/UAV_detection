@@ -12,13 +12,18 @@ def add_discovery_arguments(parser):
     parser.add_argument('--test_item', choices=['1-1','1-2','1-3','1-4','2-1','2-2'])
     parser.add_argument('--unknown_fixed_k', type=int, help='Optional label-free joint-selection result, within protocol bounds')
     parser.add_argument('--unknown_min_silhouette', type=float, default=.15)
-    parser.add_argument('--unknown_bounded_strategy', choices=['average', 'density_merge'], default='average',
+    parser.add_argument('--unknown_bounded_strategy', choices=['average', 'density_merge', 'spectral'], default='average',
                         help='Bounded protocols only: original point hierarchy or quality-scored density-core merging')
     parser.add_argument("--unknown_input_mode", choices=["single", "multi"], default="multi",
                         help="single: one primary discovery seed per recording; multi: keep every signal track")
     parser.add_argument("--unknown_cluster_policy", choices=["auto", "legacy"], default="auto",
                         help="auto: independent-record density and evidence-based root check; legacy: original HDBSCAN")
-    parser.add_argument("--unknown_cluster_backend", choices=["hdbscan", "dcg"], default="hdbscan")
+    parser.add_argument("--unknown_cluster_backend", choices=["hdbscan", "dcg", "spectral"], default="hdbscan")
+    parser.add_argument('--spectral_neighbors',type=int,default=10)
+    parser.add_argument('--spectral_seed',type=int,default=42)
+    parser.add_argument('--spectral_n_init',type=int,default=10)
+    parser.add_argument('--spectral_min_k',type=int,default=1,help='Unconstrained mode only; competition profiles use public bounds')
+    parser.add_argument('--spectral_max_k',type=int,default=8,help='Unconstrained mode only; competition profiles use public bounds')
     parser.add_argument("--unknown_min_cluster_size", type=int, default=5)
     parser.add_argument("--unknown_min_samples", type=int, default=3, help="HDBSCAN only")
     parser.add_argument("--unknown_min_recordings", type=int, default=2)
@@ -31,7 +36,14 @@ def add_discovery_arguments(parser):
 
 
 def discovery_kwargs(args):
+    spectral=dict(neighbors=getattr(args,'spectral_neighbors',10),seed=getattr(args,'spectral_seed',42),
+                  n_init=getattr(args,'spectral_n_init',10),minimum=getattr(args,'spectral_min_k',1),
+                  maximum=getattr(args,'spectral_max_k',8))
+    if args.unknown_cluster_backend=='spectral':
+        from util.spectral_discovery import validate_spectral_options
+        validate_spectral_options(**spectral)
     return {"backend": args.unknown_cluster_backend, "min_cluster_size": args.unknown_min_cluster_size,
+            'spectral_options':spectral,
             "input_mode": getattr(args, "unknown_input_mode", "multi"),
             "cluster_policy": getattr(args, "unknown_cluster_policy", "auto"),
             'competition_profile':getattr(args,'competition_profile','unconstrained'),
@@ -49,8 +61,8 @@ def validate_discovery_options(backend="hdbscan", min_cluster_size=5, min_sample
                                dcg_options=None, input_mode="multi", cluster_policy="auto"):
     if input_mode not in {"single", "multi"} or cluster_policy not in {"auto", "legacy"}:
         raise ValueError("Invalid unknown_input_mode or unknown_cluster_policy")
-    if backend not in {"hdbscan", "dcg"}:
-        raise ValueError("unknown_cluster_backend must be hdbscan or dcg")
+    if backend not in {"hdbscan", "dcg", "spectral"}:
+        raise ValueError("unknown_cluster_backend must be hdbscan, dcg or spectral")
     if (any(isinstance(v, bool) or not isinstance(v, (int, np.integer)) for v in
             (min_cluster_size, min_samples, min_recordings)) or
             min_cluster_size < 2 or min_samples < 1 or min_recordings < 1):
@@ -58,7 +70,7 @@ def validate_discovery_options(backend="hdbscan", min_cluster_size=5, min_sample
     if backend == "dcg":
         from util.dcg_discovery import validate_dcg_options
         validate_dcg_options(**(dcg_options or {}))
-    else:
+    elif backend=='hdbscan':
         try:
             from sklearn.cluster import HDBSCAN
         except ImportError as exc:
@@ -66,16 +78,18 @@ def validate_discovery_options(backend="hdbscan", min_cluster_size=5, min_sample
 
 
 def validate_bounded_strategy(strategy, profile, backend='hdbscan', policy='auto'):
-    if strategy not in ('average', 'density_merge'):
+    if strategy not in ('average', 'density_merge', 'spectral'):
         raise ValueError('Unknown bounded discovery strategy')
     if strategy == 'density_merge' and (profile == 'unconstrained' or backend != 'hdbscan' or policy != 'auto'):
         raise ValueError('density_merge requires a bounded competition_profile, hdbscan backend and auto policy')
+    if (strategy=='spectral' or backend=='spectral') and (strategy!='spectral' or backend!='spectral' or policy!='auto'):
+        raise ValueError('spectral requires matching spectral backend/strategy and auto policy')
 
 
 def discover_unknown(candidates, min_cluster_size=5, min_samples=3, min_recordings=2,
                      allow_single_cluster=True, backend="hdbscan", dcg_options=None,
                      input_mode="multi", cluster_policy="auto", competition_profile='unconstrained',
-                     test_item=None, fixed_k=None, min_silhouette=.15, bounded_strategy='average'):
+                     test_item=None, fixed_k=None, min_silhouette=.15, bounded_strategy='average',spectral_options=None):
     from util.competition_protocol import resolve_protocol
     protocol = resolve_protocol(competition_profile,input_mode,test_item)
     validate_bounded_strategy(bounded_strategy, competition_profile, backend, cluster_policy)
@@ -114,7 +128,16 @@ def discover_unknown(candidates, min_cluster_size=5, min_samples=3, min_recordin
                            "recording_primary" if item["track"]["discovery_is_primary"] else "recording_secondary")
     fit_features = features[selected] if len(selected) else None
     fit_ids = [identities[i] for i in selected]
-    if protocol is not None:
+    if backend=='spectral':
+        from util.spectral_discovery import spectral_partition
+        options=dict(spectral_options or {})
+        minimum=options.pop('minimum',1);maximum=options.pop('maximum',8)
+        if protocol is not None:minimum,maximum=protocol.minimum,protocol.maximum
+        fit=fit_features if fit_features is not None else np.empty((0,features.shape[1] if features is not None else 1))
+        labels,spectral_info=spectral_partition(fit,fit_ids,minimum,maximum,min_cluster_size,min_recordings,
+            min_silhouette,fixed_k,**options)
+        diagnostics.update(spectral_info)
+    elif protocol is not None:
         fit = fit_features if fit_features is not None else np.empty((0,features.shape[1] if features is not None else 1))
         if bounded_strategy == 'density_merge':
             from util.bounded_density import bounded_density_partition
@@ -190,11 +213,14 @@ def discover_unknown(candidates, min_cluster_size=5, min_samples=3, min_recordin
     parameters['bounded_strategy'] = bounded_strategy
     if backend == "hdbscan":
         parameters.update(min_samples=min_samples, allow_single_cluster=allow_single_cluster)
-    else:
+    elif backend=='dcg':
         parameters.update(topk=15, cosine_threshold=.85, resolution=1., mutual=True, seed=42)
         parameters.update(dcg_options or {})
-    method = ('bounded-density-global-silhouette-merge' if bounded_strategy == 'density_merge' else 'bounded-average-cosine') if protocol else (
+    else:parameters['spectral_options']=spectral_options or dict(neighbors=10,seed=42,n_init=10,minimum=1,maximum=8)
+    method = ('bounded-spectral-cosine-selection' if protocol else 'spectral-cosine-selection') if backend=='spectral' else (
+        ('bounded-density-global-silhouette-merge' if bounded_strategy == 'density_merge' else 'bounded-average-cosine') if protocol else (
         'sklearn.HDBSCAN' if backend == 'hdbscan' else 'DCG-Louvain')
+    )
     return {"method": method, "backend": backend,
             "unit": "one primary seed per recording; secondary labels inherited" if input_mode == "single" else "one feature per accepted track",
             "prototype_space": FEATURE_VERSION, "input_mode": input_mode, "cluster_policy": cluster_policy,

@@ -6,6 +6,7 @@ guessed. Only explicit inference/submit commands execute work, never training.
 """
 import argparse
 import codecs
+from contextlib import nullcontext
 import csv
 import json
 import os
@@ -21,7 +22,7 @@ NOMINAL_IQ_BYTES = 40_000_000
 # Converted captures may end at the last acquisition block (observed: 99.61472 ms).
 # This is an input-compatibility allowance, not an official competition tolerance.
 MIN_IQ_BYTES = 39_600_000  # 99 ms; keep the official 100-ms upper bound.
-PIPELINE_SOURCES = ('util/bounded_density.py','util/unknown_discovery.py','util/unknown_density.py',
+PIPELINE_SOURCES = ('util/bounded_density.py','util/unknown_discovery.py','util/unknown_density.py','util/spectral_discovery.py',
     'util/burst_normalization.py','util/competition_protocol.py','util/fast_infer.py',
     'scripts/evaluate_single_signal.py','scripts/recluster_competition_batch.py',
     'scripts/competition_pipeline.py','prepare_submission.py','util/run_context.py')
@@ -42,7 +43,7 @@ def save(path, value):
     temporary.replace(path)
 
 
-def training_artifacts(directory, yolo=None):
+def training_artifacts(directory, yolo=None, profile_override=None):
     from importlib.metadata import version, PackageNotFoundError
     from util.open_set import load_npz, file_sha256
     from prepare_submission import KNOWN, normalized
@@ -50,7 +51,7 @@ def training_artifacts(directory, yolo=None):
     state = read(directory/'experiment.json')
     if state.get('status') != 'complete' or state.get('protocol') != 'all_known':
         raise ValueError('Use a completed all_known training run, not a 16-class development model')
-    profile = directory/'open_set/known_profile.npz'
+    profile = Path(profile_override).expanduser().resolve() if profile_override else directory/'open_set/known_profile.npz'
     meta, _ = load_npz(profile, 'open_set_profile')
     if {normalized(n) for n in meta['classes']} != {normalized(n) for n in KNOWN}:
         raise ValueError('Competition model must contain all official 20 known classes')
@@ -203,7 +204,17 @@ def infer(args, runner=run_command):
     from util.cli import build_task_parser, load_settings, settings_tokens
     from util.competition_protocol import protocol_for_item
     from util.run_context import create_directory
-    artifacts = training_artifacts(args.training_run, args.yolo_weights)
+    refresh=getattr(args,'profile_refresh',None)
+    if refresh:
+        if args.config is not None or getattr(args,'profile',None) is not None:
+            raise ValueError('--profile-refresh supplies both config and profile; omit --config/--profile')
+        refreshed=read(refresh.expanduser().resolve()/'refresh_manifest.json')
+        if refreshed.get('status')!='complete' or Path(refreshed['training_run']).resolve()!=args.training_run.expanduser().resolve():
+            raise ValueError('Use a completed refresh for this exact training run')
+        args.profile=Path(refreshed['profile']);args.config=Path(refreshed['inference_config'])
+        if file_sha256(args.profile)!=refreshed['profile_sha256']:
+            raise ValueError('Refreshed profile changed after extraction')
+    artifacts = training_artifacts(args.training_run,args.yolo_weights,getattr(args,'profile',None))
     input_details = {}
     data, counts, input_signatures = inspect_inputs(args.data_root, args.items, diagnostics=input_details)
     config = (args.config or Path(artifacts['training_run'])/'inference.yaml').resolve()
@@ -212,6 +223,17 @@ def infer(args, runner=run_command):
     parser = build_task_parser('infer')
     frozen = parser.parse_args([*settings_tokens(parser, settings), '--checkpoint_path', artifacts['checkpoint'],
         '--open_set_profile', artifacts['profile'], '--yolo_weights', artifacts['yolo']])
+    method=getattr(args,'cluster_method',None) or ('spectral' if frozen.unknown_bounded_strategy=='spectral' else 'density_merge')
+    spectral=dict(neighbors=frozen.spectral_neighbors if getattr(args,'spectral_neighbors',None) is None else args.spectral_neighbors,
+                  seed=frozen.spectral_seed if getattr(args,'spectral_seed',None) is None else args.spectral_seed,
+                  n_init=frozen.spectral_n_init)
+    if method=='spectral':
+        from util.spectral_discovery import validate_spectral_options
+        validate_spectral_options(**spectral)
+    gpu_policy=None
+    if getattr(args,'wait_for_gpu',False):
+        from util.gpu_wait import GpuWaitPolicy
+        gpu_policy=GpuWaitPolicy(args.gpu_id,args.gpu_min_free_mib)
     sampling_details = input_sampling_diagnostics(input_details, frozen)
     for item, details in input_details.items():
         if details['non_nominal_files']:
@@ -223,7 +245,8 @@ def infer(args, runner=run_command):
                 f"of {gap['size_bytes']:,} bytes. Full tail coverage requires a matching "
                 "cover profile; do not change signed settings alone.", file=sys.stderr)
     fingerprint = {**artifacts, 'data_root': str(data), 'config_sha256': file_sha256(config),
-                   'strategy': 'density_merge', 'known_recheck': False, 'full': args.full,
+                   'strategy':method,'spectral_options':spectral if method=='spectral' else None,
+                   'known_recheck': False, 'full': args.full,
                    'pipeline_sources': source_fingerprint()}
     if args.dry_run:
         print(json.dumps(dict(preflight='passed', **fingerprint, input_counts=counts,
@@ -249,7 +272,8 @@ def infer(args, runner=run_command):
         batch = dict(schema_version=1, fingerprint=fingerprint, config=str(config), runs={}, status='running',
             discovery=dict(min_cluster_size=frozen.unknown_min_cluster_size,
                 min_recordings=frozen.unknown_min_recordings, min_samples=frozen.unknown_min_samples,
-                min_silhouette=frozen.unknown_min_silhouette, allow_single_cluster=frozen.unknown_allow_single_cluster))
+                min_silhouette=frozen.unknown_min_silhouette, allow_single_cluster=frozen.unknown_allow_single_cluster,
+                strategy=method,spectral_options=spectral))
     # OS releases this lock even if the user interrupts a batch.
     import fcntl
     with manifest.with_suffix('.lock').open('a') as lock:
@@ -271,16 +295,25 @@ def infer(args, runner=run_command):
                 '--checkpoint_path', artifacts['checkpoint'], '--open_set_profile', artifacts['profile'],
                 '--yolo_weights', artifacts['yolo'], '--inputs', str(data/item), '--test_item', item,
                 '--competition_profile', protocol.name, '--unknown_input_mode', protocol.input_mode,
-                '--unknown_bounded_strategy', 'density_merge', '--unknown_cluster_backend', 'hdbscan',
+                '--unknown_bounded_strategy',method,'--unknown_cluster_backend','spectral' if method=='spectral' else 'hdbscan',
                 '--unknown_cluster_policy', 'auto', '--no-known_recheck', '--save_discovery_cache',
                 '--no-fast' if args.full else '--fast']
-            entry = dict(status='running', attempt=attempt, input_count=counts[item], log=str(log),
+            if method=='spectral':
+                command+=['--spectral_neighbors',str(spectral['neighbors']),'--spectral_seed',str(spectral['seed']),
+                          '--spectral_n_init',str(spectral['n_init'])]
+            entry = dict(status='waiting' if gpu_policy else 'running', attempt=attempt, input_count=counts[item], log=str(log),
                          input_signature=input_signatures[item], input_duration=input_details[item],
                          input_sampling=sampling_details[item])
             batch['runs'][item] = entry;save(manifest, batch)
-            env = dict(os.environ, UAV_COMPETITION_RUN_POINTER=str(pointer))
             try:
-                code = runner(command, env, log)
+                from util.gpu_wait import reserve_gpu,worker_environment
+                with reserve_gpu(gpu_policy) if gpu_policy else nullcontext(None) as gpu:
+                    env=worker_environment(gpu) if gpu else dict(os.environ)
+                    env['UAV_COMPETITION_RUN_POINTER']=str(pointer)
+                    entry['status']='running'
+                    if gpu:entry['gpu']=gpu.as_dict()
+                    save(manifest,batch)
+                    code = runner(command, env, log)
                 entry['return_code'] = code
                 if not pointer.is_file():
                     raise ValueError('Child did not allocate a run; inspect its batch log')
@@ -297,7 +330,7 @@ def infer(args, runner=run_command):
                         cache_sha256=file_sha256(run_dir/'unknown_features.npz'))
                 else:
                     entry['error'] = f'Child exit {code}, run status {status}'
-            except (OSError, ValueError, KeyError, csv.Error) as exc:
+            except (OSError, ValueError, KeyError, csv.Error, RuntimeError) as exc:
                 entry.update(status='failed', error=str(exc))
             except BaseException:
                 entry['status'] = 'interrupted';batch['status'] = 'interrupted';save(manifest, batch);raise
@@ -323,7 +356,8 @@ def submit(args):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ValueError('Inference is still using this manifest') from exc
-        artifacts = training_artifacts(batch['fingerprint']['training_run'], batch['fingerprint']['yolo'])
+        artifacts = training_artifacts(batch['fingerprint']['training_run'],batch['fingerprint']['yolo'],
+                                       batch['fingerprint'].get('profile'))
         if source_fingerprint() != batch['fingerprint']['pipeline_sources']:
             raise ValueError('Pipeline source changed after inference; review before creating a new batch')
         if artifacts['profile_sha256'] != batch['fingerprint']['profile_sha256']:
@@ -339,8 +373,13 @@ def submit(args):
                     file_sha256(folder/'unknown_features.npz') != entry['cache_sha256']):
                 raise ValueError(f'{item}: source data or cached predictions/features changed')
         joint = manifest.parent/(planned_directory('joint_task1').name+'_'+uuid4().hex[:8])
+        strategy=batch['discovery'].get('strategy',batch['fingerprint'].get('strategy','density_merge'))
         command = [sys.executable, str(ROOT/'scripts/recluster_competition_batch.py'),
-            '--output', str(joint), '--bounded-strategy', 'density_merge']
+            '--output',str(joint),'--bounded-strategy',strategy]
+        if strategy=='spectral':
+            options=batch['discovery']['spectral_options']
+            command+=['--spectral-neighbors',str(options['neighbors']),'--spectral-seed',str(options['seed']),
+                      '--spectral-n-init',str(options['n_init'])]
         command.append('--allow-single-cluster' if batch['discovery'].get('allow_single_cluster',True)
                        else '--no-allow-single-cluster')
         for key, flag in [('min_cluster_size','--min-cluster-size'), ('min_recordings','--min-recordings'),
@@ -372,6 +411,12 @@ def main():
     p.add_argument('training_run', type=Path);p.add_argument('data_root', type=Path)
     p.add_argument('--items', nargs='+', choices=ITEMS, default=list(ITEMS))
     p.add_argument('--config', type=Path);p.add_argument('--yolo-weights', type=Path)
+    p.add_argument('--profile',type=Path,help='Refreshed known_profile.npz; must match the same 20-class checkpoint')
+    p.add_argument('--profile-refresh',type=Path,help='Completed refresh directory; supplies matching profile and inference config')
+    p.add_argument('--cluster-method',choices=['density_merge','spectral'],help='Default: spectral if configured; otherwise original density_merge')
+    p.add_argument('--spectral-neighbors',type=int);p.add_argument('--spectral-seed',type=int)
+    p.add_argument('--wait-for-gpu',action='store_true');p.add_argument('--gpu-id',default='0')
+    p.add_argument('--gpu-min-free-mib',type=int,default=8192)
     p.add_argument('--full', action='store_true');p.add_argument('--dry-run', action='store_true')
     p.add_argument('--resume', type=Path)
     p = sub.add_parser('submit');p.add_argument('manifest', type=Path)

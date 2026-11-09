@@ -158,6 +158,41 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'changed'):
             pipeline.infer(self.args(['1-1'],manifest),runner=self.runner)
 
+    def test_spectral_is_forwarded_to_inference_and_frozen_for_resume(self):
+        self.dat('1-1');args=self.args(['1-1']);args.cluster_method='spectral'
+        def runner(command,env,log):
+            self.assertEqual(command[command.index('--unknown_cluster_backend')+1],'spectral')
+            self.assertEqual(command[command.index('--unknown_bounded_strategy')+1],'spectral')
+            self.assertEqual(command[command.index('--spectral_neighbors')+1],'10')
+            folder=self.root/'experiment/spectral';folder.mkdir()
+            (folder/'run.json').write_text(json.dumps(dict(status='complete')))
+            (folder/'unknown_features.npz').write_bytes(b'cache')
+            (folder/'predictions.csv').write_text('path,label,status,error\n/data/1-1_0000.dat,DJFPV,known,\n')
+            Path(env['UAV_COMPETITION_RUN_POINTER']).write_text(json.dumps(dict(run_dir=str(folder))))
+            return 0
+        with contextlib.redirect_stdout(io.StringIO()):pipeline.infer(args,runner=runner)
+        manifest=next((self.root/'experiment').glob('competition_batch_*/batch_manifest.json'))
+        state=json.loads(manifest.read_text())
+        self.assertEqual(state['fingerprint']['strategy'],'spectral')
+        self.assertEqual(state['discovery']['spectral_options']['neighbors'],10)
+        args.resume=manifest;args.spectral_neighbors=20
+        with self.assertRaisesRegex(ValueError,'changed'):pipeline.infer(args,runner=runner)
+
+    def test_gpu_wait_admits_the_checked_device_before_each_inference_worker(self):
+        from contextlib import contextmanager
+        from util.gpu_wait import GpuMemory
+        self.dat('1-1');args=self.args(['1-1']);args.wait_for_gpu=True;args.gpu_id='0';args.gpu_min_free_mib=16384
+        @contextmanager
+        def ready(policy):
+            manifest=next((self.root/'experiment').glob('competition_batch_*/batch_manifest.json'))
+            self.assertEqual(json.loads(manifest.read_text())['runs']['1-1']['status'],'waiting')
+            yield GpuMemory(0,'GPU-test',24576,23000)
+        def worker(command,env,log):
+            self.assertEqual(env['CUDA_VISIBLE_DEVICES'],'GPU-test')
+            return self.runner(command,env,log)
+        with patch('util.gpu_wait.reserve_gpu',ready),contextlib.redirect_stdout(io.StringIO()):
+            pipeline.infer(args,runner=worker)
+
     def test_preflight_rejects_wrong_duration_and_dry_run_creates_no_output(self):
         self.dat('1-1',size=4)
         with self.assertRaisesRegex(ValueError,'100-ms'):
@@ -270,6 +305,19 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(report['ready']);self.assertEqual(report['written_workbooks'],3504)
         final=json.loads(manifest.read_text());selection=json.loads(Path(final['last_submission']['joint_selection']).read_text())
         self.assertEqual(selection['selected_counts'],{'1-1':2,'1-2':3,'1-3':2,'1-4':3})
+        # A spectral batch must remain spectral during final joint selection.
+        final['fingerprint']['strategy']='spectral'
+        final['discovery'].update(strategy='spectral',spectral_options=dict(neighbors=10,seed=42,n_init=10))
+        manifest.write_text(json.dumps(final))
+        def spectral_child(command,**kwargs):
+            if Path(command[1]).name=='recluster_competition_batch.py':
+                self.assertEqual(command[command.index('--bounded-strategy')+1],'spectral')
+                self.assertEqual(command[command.index('--spectral-neighbors')+1],'10')
+            return child(command,**kwargs)
+        with patch('scripts.competition_pipeline.subprocess.run',side_effect=spectral_child):
+            self.assertEqual(pipeline.submit(SimpleNamespace(manifest=manifest,output=self.root/'spectral_out',check=True)),0)
+        spectral_report=json.loads((self.root/'spectral_out_report.json').read_text())
+        self.assertTrue(spectral_report['ready']);self.assertEqual(spectral_report['written_workbooks'],0)
 
 
 class TrainingPreflightTests(unittest.TestCase):

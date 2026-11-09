@@ -290,6 +290,9 @@ def main(argv=None):
         from util.unknown_discovery import validate_bounded_strategy
         validate_bounded_strategy(args.unknown_bounded_strategy, args.competition_profile,
                                   args.unknown_cluster_backend, args.unknown_cluster_policy)
+        if args.unknown_cluster_backend=='spectral':
+            from util.unknown_discovery import discovery_kwargs
+            discovery_kwargs(args)  # Reject invalid spectral options before model/data work.
     args._config_path = path
     if getattr(args, "fast", False):
         from util.fast_infer import configure_fast_inference
