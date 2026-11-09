@@ -15,7 +15,10 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--min-cluster-size',type=int,default=5)
     p.add_argument('--min-recordings',type=int,default=2)
-    p.add_argument('--bounded-strategy', choices=['average','density_merge'], default='average')
+    p.add_argument('--bounded-strategy', choices=['average','density_merge','spectral'], default='average')
+    p.add_argument('--spectral-neighbors',type=int,default=10)
+    p.add_argument('--spectral-seed',type=int,default=42)
+    p.add_argument('--spectral-n-init',type=int,default=10)
     p.add_argument('--min-samples', type=int, default=3)
     p.add_argument('--min-silhouette', type=float, default=.15)
     p.add_argument('--allow-single-cluster', action=argparse.BooleanOptionalAction, default=True)
@@ -32,6 +35,9 @@ def main():
             '--unknown_bounded_strategy',a.bounded_strategy,
             '--unknown_allow_single_cluster' if a.allow_single_cluster else '--no-unknown_allow_single_cluster',
             '--no-save_feature_plots']
+        if a.bounded_strategy=='spectral':
+            tokens+=['--unknown_cluster_backend','spectral','--spectral_neighbors',str(a.spectral_neighbors),
+                     '--spectral_seed',str(a.spectral_seed),'--spectral_n_init',str(a.spectral_n_init)]
         if fixed is not None:tokens.extend(['--unknown_fixed_k',str(fixed)])
         args=build_parser().parse_args(tokens);args.output_dir=a.output/item/stage
         return run(args)

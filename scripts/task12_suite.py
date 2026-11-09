@@ -5,7 +5,7 @@ prepare/check never train. run delegates to the existing experiment pipeline,
 with one subprocess per case. Existing completed, hash-verified jobs are reused.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import copy
 from datetime import datetime, timezone
 import fcntl
@@ -14,10 +14,12 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 import yaml
 
 REPO=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(REPO))
+from util.gpu_wait import GpuWaitPolicy, is_cuda_allocation_failure, reserve_gpu, worker_environment
 CASES={'mask_ce':('mask',0.),'mask_supcon':('mask',.1),
        'dual_ce':('mask_amplitude',0.),'dual_supcon':('mask_amplitude',.1)}
 
@@ -95,27 +97,86 @@ def artifacts(run):
     return required+[p for p in optional if p.is_file()]+sorted((run/'training/result/train_metrics').glob('epoch_*.json'))
 
 
-def run_cases(suite,state,selected):
+def validate_gpu_case(config):
+    """Workers are pinned to one physical UUID; model devices must stay local."""
+    cfg=yaml.safe_load(Path(config).read_text(encoding='utf-8'))
+    if cfg.get('train',{}).get('yolo_device') not in (None,''):
+        raise ValueError('GPU waiting requires train.yolo_device to be unset; select the physical card with --gpu-id')
+    for section in ['evaluation','profile','discovery']:
+        if cfg.get(section,{}).get('device','auto') not in ('auto','cuda','cuda:0'):
+            raise ValueError('GPU waiting requires evaluation/profile/discovery.device=auto or cuda:0')
+
+
+def worker(config,result_path):
+    from util.cli import main as cli
+    try:
+        result=cli(['experiment','--config',str(config)])
+    except BaseException as exc:
+        save(result_path,{'status':'failed','error':f'{type(exc).__name__}: {exc}',
+                          'cuda_allocation_failure':is_cuda_allocation_failure(exc)})
+        raise
+    save(result_path,{'status':'complete','run_dir':result['run_dir']})
+
+
+def allocation_failure(attempt):
+    try:
+        result=json.loads((attempt/'result.json').read_text(encoding='utf-8'))
+        return isinstance(result,dict) and result.get('cuda_allocation_failure') is True
+    except (OSError,ValueError):
+        return False
+
+
+def run_cases(suite,state,selected,gpu_policy=None):
     for name in CASES if selected=='all' else [selected]:
         previous=state['jobs'].get(name)
         if previous and previous.get('status')=='complete':
             for p,h in previous['artifacts'].items():
                 if digest(p)!=h:raise ValueError('Completed artifact changed: '+p)
             print('Verified; skip completed:',name);continue
-        attempt=suite/(name+'_'+datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f'))
-        attempt.mkdir()
-        state['jobs'][name]={'status':'running','attempt':str(attempt)};save(suite/'suite.json',state)
-        command=[sys.executable,str(Path(__file__).resolve()),'_worker','--config',state['cases'][name]['config'],
-                 '--result',str(attempt/'result.json')]
+        if gpu_policy:validate_gpu_case(state['cases'][name]['config'])
+        history=copy.deepcopy((previous or {}).get('attempts',[]))
+        if previous and previous.get('attempt') and not history:
+            history.append({k:v for k,v in previous.items() if k!='attempts'})
+        job={'status':'waiting' if gpu_policy else 'pending','attempts':history,'resource_retries':0}
+        if gpu_policy:job['gpu_wait_policy']=vars(gpu_policy)
+        state['jobs'][name]=job
+        active=None
         try:
-            subprocess.run(command,cwd=REPO,check=True)
-            result=json.loads((attempt/'result.json').read_text());run=Path(result['run_dir'])
-            status=json.loads((run/'run.json').read_text())['status']
-            state['jobs'][name].update(status=status,run_dir=str(run),
-                artifacts={str(p):digest(p) for p in artifacts(run)})
-            if status!='complete':raise RuntimeError('Run completed with upstream errors; review '+str(run))
+            while True:
+                job['status']='waiting' if gpu_policy else 'pending';active=None
+                save(suite/'suite.json',state)
+                try:
+                    with reserve_gpu(gpu_policy) if gpu_policy else nullcontext(None) as gpu:
+                        attempt=suite/(name+'_'+datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f'))
+                        attempt.mkdir();active={'status':'running','attempt':str(attempt)}
+                        if gpu:active['gpu']=gpu.as_dict()
+                        history.append(active);job.update(active);job.pop('error',None);save(suite/'suite.json',state)
+                        command=[sys.executable,str(Path(__file__).resolve()),'_worker','--config',state['cases'][name]['config'],
+                                 '--result',str(attempt/'result.json')]
+                        options={'env':worker_environment(gpu)} if gpu else {}
+                        subprocess.run(command,cwd=REPO,check=True,**options)
+                        result=json.loads((attempt/'result.json').read_text());run=Path(result['run_dir'])
+                        status=json.loads((run/'run.json').read_text())['status']
+                        active.update(status=status,run_dir=str(run),artifacts={str(p):digest(p) for p in artifacts(run)})
+                        job.update(active)
+                        if status!='complete':raise RuntimeError('Run completed with upstream errors; review '+str(run))
+                    break
+                except subprocess.CalledProcessError as exc:
+                    if active is None:raise
+                    active.update(status='failed',error=f'{type(exc).__name__}: {exc}')
+                    if not (gpu_policy and allocation_failure(Path(active['attempt'])) and
+                            job['resource_retries']<gpu_policy.oom_retries):raise
+                    job.update(status='waiting',error=active['error'],resource_retries=job['resource_retries']+1)
+                    save(suite/'suite.json',state)
+                    print(f'[GPU retry] {name}: CUDA allocation failed; fresh experiment retry '
+                          f'{job["resource_retries"]}/{gpu_policy.oom_retries} after '
+                          f'{gpu_policy.poll_seconds:g}s. Failed attempt retained: {active["attempt"]}',flush=True)
+                    time.sleep(gpu_policy.poll_seconds)
         except BaseException as exc:
-            state['jobs'][name].update(status='failed',error=f'{type(exc).__name__}: {exc}');raise
+            status='interrupted' if isinstance(exc,(KeyboardInterrupt,SystemExit)) else 'failed'
+            job.update(status=status,error=f'{type(exc).__name__}: {exc}')
+            if active and active['status']=='running':active.update(status=status,error=job['error'])
+            raise
         finally:save(suite/'suite.json',state)
 
 
@@ -165,20 +226,30 @@ def main(argv=None):
     prep.add_argument('--unknown-classes',nargs='+');prep.add_argument('--seed',type=int,default=42);prep.add_argument('--epochs',type=int,default=100)
     for name in ['check','run','compare']:
         cmd=sub.add_parser(name);cmd.add_argument('--suite',type=Path,required=True)
-        if name=='run':cmd.add_argument('--case',choices=[*CASES,'all'],default='all')
-    worker=sub.add_parser('_worker');worker.add_argument('--config',type=Path,required=True);worker.add_argument('--result',type=Path,required=True)
+        if name=='run':
+            cmd.add_argument('--case',choices=[*CASES,'all'],default='all')
+            cmd.add_argument('--wait-for-gpu',action='store_true',help='Wait before each case without creating a CUDA context')
+            cmd.add_argument('--gpu-id',default='0',help='Physical nvidia-smi index or UUID; worker is pinned to this GPU')
+            cmd.add_argument('--gpu-min-free-mib',type=int,default=8192)
+            cmd.add_argument('--gpu-poll-seconds',type=float,default=30.)
+            cmd.add_argument('--gpu-wait-timeout',type=float,default=0.,help='Per-admission wait limit in seconds; 0 waits indefinitely')
+            cmd.add_argument('--gpu-oom-retries',type=int,default=1,help='Fresh case retries for explicit CUDA allocation failures only')
+    worker_parser=sub.add_parser('_worker');worker_parser.add_argument('--config',type=Path,required=True);worker_parser.add_argument('--result',type=Path,required=True)
     a=p.parse_args(argv)
     if a.command=='prepare':return prepare(a)
     from util.cli import main as cli
     if a.command=='_worker':
-        result=cli(['experiment','--config',str(a.config)]);save(a.result,{'run_dir':result['run_dir']});return
+        return worker(a.config,a.result)
+    gpu_policy=None
+    if a.command=='run' and a.wait_for_gpu:
+        gpu_policy=GpuWaitPolicy(a.gpu_id,a.gpu_min_free_mib,a.gpu_poll_seconds,a.gpu_wait_timeout,a.gpu_oom_retries)
     suite=a.suite.resolve()
     with locked(suite):
         state=load(suite)
         if a.command=='check':
             for case in state['cases'].values():cli(['experiment','--config',case['config'],'--dry_run'])
             print('All four cases passed configuration preflight; no training/inference was run.')
-        elif a.command=='run':run_cases(suite,state,a.case)
+        elif a.command=='run':run_cases(suite,state,a.case,gpu_policy)
         else:compare(suite,state)
 
 

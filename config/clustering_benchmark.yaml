@@ -1,0 +1,37 @@
+version: 1
+pca_dimensions: [0, 32, 64]  # 0 keeps the original L2 feature space.
+seeds: [42, 43, 44]
+k_candidates: [1, 2, 3, 4, 5, 6, 7, 8]  # Declared before looking at truth.
+min_cluster_size: 5          # Common post-fit support rule for every method.
+min_recordings: 2
+algorithms:
+  hdbscan_auto:
+    min_cluster_size: [5, 10, 20]
+    min_samples: [3, 5, 10]
+  density_merge:
+    min_cluster_size: [5, 10, 20]
+    min_samples: [3, 5, 10]
+    min_silhouette: [0.15]
+    bootstrap_runs: [5]
+  kmeans:
+    n_init: [10]
+  spherical_kmeans:
+    n_init: [10]
+  agglomerative:
+    linkage: [average, complete, ward]
+  gmm:
+    covariance_type: [diag, spherical]
+    reg_covar: [0.0001, 0.01]
+  dbscan:
+    min_samples: [3, 5, 10]
+    eps_quantile: [0.5, 0.75, 0.9, 0.95]
+  optics:
+    min_samples: [3, 5, 10]
+    min_cluster_size: [5, 10]
+    xi: [0.03, 0.05, 0.1]
+  spectral:
+    n_neighbors: [5, 10, 20]
+  dcg:
+    topk: [5, 10, 20]
+    cosine_threshold: [0.7, 0.85, 0.95]
+    resolution: [0.5, 1.0, 1.5]

@@ -62,6 +62,30 @@ python main.py experiment --config "$SUITE/mask_ce.yaml" --split_only
 python -u scripts/task12_suite.py run --suite "$SUITE" --case dual_ce
 ```
 
+### 显存不足时排队等待
+
+在共享显卡上运行时，为 `run` 加上等待选项。以24 GiB RTX 3090为例，下面要求至少空闲16 GiB，每30秒检查一次，无限等待，满足条件才启动下一组实验：
+
+```bash
+python -u scripts/task12_suite.py run --suite "$SUITE" \
+  --wait-for-gpu --gpu-id 0 \
+  --gpu-min-free-mib 16384 --gpu-poll-seconds 30 \
+  --gpu-wait-timeout 0 --gpu-oom-retries 1 &&
+python scripts/task12_suite.py compare --suite "$SUITE"
+```
+
+`--gpu-id` 是 `nvidia-smi` 的物理编号或完整GPU UUID；子进程会用该UUID设置 `CUDA_VISIBLE_DEVICES`，绑定到刚检查的同一张卡，覆盖继承的可见卡设置。子进程中该卡为逻辑 `cuda:0`，所以配置中的 `train.yolo_device` 应保持未设置，评价的 `device` 保持 `auto`（或 `cuda:0`）。这不改变批量大小、类别划分或算法。
+
+只加 `--wait-for-gpu` 时默认门槛为8192 MiB、每30秒检查、无限等待、最多额外重试1次。16384 MiB是此机器的保守排队门槛，并非实测的模型峰值显存保证。门槛超过整卡容量、驱动查询失败或没有 `nvidia-smi` 时会明确报错；这些情况不会被当作“忙碌”一直等待。没有开启该选项时保持原来的直接执行方式，CPU运行不需要它。
+
+等待时不导入torch或创建CUDA上下文，不启动训练子进程，终端持续显示空闲显存和已等待时间；`suite.json` 对应case的状态为 `waiting`。`Ctrl+C` 可以取消并记录 `interrupted`。可以设置如 `--gpu-wait-timeout 3600`，让每次排队最多等待一小时。
+
+同一Unix用户通过该机制启动的实验会按GPU UUID持有协作锁，前一个子进程退出后才允许下一项进入；不同用户或没有使用此机制的程序仍可能占用显存。这是启动条件检查，不是显存预留，也不会中止其他人的进程。
+
+若启动后发生明确的 `CUDA out of memory` 或 `cublasCreate` 的 `CUBLAS_STATUS_ALLOC_FAILED`，原训练子进程退出释放资源，脚本保留失败产物，等待一个检查周期后重新排队。默认最多额外尝试一次，避免模型本身超出显存时无限重训；用 `--gpu-oom-retries 0` 可关闭自动重试。其他代码/数据错误以及上游不完整结果不会重试。重试会从头运行该case，不是在出错的反向传播处续接；失败与成功的各次目录保存在 `suite.json` 的 `attempts` 中，比较仍只使用最后成功的产物。
+
+**从旧版本升级时须重新 `prepare` 到新目录**，例如把 `SUITE` 改为 `$PWD/experiment/task12_dev_s42_gpuwait`，再执行本节前面的 `prepare/check` 和上面的等待命令。旧suite冻结了源码摘要，本次新增调度代码也会触发“Prepared code changed”，不要手工改摘要绕过检查。旧失败实验保留用于排错。
+
 准备后不要修改生成的YAML、检测器或代码；如需改变条件，创建新suite。比较器核对真实分区、内容摘要、类别集合后才输出结果。固定100轮上限时关闭提前停止，仍保留验证选优；实际优化步数可能受检测失败等因素影响，必须查看 `compute` 中的步数、实例数与训练耗时。原训练器仍按固定中心50ms验证选checkpoint，比较阶段按完整记录推理；不要把它写成已实现逐轮100ms开集选模。
 
 首次用seed42筛选，再在新suite目录用43、44复验；还应轮换留出类别，包含相近型号与较远型号。不要根据官方测试汇总反复挑选全部参数。当前数据已多次用于开发，最终需新记录或明确未参与选型的验证方案。
