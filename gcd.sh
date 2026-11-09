@@ -1,12 +1,27 @@
-export DATA=/media/kaneki/05E4235537EC7AC2/dataset_wjq/train_dataset
-export YOLO=/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code/yolov5/runs/train/exp10/weights/best.pt
-export SUITE="$PWD/experiment/task12_dev_s42"
+OLD=/media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code
+# cd "$OLD"
+# git fetch origin temp
+# git worktree add ../code_spectral_infer origin/temp
+# cd ../code_spectral_infer
+# git submodule update --init --recursive
+# conda activate myconda
 
-python scripts/task12_suite.py prepare \
-  --suite "$SUITE" --inputs "$DATA" --yolo-weights "$YOLO" \
-  --protocol open_set --seed 42 --epochs 100 \
-  --unknown-classes 'DJI_Inspire_2' 'DJI_MATRICE_200' 'DJMiniSE' 'FRSKY X14'
+TRAIN="$OLD/experiment/all_known_training_20261107_113635"
+DATA=/media/kaneki/05E4235537EC7AC2/dataset_wjq
+REFRESH="$PWD/experiment/profile_refresh_all20_spectral"
 
-python scripts/task12_suite.py check --suite "$SUITE"
-python -u scripts/task12_suite.py run --suite "$SUITE"
-python scripts/task12_suite.py compare --suite "$SUITE"
+python scripts/refresh_competition_profile.py "$TRAIN" \
+  --output "$REFRESH" --dry-run
+
+python -u scripts/refresh_competition_profile.py "$TRAIN" \
+  --output "$REFRESH" --wait-for-gpu \
+  --gpu-id 0 --gpu-min-free-mib 16384
+
+bash infer.sh "$TRAIN" "$DATA" \
+  --profile-refresh "$REFRESH" --cluster-method spectral --dry-run
+
+bash infer.sh "$TRAIN" "$DATA" \
+  --profile-refresh "$REFRESH" --cluster-method spectral \
+  --wait-for-gpu --gpu-id 0 --gpu-min-free-mib 16384
+
+python scripts/inspect_competition_clusters.py "$BATCH" --projection both
