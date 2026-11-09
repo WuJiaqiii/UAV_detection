@@ -145,6 +145,7 @@ yolov5/               固定外部检测后端
 
 新增可选的掩膜＋幅度谱双通道输入，保持默认单通道兼容；普通及fast推理均输出分阶段诊断。
 四组控制实验、逐突发CSV审计及带显式已知类别集合的评价方法见 [任务一、二优化实验说明](docs/task12_optimization.md)。
+固定模型比较10类聚类算法、PCA与多组参数，生成带真实标签评分的CSV矩阵、热图和交互报告，见 [聚类结果矩阵](docs/clustering_benchmark.md)。
 `scripts/task12_suite.py prepare/check` 只准备及检查配置，`run` 才开始训练；开发留出类模型需在选型后重训为完整20类再部署。
 
 ## 检查
