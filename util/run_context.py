@@ -76,7 +76,8 @@ def execute_run(task, args, callback):
     save()
     print(f"Experiment directory: {path}", file=sys.stderr)
     try:
-        pointer = os.environ.get('UAV_COMPETITION_RUN_POINTER') if task == 'infer' else None
+        pointer = (os.environ.get('UAV_COMPETITION_RUN_POINTER') if task == 'infer' else
+                   os.environ.get('UAV_EXPERIMENT_RUN_POINTER') if task == 'experiment' else None)
         if pointer:
             with Path(pointer).open('x', encoding='utf-8') as stream:
                 json.dump({'run_dir': str(path), 'task': task}, stream)
