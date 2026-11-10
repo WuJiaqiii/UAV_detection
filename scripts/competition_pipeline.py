@@ -155,10 +155,11 @@ def input_sampling_diagnostics(inputs, frozen):
     return result
 
 
-def run_command(command, env, log):
+def run_command(command, env, log, *, pass_fds=()):
     decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
     with log.open('wb') as stream:
-        process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   pass_fds=pass_fds)
         try:
             while True:
                 chunk = process.stdout.read1(4096)
@@ -274,6 +275,15 @@ def infer(args, runner=run_command):
                 min_recordings=frozen.unknown_min_recordings, min_samples=frozen.unknown_min_samples,
                 min_silhouette=frozen.unknown_min_silhouette, allow_single_cluster=frozen.unknown_allow_single_cluster,
                 strategy=method,spectral_options=spectral))
+    pointer = getattr(args, 'manifest_pointer', None)
+    if pointer:
+        pointer = Path(pointer).expanduser().resolve()
+        if pointer.exists():
+            if Path(read(pointer)['manifest']).resolve() != manifest.resolve():
+                raise ValueError('Batch pointer already refers to a different manifest')
+        else:
+            with pointer.open('x', encoding='utf-8') as stream:
+                json.dump({'manifest': str(manifest.resolve())}, stream)
     # OS releases this lock even if the user interrupts a batch.
     import fcntl
     with manifest.with_suffix('.lock').open('a') as lock:
@@ -419,6 +429,7 @@ def main():
     p.add_argument('--gpu-min-free-mib',type=int,default=8192)
     p.add_argument('--full', action='store_true');p.add_argument('--dry-run', action='store_true')
     p.add_argument('--resume', type=Path)
+    p.add_argument('--manifest-pointer', type=Path, help='Write the allocated/resumed batch path before GPU work')
     p = sub.add_parser('submit');p.add_argument('manifest', type=Path)
     p.add_argument('--output', type=Path);p.add_argument('--check', action='store_true')
     args = parser.parse_args()

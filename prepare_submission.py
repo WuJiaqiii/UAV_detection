@@ -185,6 +185,11 @@ def build_plan(args):
               "frequency_policy": args.frequency_policy, "clipped_intervals": 0,
               "dropped_outside_band": 0, "unresolved_items": [],'task2_row_errors':0}
     error = report["errors"].append
+    placeholder = getattr(args, 'task1_no_signal_code', None)
+    if placeholder is not None:
+        if placeholder < 20 or not getattr(args, 'preview', False):
+            raise ValueError('--task1-no-signal-code requires --preview and an integer >=20')
+        report['task1_no_signal_placeholder'] = {'code': placeholder, 'datasets': {}}
     records, seen, owners, details = [], set(), {}, set(args.details or [])
     for source in args.predictions:
         source_key = source.resolve()
@@ -241,6 +246,11 @@ def build_plan(args):
                 cls = mapping[normalized(label)]
             elif match and int(match[1]) > 0 and row["status"] == "novel_candidate":
                 cls = f"Unknown_{int(match[1]):06d}"
+            elif dataset.startswith('1') and row['status'] == 'no_signal' and label.lower() == 'no_signal' and placeholder is not None:
+                cls = placeholder
+                report['unresolved_items'].append({'sample': sample, 'track_id': '', 'label': label})
+                counts = report['task1_no_signal_placeholder']['datasets']
+                counts[dataset] = counts.get(dataset, 0)+1
             elif normalized(label) in UNRESOLVED:
                 report["unresolved_items"].append({"sample": sample, "track_id": row.get("track_id", ""), "label": label})
                 if args.unresolved == "error":
@@ -310,6 +320,8 @@ def build_plan(args):
     for dataset in sorted({r["dataset"] for r in records}):
         rows = [r for r in records if r["dataset"] == dataset]
         codes = {key: i+20 for i, key in enumerate(sorted(class_keys[dataset]))}
+        if placeholder is not None and dataset.startswith('1') and placeholder in codes.values():
+            error(f'{dataset}: no_signal placeholder {placeholder} collides with a real unknown-cluster code')
         report["unknown_labels"][dataset] = codes
         report["datasets"][dataset] = {"files": len({r["sample"] for r in rows}), "input_rows": len(rows),
             "status_counts": dict(Counter(r["status"] for r in rows)),
@@ -326,6 +338,8 @@ def build_plan(args):
         report["warnings"].append("Task 2 uses track envelopes; repeated bursts and hopping sub-bands cannot be recovered. This does not fully implement the burst-list requirement.")
     if report["unresolved_items"] and args.unresolved != "error":
         report["warnings"].append("Unresolved predictions were explicitly assigned artificial unknown IDs; this is a fallback, not inferred class evidence.")
+    if placeholder is not None:
+        report['warnings'].append(f'Task-one no_signal uses the explicitly requested shared placeholder {placeholder}; it has no signal feature evidence and is not an inferred class. Task-two empty scenes remain -1.')
     counts={item:len({r[0] for (ds,_),rows in files.items() if ds==item for r in rows if isinstance(r[0],int) and r[0]>=20}) for item in report['datasets']}
     report['class_budget_errors']=validate_counts(counts)
     for (dataset,sample),values in files.items():
@@ -361,6 +375,8 @@ def build_parser():
     p.add_argument("--input-root", type=Path, nargs="+", help="Optional local DAT roots for missing/extra file checks")
     p.add_argument("--check", action="store_true", help="Validate and write only the sidecar report, without XLSX files")
     p.add_argument('--preview',action='store_true',help='Allow non-ready previews, always flagged in the report')
+    p.add_argument('--task1-no-signal-code', type=int,
+                   help='Explicit preview-only fixed class for task-one no_signal; must not collide with real clusters')
     p.add_argument('--expected-count',type=int,help='Expected files per test item; task 2 defaults to 1750')
     return p
 

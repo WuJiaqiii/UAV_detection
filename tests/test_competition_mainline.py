@@ -158,6 +158,16 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'changed'):
             pipeline.infer(self.args(['1-1'],manifest),runner=self.runner)
 
+    def test_batch_pointer_is_published_before_gpu_forward_pass(self):
+        self.dat('1-1');args=self.args(['1-1']);args.manifest_pointer=self.root/'batch_pointer.json'
+        def runner(command,env,log):
+            pointed=Path(json.loads(args.manifest_pointer.read_text())['manifest'])
+            self.assertTrue(pointed.is_file())
+            self.assertEqual(json.loads(pointed.read_text())['status'],'running')
+            return self.runner(command,env,log)
+        with contextlib.redirect_stdout(io.StringIO()):pipeline.infer(args,runner=runner)
+        self.assertTrue(Path(json.loads(args.manifest_pointer.read_text())['manifest']).is_file())
+
     def test_spectral_is_forwarded_to_inference_and_frozen_for_resume(self):
         self.dat('1-1');args=self.args(['1-1']);args.cluster_method='spectral'
         def runner(command,env,log):

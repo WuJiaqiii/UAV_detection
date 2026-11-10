@@ -154,18 +154,24 @@ def add_no_signal_class(predictions, output):
     return changed, mapping
 
 
-def export_results(predictions, output, *, extra_no_signal=False, data_root=None, check_only=False):
+def export_results(predictions, output, *, extra_no_signal=False, data_root=None, check_only=False,
+                   task1_no_signal_code=None):
     from prepare_submission import main as export
     output = Path(output)
     policy = {}
+    if extra_no_signal and task1_no_signal_code is not None:
+        raise ValueError('Choose either a fixed no_signal code or per-dataset extra classes')
+    nonstandard = extra_no_signal or task1_no_signal_code is not None
     if extra_no_signal:
         predictions, policy = add_no_signal_class(predictions, output/'no_signal_policy_csv')
-    target = output/('submission_no_signal_extra' if extra_no_signal else 'submission')
+    target = output/('submission_no_signal_extra' if nonstandard else 'submission')
     arguments = ['--predictions', *[str(predictions[i]) for i in ITEMS], '--output', str(target)]
     if data_root:
         arguments += ['--input-root', *[str(Path(data_root)/item) for item in ITEMS]]
-    if extra_no_signal:
+    if nonstandard:
         arguments += ['--preview']
+    if task1_no_signal_code is not None:
+        arguments += ['--task1-no-signal-code', str(task1_no_signal_code)]
     if check_only:
         arguments += ['--check']
     output.mkdir(parents=True, exist_ok=True)
@@ -178,6 +184,12 @@ def export_results(predictions, output, *, extra_no_signal=False, data_root=None
             sys.stdout = previous
     report_path = target.parent/(target.name+'_report.json')
     report = read(report_path)
+    if task1_no_signal_code is not None:
+        policy = {item: dict(submission_code=task1_no_signal_code, rows=count,
+                            meaning='shared no_signal placeholder; no signal evidence')
+                  for item, count in report['task1_no_signal_placeholder']['datasets'].items()}
+        report.update(ready=False, interpretation='Requested fixed no_signal placeholder export; review official constraints.')
+        save(report_path, report)
     if extra_no_signal:
         for item, entry in policy.items():
             canonical = f"Unknown_{int(UNKNOWN.fullmatch(entry['label'])[1]):06d}"
@@ -187,7 +199,7 @@ def export_results(predictions, output, *, extra_no_signal=False, data_root=None
                       interpretation='Requested nonstandard export; not a compliant official submission.')
         report['warnings'].append('Task-one no_signal is encoded as an artificial extra class by explicit request; task-two empty scenes remain -1.')
         save(report_path, report)
-    summary = dict(status='exported_nonstandard' if extra_no_signal and report['written_workbooks'] else
+    summary = dict(status='exported_nonstandard' if nonstandard and report['written_workbooks'] else
                           ('ready' if report['ready'] else 'needs_review'),
                    ready=report['ready'], output=str(target), report=str(report_path),
                    workbooks=report['written_workbooks'], no_signal_extra_classes=policy,
@@ -199,8 +211,33 @@ def export_results(predictions, output, *, extra_no_signal=False, data_root=None
         with ZipFile(archive, 'w', ZIP_DEFLATED) as bundle:
             for path in sorted(target.rglob('*.xlsx')):
                 bundle.write(path, path.relative_to(target))
-            bundle.write(report_path, 'REPORT_请先阅读.json')
+            if nonstandard:
+                bundle.write(report_path, 'REPORT_请先阅读.json')
         summary['zip'] = str(archive)
         save(output/'export_summary.json', summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return code, summary
+
+
+def predictions_from_export(directory):
+    """Load final joint-selected CSVs, including relocatable local snapshots."""
+    directory = Path(directory).expanduser().resolve()
+    manifest_path = directory/'final_predictions.json'
+    manifest = read(manifest_path) if manifest_path.is_file() else None
+    joint = read(directory/'reclustered/task1/joint_selection.json')
+    if set(joint['predictions']) != set(ITEMS[:4]):
+        raise ValueError('Export source must contain all four joint task-one predictions')
+    predictions = {}
+    for item in ITEMS:
+        if item.startswith('1-'):
+            stage = Path(joint['predictions'][item]).parent.name
+            if stage not in {'initial', 'joint'}:
+                raise ValueError('Unexpected joint prediction layout')
+            path = directory/'reclustered/task1'/item/stage/'predictions.csv'
+        else:
+            path = directory/'reclustered'/item/'predictions.csv'
+        if manifest and file_sha256(path) != manifest['sha256'][item]:
+            raise ValueError(f'{item}: final prediction changed after selection')
+        checked_rows(path, item)
+        predictions[item] = path
+    return predictions
