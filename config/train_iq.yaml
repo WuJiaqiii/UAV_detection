@@ -2,7 +2,6 @@
 # Do not copy the MAT/PNG protocol list here. Use actual folder names in
 # exclude_classes if you need to hold out classes for an open-set experiment.
 train:
-  run_mode: train
   trainer_type: normal
   input_type: iq_dat
   train_dataset_path: [/data/uav/iq/known_train]

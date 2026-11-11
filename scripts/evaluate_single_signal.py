@@ -375,7 +375,7 @@ def _run_multi(args, predictor, cfg, inputs, output, options, truth, logger, sig
                         group[key] = track.get(key)
         # Re-render only previously selected previews with FINAL track decisions.
         # The original slice predictions remain in class_name/known_candidate_class.
-        from util.single_signal_eval import load_spectrum
+        from util.eval_common import load_spectrum
         from util.signal_eval_report import save_slice_preview
         for result in results:
             for row in rows_by_file[result["path"]]:

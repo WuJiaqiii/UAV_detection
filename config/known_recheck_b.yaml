@@ -1,7 +1,0 @@
-# Used by scripts/compare_known_recheck.py, not main.py's task config parser.
-# Freeze these before test evaluation. Do not tune them on competition data.
-recheck:
-  k: 3
-  scale_prior_records: 5.0
-  radius_frr: 0.01
-  margin_tail: 0.05

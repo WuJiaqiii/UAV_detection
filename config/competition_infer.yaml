@@ -1,10 +1,10 @@
-# Prefer infer.sh TRAIN DATA --profile-refresh REFRESH --cluster-method spectral.
+# Prefer infer.sh TRAIN DATA --cluster-method spectral; generated inference.yaml is authoritative.
 # Direct use requires paths and all signed sampling/frontend settings to match profile.
 infer:
   inputs: [/path/to/competition/1-1]
   checkpoint_path: /path/to/all_known_training/training/models/best.pth
   yolo_weights: /path/to/yolov5/weights/best.pt
-  open_set_profile: /path/to/refreshed_profile/known_profile.npz
+  open_set_profile: /path/to/all_known_training/open_set/known_profile.npz
   signal_mode: multi
   iq_sample_rate: 100000000
   iq_byte_order: '<'

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified task entry. Scientific pipelines live in util and the three core scripts."""
+"""Unified task entry. Training and all prediction share maintained task components."""
 from util.cli import main
 
 

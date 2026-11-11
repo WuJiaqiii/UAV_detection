@@ -10,8 +10,8 @@ from zipfile import ZipFile
 
 import numpy as np
 from prepare_submission import KNOWN, build_parser, build_plan, read_xlsx_rows
-from scripts import low_confidence_retrain as flow
-from scripts.legacy_submission_common import ITEMS, export_results, write_csv, save, read, read_csv
+from scripts import competition_workflow as flow
+from scripts.submission_pipeline import ITEMS, export_results, write_csv, save, read, read_csv
 from util.open_set import FEATURE_VERSION, file_sha256, save_npz
 
 
@@ -78,14 +78,14 @@ class LowConfidenceTests(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def args(self, **overrides):
-        values = dict(config=flow.ROOT/'config/competition_lowconf_train.yaml', train_root=None,
+        values = dict(config=flow.ROOT/'config/competition_train.yaml', train_root=None,
             yolo_weights=None, confidence=.02, epochs=None, work_dir=self.root/'work',
             data_root=self.root/'data', dry_run=False, prepare_only=False, wait_for_gpu=False,
             gpu_id='0', gpu_min_free_mib=16384, retry_training=False, retry_export=False)
         values.update(overrides);return SimpleNamespace(**values)
 
     def test_lower_confidence_applies_to_training_profile_and_cover_inference_without_editing_template(self):
-        path=flow.ROOT/'config/competition_lowconf_train.yaml';before=file_sha256(path)
+        path=flow.ROOT/'config/competition_train.yaml';before=file_sha256(path)
         doc, _, _ = flow.configured(self.args(confidence=.01))
         self.assertEqual(doc['train']['yolo_conf_thres'], .01)
         self.assertEqual(doc['evaluation']['yolo_conf_thres'], .01)
@@ -97,7 +97,7 @@ class LowConfidenceTests(unittest.TestCase):
         self.assertEqual(file_sha256(path), before)
 
     def test_invalid_threshold_or_epoch_is_rejected_before_work_is_allocated(self):
-        for threshold in [.05, 0, -1, float('nan')]:
+        for threshold in [1.01, 0, -1, float('nan')]:
             with self.assertRaises(ValueError):flow.configured(self.args(confidence=threshold))
         with self.assertRaises(ValueError):flow.configured(self.args(epochs=0))
         self.assertFalse((self.root/'work').exists())
@@ -173,7 +173,7 @@ class LowConfidenceTests(unittest.TestCase):
         self.assertEqual(read(args.work_dir/'workflow.json')['status'],'failed')
 
     def test_nonstandard_export_is_reported_and_a_second_run_skips_both_gpu_phases(self):
-        args=self.args();training=self.root/'new_training';training.mkdir()
+        args=self.args(no_signal_code=24);training=self.root/'new_training';training.mkdir()
         save(training/'experiment.json',dict(status='complete'))
         batch=self.root/'batch.json';save(batch,dict(runs={i:{} for i in ITEMS}))
         predictions={}

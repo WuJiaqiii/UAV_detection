@@ -13,11 +13,11 @@ import numpy as np
 import yaml
 
 from prepare_submission import KNOWN
+from util.experiment_io import write_json
 from util.open_set import FEATURE_VERSION,normalize_features,save_npz,file_sha256,load_npz
 from util.spectral_discovery import spectral_partition,validate_spectral_options
 from util.unknown_discovery import discover_unknown
-from scripts import refresh_competition_profile as refresh
-from scripts import competition_pipeline as pipeline
+from scripts import competition_infer as pipeline
 from scripts.inspect_competition_clusters import inspect
 
 
@@ -76,81 +76,6 @@ class SpectralPartitionTests(unittest.TestCase):
                 '--unknown_cluster_backend','spectral','--unknown_bounded_strategy','spectral','--spectral_neighbors','0','--dry_run'])
 
 
-class ProfileRefreshTests(unittest.TestCase):
-    def setUp(self):
-        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
-        self.root=Path(self.temp.name);self.training=self.root/'training';(self.training/'training/models').mkdir(parents=True)
-        (self.training/'open_set').mkdir();self.checkpoint=self.training/'training/models/best.pth';self.checkpoint.write_bytes(b'original cnn')
-        self.yolo=self.root/'yolo.pt';self.yolo.write_bytes(b'original detector')
-        records=[]
-        for c,name in enumerate(KNOWN):
-            for split in ['train','val','calibration']:
-                path=self.root/f'{c}_{split}.dat';path.write_bytes(f'{c}/{split}'.encode())
-                digest=file_sha256(path);records.append(dict(path=str(path),class_name=name,split=split,
-                    source_sha256=digest,recording_id='record:'+digest))
-        self.manifest=dict(known_classes=list(KNOWN),unknown_classes=[],records=records)
-        refresh.save(self.training/'split_manifest.json',self.manifest)
-        refresh.save(self.training/'experiment.json',dict(status='complete',protocol='all_known'))
-        refresh.save(self.training/'effective_profile.json',dict(yolo_weights=str(self.yolo),settings=[],
-            iq_sample_rate=100000000,tail_policy='drop',iq_stride_ms=50,signal_mode='multi',
-            output_dir='/old/managed/output',profile_score_method='maha_pp_shrink',profile_calibration_unit='primary'))
-        self.meta=dict(kind='open_set_profile',schema_version=1,feature_version=FEATURE_VERSION,classes=KNOWN,
-            score_method='maha_pp_shrink',calibration_unit='primary',signature=dict(details=dict(
-                checkpoint_sha256=file_sha256(self.checkpoint),detector_sha256=file_sha256(self.yolo),
-                source_sha256={name:file_sha256(pipeline.ROOT/name) for name in ['util/open_set.py','util/event_detection.py']})))
-        save_npz(self.training/'open_set/known_profile.npz',self.meta,reference=np.eye(20))
-        self.out=self.root/'refresh'
-
-    def args(self,dry=False):
-        return SimpleNamespace(training_run=self.training,output=self.out,tail_policy='cover',yolo_weights=None,
-                               dry_run=dry,wait_for_gpu=False,gpu_id='0',gpu_min_free_mib=16384)
-
-    def worker(self,command,**kwargs):
-        self.assertEqual(command[2],'_worker');self.assertNotIn('train',command)
-        result=Path(command[command.index('--result')+1]);profile_run=self.root/'new_profile';profile_run.mkdir()
-        for name,split in [('reference','train'),('calibration','calibration')]:
-            folder=profile_run/name;folder.mkdir()
-            sources=[r for r in self.manifest['records'] if r['split']==split]
-            save_npz(folder/'features.npz',dict(kind='track_features',schema_version=1,feature_version=FEATURE_VERSION,
-                source_recordings=sources,signature=dict(sha256='new')),features=np.eye(20))
-        save_npz(profile_run/'known_profile.npz',self.meta,reference=np.eye(20))
-        refresh.save(result,dict(profile=str(profile_run/'known_profile.npz'),run_dir=str(profile_run),extraction_errors={}))
-
-    def test_dry_run_only_reads_metadata_and_preserves_weights(self):
-        before=file_sha256(self.checkpoint)
-        with patch('subprocess.run',side_effect=AssertionError('No extraction in preflight')),contextlib.redirect_stdout(io.StringIO()):
-            refresh.refresh(self.args(True))
-        self.assertFalse(self.out.exists());self.assertEqual(file_sha256(self.checkpoint),before)
-
-    def test_refresh_keeps_weights_and_emits_matched_inference_config(self):
-        before=file_sha256(self.training/'open_set/known_profile.npz')
-        with patch.object(refresh.subprocess,'run',side_effect=self.worker),contextlib.redirect_stdout(io.StringIO()):
-            state=refresh.refresh(self.args())
-        self.assertEqual(state['status'],'complete');self.assertEqual(state['checkpoint_sha256'],file_sha256(self.checkpoint))
-        self.assertEqual(before,file_sha256(self.training/'open_set/known_profile.npz'))
-        config=yaml.safe_load((self.out/'inference.yaml').read_text())['infer']
-        self.assertEqual(config['tail_policy'],'cover');self.assertEqual(config['unknown_cluster_backend'],'spectral')
-        self.assertEqual(config['open_set_profile'],state['profile']);self.assertNotIn('reference_inputs',config)
-        self.assertEqual(pipeline.training_artifacts(self.training,profile_override=state['profile'])['profile'],state['profile'])
-
-    def test_changed_source_bytes_block_publication_of_a_refreshed_profile(self):
-        def worker(*args,**kwargs):
-            self.worker(*args,**kwargs)
-            path=self.root/'new_profile/reference/features.npz';metadata,arrays=load_npz(path,'track_features')
-            metadata['source_recordings'][0]['source_sha256']='changed';path.unlink();save_npz(path,metadata,**arrays)
-        with patch.object(refresh.subprocess,'run',side_effect=worker),self.assertRaisesRegex(ValueError,'data changed'):
-            refresh.refresh(self.args())
-        self.assertEqual(refresh.read(self.out/'refresh_manifest.json')['status'],'failed')
-        self.assertFalse((self.out/'inference.yaml').exists())
-
-    def test_switched_checkpoint_or_detector_requires_explicit_review(self):
-        self.checkpoint.write_bytes(b'switched')
-        with self.assertRaisesRegex(ValueError,'Checkpoint changed'):refresh.prepare_settings(self.training,self.out)
-
-    def test_refresh_does_not_silently_change_a_different_rejection_method(self):
-        path=self.training/'open_set/known_profile.npz';meta,arrays=load_npz(path,'open_set_profile')
-        meta['score_method']='global_knn';path.unlink();save_npz(path,meta,**arrays)
-        with self.assertRaisesRegex(ValueError,'preserves mainline'):refresh.prepare_settings(self.training,self.out)
 
 
 class SixItemInspectionTests(unittest.TestCase):
@@ -172,10 +97,10 @@ class SixItemInspectionTests(unittest.TestCase):
                 with (folder/'predictions.csv').open('w',newline='') as stream:
                     writer=csv.writer(stream);writer.writerow(['path','label','status','error'])
                     writer.writerows([[c['path'],c['track']['unknown_cluster_id'],'novel_candidate',''] for c in candidates])
-                refresh.save(folder/'unknown_clusters.json',discovery)
+                write_json(folder/'unknown_clusters.json',discovery)
                 batch['runs'][item]=dict(status='complete',run_dir=str(folder),
                     csv_sha256=file_sha256(folder/'predictions.csv'),cache_sha256=file_sha256(folder/'unknown_features.npz'))
-            source=root/'batch.json';refresh.save(source,batch)
+            source=root/'batch.json';write_json(source,batch)
             with contextlib.redirect_stdout(io.StringIO()):
                 result=inspect(SimpleNamespace(manifest=source,output=root/'inspection',joint_task1=True,projection='pca',max_points=100))
             self.assertEqual(result['joint_status'],'complete')

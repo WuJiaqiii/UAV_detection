@@ -17,6 +17,8 @@ from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from util.experiment_io import read_json as read, write_json as save
+
 ITEMS = ('1-1', '1-2', '1-3', '1-4', '2-1', '2-2')
 NOMINAL_IQ_BYTES = 40_000_000
 # Converted captures may end at the last acquisition block (observed: 99.61472 ms).
@@ -25,7 +27,8 @@ MIN_IQ_BYTES = 39_600_000  # 99 ms; keep the official 100-ms upper bound.
 PIPELINE_SOURCES = ('util/bounded_density.py','util/unknown_discovery.py','util/unknown_density.py','util/spectral_discovery.py',
     'util/burst_normalization.py','util/competition_protocol.py','util/fast_infer.py',
     'scripts/evaluate_single_signal.py','scripts/recluster_competition_batch.py',
-    'scripts/competition_pipeline.py','prepare_submission.py','util/run_context.py')
+    'scripts/competition_infer.py','scripts/submission_pipeline.py','scripts/export_submission.py',
+    'prepare_submission.py','util/run_context.py','util/experiment_io.py')
 
 
 def source_fingerprint():
@@ -33,14 +36,8 @@ def source_fingerprint():
     return {name:file_sha256(ROOT/name) for name in PIPELINE_SOURCES}
 
 
-def read(path):
-    return json.loads(Path(path).read_text(encoding='utf-8'))
 
 
-def save(path, value):
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
-    temporary.replace(path)
 
 
 def training_artifacts(directory, yolo=None, profile_override=None):
@@ -58,8 +55,6 @@ def training_artifacts(directory, yolo=None, profile_override=None):
     if meta.get('score_method') != 'maha_pp_shrink' or meta.get('calibration_unit') != 'primary':
         raise ValueError('Mainline A requires the original Maha++ primary-calibrated profile')
     effective = directory/'effective_profile.json'
-    if not effective.is_file():
-        effective = directory/'effective_discover.json'
     settings = read(effective)
     detector = Path(yolo or settings['yolo_weights']).expanduser().resolve()
     checkpoint = directory/'training/models/best.pth'
@@ -205,16 +200,6 @@ def infer(args, runner=run_command):
     from util.cli import build_task_parser, load_settings, settings_tokens
     from util.competition_protocol import protocol_for_item
     from util.run_context import create_directory
-    refresh=getattr(args,'profile_refresh',None)
-    if refresh:
-        if args.config is not None or getattr(args,'profile',None) is not None:
-            raise ValueError('--profile-refresh supplies both config and profile; omit --config/--profile')
-        refreshed=read(refresh.expanduser().resolve()/'refresh_manifest.json')
-        if refreshed.get('status')!='complete' or Path(refreshed['training_run']).resolve()!=args.training_run.expanduser().resolve():
-            raise ValueError('Use a completed refresh for this exact training run')
-        args.profile=Path(refreshed['profile']);args.config=Path(refreshed['inference_config'])
-        if file_sha256(args.profile)!=refreshed['profile_sha256']:
-            raise ValueError('Refreshed profile changed after extraction')
     artifacts = training_artifacts(args.training_run,args.yolo_weights,getattr(args,'profile',None))
     input_details = {}
     data, counts, input_signatures = inspect_inputs(args.data_root, args.items, diagnostics=input_details)
@@ -255,6 +240,8 @@ def infer(args, runner=run_command):
         return 0
     if args.resume:
         manifest = args.resume.expanduser().resolve();batch = read(manifest)
+        if batch.get('schema_version')!=3:
+            raise ValueError('Start a fresh v3 batch')
         if batch['fingerprint'] != fingerprint:
             raise ValueError('Resume inputs/weights/config changed; start a new batch instead')
         if manifest.parent.parent != (ROOT/'experiment').resolve():
@@ -270,7 +257,7 @@ def infer(args, runner=run_command):
                     raise ValueError(f'{item}: cached predictions/features changed after inference')
     else:
         manifest = create_directory('competition_batch')/'batch_manifest.json'
-        batch = dict(schema_version=1, fingerprint=fingerprint, config=str(config), runs={}, status='running',
+        batch = dict(schema_version=3, fingerprint=fingerprint, config=str(config), runs={}, status='running',
             discovery=dict(min_cluster_size=frozen.unknown_min_cluster_size,
                 min_recordings=frozen.unknown_min_recordings, min_samples=frozen.unknown_min_samples,
                 min_silhouette=frozen.unknown_min_silhouette, allow_single_cluster=frozen.unknown_allow_single_cluster,
@@ -354,88 +341,25 @@ def infer(args, runner=run_command):
     return 0 if batch['status'] == 'complete' else 2
 
 
-def submit(args):
-    from util.run_context import planned_directory
-    from util.open_set import file_sha256
-    manifest = args.manifest.expanduser().resolve();batch = read(manifest)
-    if any(batch['runs'].get(item, {}).get('status') != 'complete' for item in ITEMS):
-        raise ValueError('All six items must be complete with no unresolved CSV rows before submission')
-    import fcntl
-    with manifest.with_suffix('.lock').open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise ValueError('Inference is still using this manifest') from exc
-        artifacts = training_artifacts(batch['fingerprint']['training_run'],batch['fingerprint']['yolo'],
-                                       batch['fingerprint'].get('profile'))
-        if source_fingerprint() != batch['fingerprint']['pipeline_sources']:
-            raise ValueError('Pipeline source changed after inference; review before creating a new batch')
-        if artifacts['profile_sha256'] != batch['fingerprint']['profile_sha256']:
-            raise ValueError('Training/profile changed after inference')
-        data, _, signatures = inspect_inputs(batch['fingerprint']['data_root'], ITEMS)
-        for item in ITEMS:
-            folder = Path(batch['runs'][item]['run_dir'])
-            if read(folder/'run.json')['status'] != 'complete':
-                raise ValueError(f'{item} source run is not complete')
-            entry = batch['runs'][item]
-            if (signatures[item] != entry['input_signature'] or
-                    file_sha256(folder/'predictions.csv') != entry['csv_sha256'] or
-                    file_sha256(folder/'unknown_features.npz') != entry['cache_sha256']):
-                raise ValueError(f'{item}: source data or cached predictions/features changed')
-        joint = manifest.parent/(planned_directory('joint_task1').name+'_'+uuid4().hex[:8])
-        strategy=batch['discovery'].get('strategy',batch['fingerprint'].get('strategy','density_merge'))
-        command = [sys.executable, str(ROOT/'scripts/recluster_competition_batch.py'),
-            '--output',str(joint),'--bounded-strategy',strategy]
-        if strategy=='spectral':
-            options=batch['discovery']['spectral_options']
-            command+=['--spectral-neighbors',str(options['neighbors']),'--spectral-seed',str(options['seed']),
-                      '--spectral-n-init',str(options['n_init'])]
-        command.append('--allow-single-cluster' if batch['discovery'].get('allow_single_cluster',True)
-                       else '--no-allow-single-cluster')
-        for key, flag in [('min_cluster_size','--min-cluster-size'), ('min_recordings','--min-recordings'),
-                          ('min_samples','--min-samples'), ('min_silhouette','--min-silhouette')]:
-            command += [flag, str(batch['discovery'][key])]
-        for item in ITEMS[:4]:
-            folder = Path(batch['runs'][item]['run_dir'])
-            command += ['--item', item, str(folder/'unknown_features.npz'), str(folder/'predictions.csv')]
-        subprocess.run(command, cwd=ROOT, check=True)
-        final = read(joint/'joint_selection.json')['predictions']
-        csvs = [final[item] if item in final else str(Path(batch['runs'][item]['run_dir'])/'predictions.csv') for item in ITEMS]
-        output = args.output.expanduser().resolve() if args.output else ROOT/'submission'/(
-            planned_directory('competition').name+'_'+uuid4().hex[:8])
-        command = [sys.executable, str(ROOT/'prepare_submission.py'), '--predictions', *csvs,
-            '--input-root', *[str(data/item) for item in ITEMS], '--output', str(output)]
-        if args.check:
-            command.append('--check')
-        subprocess.run(command, cwd=ROOT, check=True)
-        batch['last_submission'] = dict(output=str(Path(output).resolve()), joint_selection=str(joint/'joint_selection.json'),
-            report=str(Path(output).resolve().with_name(Path(output).name+'_report.json')), check_only=args.check)
-        save(manifest, batch)
-        return 0
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest='action', required=True)
-    p = sub.add_parser('infer')
-    p.add_argument('training_run', type=Path);p.add_argument('data_root', type=Path)
-    p.add_argument('--items', nargs='+', choices=ITEMS, default=list(ITEMS))
-    p.add_argument('--config', type=Path);p.add_argument('--yolo-weights', type=Path)
-    p.add_argument('--profile',type=Path,help='Refreshed known_profile.npz; must match the same 20-class checkpoint')
-    p.add_argument('--profile-refresh',type=Path,help='Completed refresh directory; supplies matching profile and inference config')
-    p.add_argument('--cluster-method',choices=['density_merge','spectral'],help='Default: spectral if configured; otherwise original density_merge')
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('training_run',type=Path);p.add_argument('data_root',type=Path)
+    p.add_argument('--items',nargs='+',choices=ITEMS,default=list(ITEMS))
+    p.add_argument('--config',type=Path);p.add_argument('--yolo-weights',type=Path)
+    p.add_argument('--profile',type=Path)
+    p.add_argument('--cluster-method',choices=['density_merge','spectral'])
     p.add_argument('--spectral-neighbors',type=int);p.add_argument('--spectral-seed',type=int)
     p.add_argument('--wait-for-gpu',action='store_true');p.add_argument('--gpu-id',default='0')
     p.add_argument('--gpu-min-free-mib',type=int,default=8192)
-    p.add_argument('--full', action='store_true');p.add_argument('--dry-run', action='store_true')
-    p.add_argument('--resume', type=Path)
-    p.add_argument('--manifest-pointer', type=Path, help='Write the allocated/resumed batch path before GPU work')
-    p = sub.add_parser('submit');p.add_argument('manifest', type=Path)
-    p.add_argument('--output', type=Path);p.add_argument('--check', action='store_true')
-    args = parser.parse_args()
-    if args.action == 'infer' and len(set(args.items)) != len(args.items):
-        parser.error('Duplicate test items')
-    return infer(args) if args.action == 'infer' else submit(args)
+    p.add_argument('--full',action='store_true');p.add_argument('--dry-run',action='store_true')
+    p.add_argument('--resume',type=Path);p.add_argument('--manifest-pointer',type=Path)
+    args = p.parse_args(argv)
+    if len(set(args.items))!=len(args.items):p.error('Duplicate test items')
+    return infer(args)
 
 
 if __name__ == '__main__':

@@ -14,7 +14,7 @@ import numpy as np
 import yaml
 
 import prepare_submission as submission
-from scripts import competition_pipeline as pipeline
+from scripts import competition_infer as pipeline
 from util.run_context import metric_error_count
 
 
@@ -103,10 +103,10 @@ class PipelineTests(unittest.TestCase):
         self.config.write_text(yaml.safe_dump(dict(evaluation=dict(checkpoint_path=self.artifacts['checkpoint'],
             yolo_weights=self.artifacts['yolo'],signal_mode='multi'),infer=dict(inputs=['/placeholder'],
             open_set_profile=self.artifacts['profile']))))
-        for target,replacement in [('scripts.competition_pipeline.ROOT',self.root),
+        for target,replacement in [('scripts.competition_infer.ROOT',self.root),
             ('util.run_context.EXPERIMENT_ROOT',self.root/'experiment')]:
             patcher=patch(target,replacement);patcher.start();self.addCleanup(patcher.stop)
-        patcher=patch('scripts.competition_pipeline.training_artifacts',return_value=self.artifacts)
+        patcher=patch('scripts.competition_infer.training_artifacts',return_value=self.artifacts)
         patcher.start();self.addCleanup(patcher.stop)
 
     def dat(self,item,i=0,size=40_000_000):
@@ -264,9 +264,10 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(pipeline.review_csv(p,'2-1',1),0)
 
     def test_incomplete_batch_cannot_submit(self):
-        p=self.root/'batch.json';p.write_text(json.dumps(dict(runs={})))
+        from scripts.export_submission import validate_batch
+        p=self.root/'batch.json';p.write_text(json.dumps(dict(schema_version=3,runs={})))
         with self.assertRaisesRegex(ValueError,'All six'):
-            pipeline.submit(SimpleNamespace(manifest=p,output=None,check=False))
+            validate_batch(p)
 
     def test_six_item_manifest_joint_selection_and_3504_workbook_export(self):
         from util.open_set import save_npz, normalize_features, FEATURE_VERSION, file_sha256
@@ -296,37 +297,30 @@ class PipelineTests(unittest.TestCase):
                     feature_version=FEATURE_VERSION,signature=dict(sha256='fixture'),records=records),
                     features=normalize_features(features))
             else:
-                (folder/'unknown_features.npz').write_bytes(b'empty synthetic task-two cache; not loaded by submit')
-            runs[item]=dict(status='complete',run_dir=str(folder),csv_sha256=file_sha256(folder/'predictions.csv'),
+                save_npz(folder/'unknown_features.npz',dict(kind='unknown_candidates',schema_version=1,
+                    feature_version=FEATURE_VERSION,signature=dict(sha256='fixture'),records=[]),features=np.empty((0,5)))
+            runs[item]=dict(status='complete',input_count=n,run_dir=str(folder),csv_sha256=file_sha256(folder/'predictions.csv'),
                 cache_sha256=file_sha256(folder/'unknown_features.npz'))
         _,_,signatures=pipeline.inspect_inputs(self.data,pipeline.ITEMS)
         for item in runs:runs[item]['input_signature']=signatures[item]
-        batch=dict(runs=runs,fingerprint=dict(training_run=self.artifacts['training_run'],
+        batch=dict(schema_version=3,runs=runs,fingerprint=dict(training_run=self.artifacts['training_run'],
             yolo=self.artifacts['yolo'],profile_sha256=self.artifacts['profile_sha256'],data_root=str(self.data),
             pipeline_sources=pipeline.source_fingerprint()),
-            discovery=dict(min_cluster_size=5,min_recordings=2,min_samples=3,min_silhouette=.15))
+            discovery=dict(strategy='density_merge',min_cluster_size=5,min_recordings=2,min_samples=3,min_silhouette=.15))
         manifest=self.root/'batch.json';manifest.write_text(json.dumps(batch))
-        def child(command,**kwargs):
-            command=list(command);path=Path(command[1]);command[1]=str(real_root/path.relative_to(self.root))
-            return real_run(command,cwd=real_root,check=True,capture_output=True,text=True)
-        with patch('scripts.competition_pipeline.subprocess.run',side_effect=child):
-            self.assertEqual(pipeline.submit(SimpleNamespace(manifest=manifest,output=self.root/'out',check=False)),0)
-        report=json.loads((self.root/'out_report.json').read_text())
+        from scripts.export_submission import main as export
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(export(['--batch',str(manifest),'--output',str(self.root/'out')]),0)
+        report=json.loads((self.root/'out/submission_report.json').read_text())
         self.assertTrue(report['ready']);self.assertEqual(report['written_workbooks'],3504)
-        final=json.loads(manifest.read_text());selection=json.loads(Path(final['last_submission']['joint_selection']).read_text())
+        selection=json.loads((self.root/'out/reclustered/task1/joint_selection.json').read_text())
         self.assertEqual(selection['selected_counts'],{'1-1':2,'1-2':3,'1-3':2,'1-4':3})
-        # A spectral batch must remain spectral during final joint selection.
-        final['fingerprint']['strategy']='spectral'
-        final['discovery'].update(strategy='spectral',spectral_options=dict(neighbors=10,seed=42,n_init=10))
-        manifest.write_text(json.dumps(final))
-        def spectral_child(command,**kwargs):
-            if Path(command[1]).name=='recluster_competition_batch.py':
-                self.assertEqual(command[command.index('--bounded-strategy')+1],'spectral')
-                self.assertEqual(command[command.index('--spectral-neighbors')+1],'10')
-            return child(command,**kwargs)
-        with patch('scripts.competition_pipeline.subprocess.run',side_effect=spectral_child):
-            self.assertEqual(pipeline.submit(SimpleNamespace(manifest=manifest,output=self.root/'spectral_out',check=True)),0)
-        spectral_report=json.loads((self.root/'spectral_out_report.json').read_text())
+        batch['fingerprint']['strategy']='spectral'
+        batch['discovery'].update(strategy='spectral',spectral_options=dict(neighbors=10,seed=42,n_init=10))
+        manifest.write_text(json.dumps(batch))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(export(['--batch',str(manifest),'--output',str(self.root/'spectral_out'),'--check-only']),0)
+        spectral_report=json.loads((self.root/'spectral_out/submission_report.json').read_text())
         self.assertTrue(spectral_report['ready']);self.assertEqual(spectral_report['written_workbooks'],0)
 
 
@@ -348,7 +342,7 @@ class TrainingPreflightTests(unittest.TestCase):
             save_npz(training/'open_set/known_profile.npz',meta,reference=np.eye(20))
             (training/'experiment.json').write_text(json.dumps(dict(status='complete',protocol='all_known')))
             (training/'effective_profile.json').write_text(json.dumps(dict(yolo_weights=str(yolo))))
-            with patch('scripts.competition_pipeline.ROOT',p):
+            with patch('scripts.competition_infer.ROOT',p):
                 result=pipeline.training_artifacts(training)
                 self.assertEqual(result['checkpoint_sha256'],file_sha256(checkpoint))
                 checkpoint.write_bytes(b'changed')

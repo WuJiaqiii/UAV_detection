@@ -221,7 +221,7 @@ def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)
     prep=sub.add_parser('prepare');prep.add_argument('--suite',type=Path,required=True)
     prep.add_argument('--inputs',nargs='+',type=Path,required=True);prep.add_argument('--yolo-weights',type=Path,required=True)
-    prep.add_argument('--base-config',type=Path,default=REPO/'config/competition_v2_train.yaml')
+    prep.add_argument('--base-config',type=Path,default=REPO/'config/competition_train.yaml')
     prep.add_argument('--protocol',choices=['open_set','all_known'],default='open_set')
     prep.add_argument('--unknown-classes',nargs='+');prep.add_argument('--seed',type=int,default=42);prep.add_argument('--epochs',type=int,default=100)
     for name in ['check','run','compare']:

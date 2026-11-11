@@ -1,162 +1,49 @@
-# UAV_detection
+# UAV_detection v3
 
-增量识别新增回放增强 LwF：旧训练记录回放、旧样本蒸馏与特征保持、新旧类调和平均选模，以及复用现有 12→15→18 类划分的 A/B 入口。详见 [LwF 回放策略与实验命令](docs/lwf_replay.md)。
+无人机射频开集识别：原始IQ → 时频谱 → YOLO检测 → 信号分组 → mask分类器 → 已知拒识 → 未知聚类 → 竞赛提交。训练、推理、导出和增量实验使用独立入口，共用实际算法实现。
 
-竞赛 v2 已加入类别数约束、物理突发处理与严格提交。请先阅读 [v2 迁移与运行说明](docs/competition_v2.md)，旧 profile 需要重建。
-
-当前竞赛主线为 **A：原 Maha++ 拒识＋公开类别数量范围下的密度核心合并**；已知类二次复核默认关闭。正式完整流程请先阅读 [主线检查与运行说明](docs/competition_mainline.md)：先训练全部 20 类，再用 `bash infer.sh TRAINING_RUN DATA_ROOT` 运行六项，最后用 `bash submit.sh BATCH_MANIFEST` 联合选类并严格导出。不要复用旧的固定时间戳模型，也不要用 16 类伪未知开发模型正式提交。
-
-未知发现支持 `--unknown_input_mode single|multi`：单设备记录以主轨迹拟合，多信号保留全部轨迹。默认 `unknown_cluster_policy=auto` 按独立记录计算HDBSCAN密度，并依据无标签几何证据检查单个大簇。已有实验可直接离线重聚类和重评分，详见 [单信号与多信号未知发现](docs/unknown_discovery_modes.md)。
-
-只有一个完整已知数据集时，使用 `bash run.sh experiment --config config/experiment_all_known_iq.yaml --inputs /path/to/dataset --yolo_weights /path/to/best.pt`，自动发现全部类别并划分训练/验证/校准，生成最佳模型、profile与inference.yaml，再对外部无标签数据执行infer。无需预先整理三个数据目录，详见 [全已知类自动划分训练](docs/all_known_training.md)。
-
-开集对照实验可用 `bash run.sh ablate --config config/ablation.yaml --source_experiment /path/to/completed_experiment`。
-统一比较分类头覆盖、三种校准单位、九种拒识分数和固定候选池聚类；组件训练提供三组独立配方。用法、限制与实测结果见 [开集对照实验](docs/open_set_ablation.md)。
-
-开集结果默认提供 PCA 特征点分布图，可选 t-SNE 和真值着色对照；`visualize` 可从已有特征归档离线补图。配置、输出与解释范围见 [特征可视化](docs/feature_visualization.md)。
-
-仅需结果表时，在 `infer` 命令加 `--fast`：保留进度、predictions.csv、聚类诊断及可选未知缓存。single 每文件一行，multi 保留逐突发信息。任务二空场景按官方示例导出 `[-1,0,0]`。详见 [快速推理与其他加速方法](docs/fast_inference.md)。
-
-已知 profile 默认保存记录平衡的类别均值、共享协方差逆矩阵和主轨迹校准阈值；接受为已知时保留分类头投票类别。推理保留每条链路的时间/频率，在 `class_evidence.csv` 汇总同类别组件。旧类别尺度 kNN 作为兼容对照保留，见 [记录平衡参考库](docs/record_balanced_profiles.md)。
-
-无人机信号的已知类训练、多信号分类、开集拒识与未知类别发现。主线为：MAT/PNG/DAT → 统一频谱 → YOLO 框 → 信号分组 → 二值 mask CNN → DAT 轨迹投票 → 已知 profile 拒识 → 未知候选聚类。输出类别、时间和频率位置。
+本版按全新训练设计：删除旧结果恢复和兼容入口，不支持旧训练续跑或优化器恢复。请使用新目录运行实验；原有实验资料无需删除。YOLO检测器权重继续作为外部输入。
 
 ## 安装
 
-使用 Python 3.11 PyTorch 2.6.0 / torchvision 0.21.0
+Python 3.11，PyTorch 2.6 / torchvision 0.21。先安装适合本机CPU/CUDA的PyTorch，再安装其余依赖：
 
 ```bash
 git submodule update --init --recursive
 python -m pip install -r requirements.txt
 ```
 
-## 代码入口
+## 从头训练并完成六项推理
 
 ```bash
-bash run.sh --help
-# 自动类别划分、已知训练、校准与带标签开集测试：
-bash run.sh experiment --config config/experiment_iq.yaml
-# 已有模型/profile 对无标签输入推理与聚类：
-bash run.sh infer --config config/infer_open_set.yaml
-bash run.sh train --config config/train.yaml --dry_run
-bash run.sh train --config config/train.yaml
-bash run.sh predict --config config/predict.yaml
-bash run.sh profile --config config/open_set.yaml
-bash run.sh predict --config config/open_set.yaml
-bash run.sh cluster --config config/cluster.yaml
-# 新输出目录上，一次完成参考提取、独立校准与混合测试发现：
-bash run.sh discover --config config/open_set.yaml
+python scripts/competition_workflow.py \
+  --work-dir "$PWD/experiment/competition_v3_s42" \
+  --train-root /path/to/train_dataset \
+  --data-root /path/to/competition_data \
+  --yolo-weights /path/to/detector.pt \
+  --confidence 0.02 --wait-for-gpu --gpu-min-free-mib 16384
 ```
 
-`--dry_run` 校验并显示参数，不读取数据、构建模型或开始训练。示例中的 `/data`、`/models` 是占位路径，运行前修改。YAML 内相对路径以 YAML 所在目录为基准；直接命令行相对路径以当前工作目录为基准。
+训练数据按真实类别文件夹组织；测试目录包含`1-1`到`2-2`。流程使用全部20个已知类别，独立划分训练/验证/校准，执行完整时长推理、未知类联合选择和严格导出。`no_signal`仍存在时，严格导出会返回待检查状态；人工占位结果需明确加`--no-signal-code 24`，且不会标为正式可提交。
 
-所有公共入口自动保存到仓库根目录 `experiment/<实验类型>_<北京时间>/`，不接受 `output_dir`、`test_output_dir` 或 `experiment_dir`。目录与启动工作路径无关，同秒运行自动加编号。开始时打印实际路径，`run.json` 记录参数、时间和状态；异常写入 `error.log`。`--dry_run` 不创建目录。类型、迁移与检查结果见 [目录和代码检查说明](docs/code_audit.md)。
+## 入口
 
-| 任务 | 工作 |
+| 入口 | 用途 |
 | --- | --- |
-| experiment | 按原始记录划分已知/未知，训练最佳模型、独立校准并评估；导出无标签推理配置 |
-| infer | 强制使用 profile 的无标签开集推理与未知聚类 |
-| train | 已知类 CE / CE+SupCon，保留可选 LwF |
-| predict | 逐组分类和 DAT 轨迹投票；有 open_set_profile 时启用拒识与未知发现 |
-| profile | 从 reference_inputs / calibration_inputs 提取特征并建立已知 profile |
-| cluster | 复用 unknown_features.npz 重新聚类，不加载 YOLO/CNN |
-| discover | 顺序运行 profile 与 predict，保持相同特征设置 |
-| visualize | 从已有轨迹特征归档绘制 PCA/t-SNE，不加载模型、不重新聚类 |
+| `run.sh train/experiment/profile/predict/infer/cluster/visualize/ablate` | 单个训练、评价或分析任务 |
+| `scripts/competition_workflow.py` | 从头完成全已知训练、六项推理和导出 |
+| `infer.sh TRAIN DATA` | 已完成的新训练结果执行六项推理 |
+| `submit.sh --batch MANIFEST --output OUTPUT` | 核验批次、联合聚类和导出 |
+| `lwf.sh prepare/run/check/...` | 从原始数据构建增量实验与方法对比 |
+| `scripts/benchmark_unknown_clustering.py` | 冻结特征上的聚类方法/参数矩阵 |
 
-## 实验配置
+YAML相对路径以配置文件所在目录为基准；CLI相对路径以当前工作目录为基准。单任务输出自动进入`experiment/`，完整工作流的目录通过`--work-dir`指定。`--dry_run`用于单任务参数检查；完整工作流使用`--dry-run`。
 
-`config/` 中提供完整实验、无标签开集推理，以及原 PNG/IQ 训练、普通预测、开集流程和离线重聚类示例。支持 `experiment / train / evaluation / profile / predict / discovery / cluster / infer` 配置段：
+## 当前文档
 
-- train：训练参数、类别顺序和排除项。
-- experiment：数据输入、已知/未知类别选择、按原始记录的划分比例与种子；训练数据路径和最终类别空间由实验生成。
-- infer：无标签输入和 profile；覆盖 evaluation 的同名设置。
-- evaluation：profile 提取和 predict 共用的权重、前端、分组、切片和投票参数。
-- profile：参考/校准输入、真值来源和阈值设置。
-- discovery：discover 专用的混合测试输入、标签和后端；不会进入参考/校准标签。
-- predict / cluster：相应任务参数，覆盖 evaluation 的同名设置。
-
-命令行显式值覆盖 YAML：
-
-```bash
-# 可选 SupCon 对照；主线配置默认 primary CE。
-bash run.sh train --config config/train.yaml --train_group_policy all --supcon_weight 0.1
-# 不保存图片；保留 HTML、CSV、JSON。
-bash run.sh predict --config config/predict.yaml --no-save_visuals
-# 只换后端，不重新检测和提取特征。
-bash run.sh cluster --config config/cluster.yaml --dcg_cosine_threshold 0.9
-```
-
-未识别的配置段/参数、错误列表/布尔类型会报错。`settings` 可用映射表达底层推理覆盖，例如 `settings: {min_group_len: 1}`，等价于脚本的 `--set min_group_len=1`。YAML 中枚举字符串如 `bbox_cache_mode: "off"` 应加引号，避免 YAML 将 off 解析为布尔。
-
-## 训练和数据
-
-PNG/MAT 训练读取文件名 `Protocol-[至少4字段]-SNR-...-Figure-N`，解析类别、中心频率及带宽；PNG/MAT 目录只读取第一层，可传多个目录。输入保持原生 512×750，不自行拉伸到 CNN 尺寸。训练只接受单信号样本。
-
-DAT 训练的类别直接取自 `.dat` 文件的父目录，不需要预设协议名称。训练随机取 50 ms 片段，验证取中心片段。例如：
-
-```text
-known_train/                 known_val/
-  Device-A/001.dat             Device-A/101.dat
-  Device-Z/002.dat             Device-Z/102.dat
-```
-
-修改 `config/train_iq.yaml` 中的训练/验证路径、采集率和 YOLO 权重后运行：
-
-```bash
-bash run.sh train --config config/train_iq.yaml
-```
-
-IQ 会从实际使用的训练、验证路径共同发现类别，按名称排序建立统一 ID（上例 `Device-A: 0, Device-Z: 1`），不会自动添加 Background。显式划分需要同时提供 `train_dataset_path` 和 `val_dataset_path`，此时忽略 `dataset_path`；自动划分则只设置 `dataset_path`。输入可为数据根目录、类别目录或文件列表，目录扫描覆盖当前层及下一层，类别名始终是文件的直接父目录名。
-
-IQ 通常应省略 `class_names`；若为恢复旧 checkpoint 指定顺序，列表必须包含发现的全部类别，不能用它隐式过滤数据。需要留出模拟未知类时，用实际目录名设置 `exclude_classes`；排除后重新生成连续 ID。训练和验证共享同一映射，数据中未映射且未明确过滤的类别会报错。PNG/MAT 的 `class_names` 仍可自定义类别空间，不提供时保留原协议默认映射。
-
-最终映射会写入实验 `config.yaml` 和 checkpoint 的 `config.classes`。恢复训练时必须保持类别名称与 ID 一致；预测从 checkpoint 读取类别映射，不根据待测目录重新编号。采集率为 `iq_sample_rate`，与输出频谱的 122.88 MHz 网格区别见 [前端契约](docs/spectrogram_frontend.md)。
-
-`config/train.yaml` 示例将 FPV/Skylink1 留作模拟未知、排除 Background。主线使用 `train_group_policy=primary`、`supcon_weight=0`；正值用于可选对照，使用有限框丢弃和平移构建第二视图。不要冻结骨干后开启 SupCon。普通训练存档在 `experiment/train_时间/models/best.pth`，完整开集实验则在其 `training/models/` 子目录；按已知验证准确率选模型，同时查看匹配召回。
-
-## 开集与输出
-
-参考/校准都应为干净的单已知类别输入，且按原始采集记录隔离。主线每类至少 2 条独立参考记录、5 条有效主校准记录；同一 DAT 的切片不能充当多条记录。unknown 只在最后的混合输入出现，不参与网络训练或阈值校准，也不预设未知比例/K。
-
-有 profile 时，最终结论读 `tracks.csv` 的 `display_label / recognition_status`；逐组 `class_name` 仍为已知分类头的原始候选。`unknown_clusters.json` 保存估计 K、支持记录和原型；`unknown_features.npz` 可重聚类，`unknown_prototypes.npz` 保存同空间簇中心。图示/HTML 保留原始框的时间和频率；给出 RF 中心后可输出绝对 MHz。
-
-两种完整运行方式、输出和评分定义见 [开集实验指南](docs/open_set_experiments.md)。底层算法见 [开集发现说明](docs/open_set_discovery.md)，历史整理见 [第一轮清理迁移说明](docs/cleanup_migration.md)。
-
-## 目录与兼容
-
-```text
-main.py / run.sh       统一任务入口
-config/               实验 YAML
-data/                 MAT/PNG 和原始 IQ 数据适配
-model/                CNN 和实际使用的 SupCon
-util/cli.py           配置、任务分派与开集编排
-util/train_entry.py   原训练入口（保留旧 GT 评价和 LwF）
-util/eval_common.py   输入、配置恢复、切片和投票
-util/group_predictor.py  共用检测、分组、mask 和分类
-util/                 前端、分组、checkpoint、缓存、轨迹、开集和报告
-scripts/              仅保留评估、profile 校准和重聚类三个 Python 入口
-tests/fixtures.py     共用夹具，不再由测试文件互相导入
-yolov5/               固定外部检测后端
-```
-
-既有 `python main.py --run_mode train/infer ...` 暂时转发到原实现，三个核心 Python 脚本仍可直接使用。新的普通/开集推理建议走 `predict`；旧 GT 实例级评价保留在原路径，未用文件级指标替代。
-
-## 任务一、二表征优化与对照实验
-
-新增可选的掩膜＋幅度谱双通道输入，保持默认单通道兼容；普通及fast推理均输出分阶段诊断。
-四组控制实验、逐突发CSV审计及带显式已知类别集合的评价方法见 [任务一、二优化实验说明](docs/task12_optimization.md)。
-固定模型比较10类聚类算法、PCA与多组参数，生成带真实标签评分的CSV矩阵、热图和交互报告，见 [聚类结果矩阵](docs/clustering_benchmark.md)。
-复用已有二十类权重、刷新profile并运行1-1至2-2谱聚类，见 [六项谱聚类推理与检查](docs/competition_spectral_inference.md)。
-`scripts/task12_suite.py prepare/check` 只准备及检查配置，`run` 才开始训练；开发留出类模型需在选型后重训为完整20类再部署。
-
-## 检查
-
-```bash
-python -m compileall -q main.py model util data scripts tests
-python -m unittest discover -s tests -v
-bash -n run.sh
-# 可选：实际本地 YOLO 后端的无权重输入契约检查
-UAV_TEST_REAL_YOLO=1 python -m unittest tests.test_yolo_native_contract -v
-```
-
-当前只看到框几何的 CNN 不能保证将几何相似协议分离；YOLO 完全漏检的信号也无法进入类别发现。文件级未知出现指标与实例级 GCD ACC 不同；没有逐轨迹真值时不报告实例级发现准确率。
+- [六项竞赛流程与提交](docs/competition.md)
+- [系统链路与算法实现](docs/pipeline.md)
+- [增量识别与LwF对比](docs/incremental.md)
+- [开发集实验和聚类矩阵](docs/experiments.md)
+- [结果目录与存储策略](docs/outputs.md)
+- [开发、测试与v3改动](docs/development.md)

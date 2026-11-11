@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import torch
 
 from model.resnet import MaskImageClassifier
-from util.checkpoint import load_training_checkpoint
+from util.checkpoint import load_classifier_checkpoint
 from util.lwf_trainer import LwFTrainer
 from util.recordings import train_val_indices
 
@@ -65,7 +65,7 @@ class AuditRegressionTests(unittest.TestCase):
         checkpoint = self.root / "incomplete.pth"
         torch.save({"model_state_dict": {"weight": model.weight.detach()}}, checkpoint)
         with self.assertRaises(RuntimeError):
-            load_training_checkpoint(model, checkpoint, "cpu")
+            load_classifier_checkpoint(model, checkpoint, "cpu")
 
     def test_lwf_teacher_class_order_is_checked_before_model_mutation(self):
         checkpoint = self.root / "wrong_teacher.pth"
@@ -77,13 +77,6 @@ class AuditRegressionTests(unittest.TestCase):
             LwFTrainer(config, None, Mock(), Mock(), Mock(), classifier)
         classifier.load_state_dict.assert_not_called()
 
-    def test_corrupt_optimizer_state_cannot_be_silently_ignored_on_resume(self):
-        model = torch.nn.Linear(3, 2)
-        optimizer = torch.optim.Adam(model.parameters())
-        checkpoint = self.root / "bad_optimizer.pth"
-        torch.save({"model_state_dict": model.state_dict(), "optimizer_state_dict": {"state": {}, "param_groups": []}}, checkpoint)
-        with self.assertRaisesRegex(RuntimeError, "optimizer state"):
-            load_training_checkpoint(model, checkpoint, "cpu", optimizer=optimizer, load_optimizer=True)
 
     def test_frozen_backbone_does_not_update_batchnorm_statistics(self):
         model = MaskImageClassifier("resnet18", 2, 1, pretrained=False, freeze_backbone=True).train()

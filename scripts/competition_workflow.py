@@ -23,16 +23,19 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import yaml
-from scripts.legacy_submission_common import (ITEMS, read, save, checked_rows, sources_from_batch,
+from scripts.submission_pipeline import (ITEMS, checked_rows, sources_from_batch,
     recluster, export_results, predictions_from_export)
-from scripts.competition_pipeline import training_artifacts, inspect_inputs, run_command
+from scripts.competition_infer import training_artifacts, inspect_inputs, run_command
 from util.open_set import file_sha256, load_npz
+from util.experiment_io import read_json as read, write_json as save
 from util.gpu_wait import GpuWaitPolicy, reserve_gpu, worker_environment
 
 
 def configured(args):
-    if not math.isfinite(args.confidence) or not 0 < args.confidence < .05:
-        raise ValueError('This lower-confidence experiment requires 0 < confidence < 0.05')
+    if not math.isfinite(args.confidence) or not 0 < args.confidence <= 1:
+        raise ValueError('confidence must be finite and in (0, 1]')
+    if getattr(args,'no_signal_code',None) is not None and args.no_signal_code<20:
+        raise ValueError('no-signal-code must be >=20')
     path = args.config.expanduser().resolve()
     doc = copy.deepcopy(yaml.safe_load(path.read_text(encoding='utf-8')))
     train_root = Path(args.train_root or doc['experiment']['inputs'][0]).expanduser()
@@ -199,6 +202,8 @@ def run_workflow(args):
         target = root/'workflow.json'
         if target.is_file():
             state = read(target)
+            if state.get('schema_version')!=3:
+                raise ValueError('Use a freshly prepared v3 work directory')
             if state['frozen'] != frozen:
                 raise ValueError('Configuration, code, weights or input inventory changed; use a new work directory')
             if file_sha256(root/'training.yaml') != state['config_sha256']:
@@ -206,7 +211,7 @@ def run_workflow(args):
         else:
             config = root/'training.yaml'
             config.write_text(yaml.safe_dump(doc, allow_unicode=True, sort_keys=False), encoding='utf-8')
-            state = dict(schema_version=1, status='prepared', frozen=frozen, confidence=args.confidence,
+            state = dict(schema_version=3, status='prepared', frozen=frozen, confidence=args.confidence,
                          config_sha256=file_sha256(config))
             save(target, state)
         if args.prepare_only:
@@ -239,7 +244,11 @@ def run_workflow(args):
             if not all(finished_item(batch, i) for i in ITEMS):
                 raise ValueError('Some inference items have upstream errors; inspect batch logs before export')
             state['inference'].update(status='complete', manifest=str(batch_path));save(target, state)
+            if frozen_inputs(doc,train_root,detector,data_root)!=frozen:
+                raise ValueError('Inputs or code changed during execution; use a fresh workflow')
             previous_exports = state.get('exports', {})
+            if previous_exports.get('finished') and previous_exports.get('no_signal_code')!=getattr(args,'no_signal_code',None) and not args.retry_export:
+                raise ValueError('Export policy changed; use --retry-export')
             if previous_exports.get('finished') and not args.retry_export:
                 predictions_from_export(previous_exports['result_dir'])
                 for summary in previous_exports['summaries'].values():
@@ -250,23 +259,25 @@ def run_workflow(args):
                 state['exports'] = dict(attempt=attempt, result_dir=str(results), finished=False);save(target, state)
                 _, sources = sources_from_batch(batch_path)
                 predictions = recluster(sources, results/'reclustered')
-                save(results/'final_predictions.json', dict(predictions={k:str(v) for k,v in predictions.items()},
+                save(results/'final_predictions.json', dict(schema_version=3, predictions={k:str(v) for k,v in predictions.items()},
                      sha256={k:file_sha256(v) for k,v in predictions.items()}, batch=str(batch_path)))
                 _, strict = export_results(predictions, results/'strict', data_root=data_root)
                 summaries = {'strict': strict}
-                if not strict['ready']:
+                placeholder = getattr(args,'no_signal_code',None)
+                if not strict['ready'] and placeholder is not None:
                     _, fallback = export_results(predictions, results/'shared_no_signal', data_root=data_root,
-                                                  task1_no_signal_code=24)
+                                                  task1_no_signal_code=placeholder)
                     summaries['shared_no_signal'] = fallback
                     if not fallback['workbooks']:
                         raise ValueError('Format/burst errors still prevent export; inspect reports; no rows were dropped')
-                state['exports'].update(finished=True, summaries=summaries);save(target, state)
+                state['exports'].update(finished=True, summaries=summaries, no_signal_code=placeholder);save(target, state)
             strict = state['exports']['summaries']['strict']
-            state['status'] = 'complete' if strict['ready'] else 'complete_with_nonstandard_export'
+            state['status'] = ('complete' if strict['ready'] else
+                'complete_with_nonstandard_export' if 'shared_no_signal' in state['exports']['summaries'] else 'needs_review')
             save(target, state)
             print(json.dumps(dict(status=state['status'], training_run=directory, batch_manifest=batch_path,
                                   exports=state['exports']['summaries']), ensure_ascii=False, indent=2))
-            return 0
+            return 2 if state['status']=='needs_review' else 0
         except BaseException as exc:
             state.update(status='interrupted' if isinstance(exc, KeyboardInterrupt) else 'failed', error=f'{type(exc).__name__}: {exc}')
             save(target, state)
@@ -285,11 +296,11 @@ def worker(args):
             raise ValueError('Training/profile did not complete without extraction errors')
         save(args.result, dict(run_dir=result['run_dir']))
     else:
-        from scripts.competition_pipeline import infer
+        from scripts.competition_infer import infer
         previous = read(args.batch) if args.batch else None
         items = [i for i in ITEMS if previous is None or not finished_item(previous, i)]
         a = SimpleNamespace(training_run=Path(state['training']['run_dir']), data_root=Path(state['frozen']['data_root']),
-            items=items, config=None, yolo_weights=None, profile=None, profile_refresh=None,
+            items=items, config=None, yolo_weights=None, profile=None,
             cluster_method='spectral', spectral_neighbors=10, spectral_seed=42,
             wait_for_gpu=args.wait_for_gpu, gpu_id=args.gpu_id, gpu_min_free_mib=args.gpu_min_free_mib,
             full=False, dry_run=False, resume=args.batch, manifest_pointer=args.pointer)
@@ -317,10 +328,11 @@ def main(argv=None):
         return worker(p.parse_args(argv[1:]))
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--work-dir', type=Path, required=True)
-    p.add_argument('--config', type=Path, default=ROOT/'config/competition_lowconf_train.yaml')
+    p.add_argument('--config', type=Path, default=ROOT/'config/competition_train.yaml')
     p.add_argument('--train-root', type=Path);p.add_argument('--yolo-weights', type=Path)
-    p.add_argument('--data-root', type=Path, default=Path('/media/kaneki/05E4235537EC7AC2/dataset_wjq'))
+    p.add_argument('--data-root', type=Path, required=True)
     p.add_argument('--confidence', type=float, default=.02);p.add_argument('--epochs', type=int)
+    p.add_argument('--no-signal-code', type=int, help='Explicit nonstandard task-one placeholder (for example 24)')
     p.add_argument('--wait-for-gpu', action=argparse.BooleanOptionalAction, default=True)
     p.add_argument('--gpu-id', default='0');p.add_argument('--gpu-min-free-mib', type=int, default=16384)
     p.add_argument('--dry-run', action='store_true');p.add_argument('--prepare-only', action='store_true')

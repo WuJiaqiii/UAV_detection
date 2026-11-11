@@ -140,21 +140,20 @@ class ScoreTests(unittest.TestCase):
 
 
 class CheckpointPortabilityTests(unittest.TestCase):
-    def test_foreign_path_metadata_and_tensors_roundtrip(self):
-        import os
-        import pathlib
+    def test_new_checkpoints_store_paths_as_plain_metadata(self):
         import torch
-        from util.checkpoint import load_checkpoint_object
-        target = pathlib.PosixPath if os.name == "nt" else pathlib.WindowsPath
-        class ForeignPath:
-            def __reduce__(self):
-                return target, ("/original/experiment",)
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp)/"model.pth"
-            torch.save({"config": {"path": ForeignPath()}, "tensor": torch.tensor([2.])}, path)
+        from types import SimpleNamespace
+        from util.checkpoint import save_training_checkpoint, load_checkpoint_object
+        with tempfile.TemporaryDirectory() as folder:
+            model = torch.nn.Linear(2,2)
+            cfg = SimpleNamespace(path=Path('/original/experiment'),device=torch.device('cpu'),classes={'a':0,'b':1})
+            path = save_training_checkpoint(model,0,.5,folder,config=cfg)
             loaded = load_checkpoint_object(path)
-            self.assertIsInstance(loaded["config"]["path"], pathlib.PurePath)
-            torch.testing.assert_close(loaded["tensor"], torch.tensor([2.]))
+            self.assertEqual(loaded['config']['path'],'/original/experiment')
+            self.assertEqual(loaded['config']['device'],'cpu')
+            self.assertNotIn('optimizer_state_dict',loaded)
+            self.assertNotIn('scheduler_state_dict',loaded)
+            torch.testing.assert_close(loaded['model_state_dict']['weight'],model.weight)
 
 
 class ComponentContrastTests(unittest.TestCase):

@@ -253,8 +253,8 @@ class ExperimentTests(unittest.TestCase):
                 main([*base, "--open_set_profile", "profile.npz", option])
 
     def test_new_examples_validate_without_reading_datasets(self):
-        for task, name in (("experiment", "experiment_iq.yaml"), ("experiment", "experiment_all_known_iq.yaml"),
-                           ("infer", "infer_open_set.yaml")):
+        for task, name in (("experiment", "experiment_iq.yaml"), ("experiment", "competition_train.yaml"),
+                           ("infer", "competition_infer.yaml")):
             with self.subTest(task=task), contextlib.redirect_stdout(io.StringIO()):
                 main([task, "--config", str(ROOT / "config" / name), "--dry_run"])
 

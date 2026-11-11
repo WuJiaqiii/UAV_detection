@@ -93,7 +93,7 @@ class RecheckTests(unittest.TestCase):
             p = Path(d)
             for name, x, records in [('ref', self.x, self.rr), ('cal', self.z, self.cr)]:
                 save_npz(p/(name+'.npz'), dict(kind='track_features', schema_version=1,
-                    feature_version='mask-penultimate-l2-accepted-track-mean-l2-v1',
+                    feature_version='uav-v3-mask-penultimate-l2-accepted-track-mean-l2',
                     signature={'sha256': 'fixture'}, classes={'known': 0, 'other': 1}, records=records), features=x)
             a = build_profile(p/'ref.npz', p/'cal.npz', p/'a.npz')
             b = build_profile(p/'ref.npz', p/'cal.npz', p/'b.npz', recheck_config=RecheckConfig())
@@ -188,98 +188,6 @@ class RecheckTests(unittest.TestCase):
                 self.assertEqual(r['metrics']['known_recheck_recovered'], 1)
             self.assertEqual((p/'full/predictions.csv').read_text(), (p/'fast/predictions.csv').read_text())
             self.assertTrue(json.loads((p/'fast/known_recheck_decisions.json').read_text())[0]['accepted'])
-
-
-class PairedComparisonTests(unittest.TestCase):
-    def test_event_conflict_scope_exception_is_explicit_and_does_not_hide_other_errors(self):
-        from scripts.compare_known_recheck import comparison_exit_code
-        result = dict(comparison_has_upstream_errors=True, source_non_event_error_count=0,
-                      source_error_breakdown=dict(burst_label_conflicts=12))
-        self.assertEqual(comparison_exit_code(result), 2)
-        self.assertEqual(comparison_exit_code(result, True), 0)
-        result['source_non_event_error_count'] = 1
-        self.assertEqual(comparison_exit_code(result, True), 2)
-
-    def fixture(self, root):
-        from util.unknown_discovery import discover_unknown
-        from util.discovery_context import annotate_discovery_candidates, candidate_record
-        from util.open_set import FEATURE_VERSION
-        (x, rr), (z, cr) = inputs()
-        classes = {'known': 0, 'other': 1}
-        repo = Path(__file__).resolve().parents[1]
-        signature = {'sha256': 'paired-fixture', 'details': {'source_sha256': {
-            name: file_sha256(repo/name) for name in ('util/open_set.py', 'util/known_recheck.py')}}}
-        (root/'open_set').mkdir();(root/'test').mkdir()
-        for name, values, records in [('reference', x, rr), ('calibration', z, cr)]:
-            (root/'open_set'/name).mkdir()
-            save_npz(root/'open_set'/name/'features.npz', dict(kind='track_features', schema_version=1,
-                feature_version=FEATURE_VERSION, signature=signature, classes=classes, records=records), features=values)
-        build_profile(root/'open_set/reference/features.npz', root/'open_set/calibration/features.npz',
-                      root/'open_set/known_profile.npz')
-        files, candidates = [], []
-        # One baseline-rejected known, one truly novel, one missing detection.
-        for i, (feature, truth) in enumerate([([1, 0, 0], 'known'), ([0, 0, 1], 'held_out')]):
-            path = f'test-{i}.dat'
-            t = dict(track_id='T1', valid_votes=1, observation_count=1, status='unknown',
-                recognition_status='novel_candidate', class_name=None, known_candidate_class='known',
-                ood_score=100., ood_threshold=1., display_label='Unknown_unassigned', closed_set_status='ok')
-            files.append(dict(path=path, signals=[t], status='ok', true_class_names=[truth]))
-            candidates.append(dict(path=path, recording_id=path, feature=np.array(feature, dtype=float), track=t))
-        files.append(dict(path='empty.dat', signals=[], status='no_signal', true_class_names=['known']))
-        annotate_discovery_candidates(candidates, files)
-        discovery = discover_unknown(candidates, input_mode='single')
-        source = dict(files=files, effective_config=dict(classes=classes), discovery=discovery,
-                      arguments=dict(known_recheck=False), metrics={}, recording_ids={})
-        settings = dict(known_recheck=False, unknown_input_mode='single', knn_k=5,
-            known_false_reject_rate=.01, min_calibration_per_class=5, max_reference_per_class=2000,
-            profile_score_method='maha_pp_shrink', profile_scale_prior_records=5.,
-            profile_covariance_shrinkage=.1, profile_calibration_unit='primary',
-            unknown_cluster_backend='hdbscan', unknown_min_cluster_size=5,
-            unknown_min_samples=3, unknown_min_recordings=2, unknown_allow_single_cluster=True,
-            unknown_cluster_policy='auto')
-        manifest = dict(protocol='open_set', classes=classes, unknown_classes=['held_out'],
-                        records=[dict(class_name='held_out', split='test_unknown')])
-        for name, value in [('test/results.json', source), ('effective_discover.json', settings),
-                            ('split_manifest.json', manifest)]:
-            (root/name).write_text(json.dumps(value))
-        save_npz(root/'test/unknown_features.npz', dict(kind='unknown_candidates', schema_version=1,
-            feature_version=FEATURE_VERSION, signature=signature,
-            records=[candidate_record(c) for c in candidates]), features=np.array([c['feature'] for c in candidates]))
-
-    def test_paired_replay_preserves_samples_and_keeps_unknown_and_missing_detection(self):
-        from scripts.compare_known_recheck import run_comparison
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d);source = root/'source';source.mkdir();self.fixture(source)
-            r = run_comparison(source, root/'B', {})
-            self.assertEqual(r['paired_recordings'], 3)
-            self.assertEqual(r['recovered_known_correct'], 1)
-            self.assertEqual(r['newly_false_accepted_unknown'], 0)
-            self.assertEqual(r['B']['known_abstention_rate'], .5)
-            self.assertEqual(r['B']['unknown_false_accept_rate'], 0.)
-            self.assertTrue((root/'B/predictions.csv').exists())
-
-    def test_source_label_leakage_and_candidate_mismatch_fail(self):
-        from scripts.compare_known_recheck import run_comparison
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d);source = root/'source';source.mkdir();self.fixture(source)
-            p = source/'split_manifest.json';m = json.loads(p.read_text())
-            m['records'][0]['split'] = 'train';p.write_text(json.dumps(m))
-            with self.assertRaisesRegex(ValueError, 'leaked'):
-                run_comparison(source, root/'B', {})
-
-    def test_test_truth_changes_metrics_but_never_decisions(self):
-        from scripts.compare_known_recheck import run_comparison
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d);source = root/'source';source.mkdir();self.fixture(source)
-            run_comparison(source, root/'B1', {})
-            path = source/'test/results.json';r = json.loads(path.read_text())
-            r['files'][0]['true_class_names'] = ['held_out']
-            r['files'][1]['true_class_names'] = ['known']
-            path.write_text(json.dumps(r))
-            altered = run_comparison(source, root/'B2', {})
-            self.assertEqual((root/'B1/known_recheck_decisions.json').read_text(),
-                             (root/'B2/known_recheck_decisions.json').read_text())
-            self.assertEqual(altered['newly_false_accepted_unknown'], 1)
 
 
 if __name__ == '__main__':

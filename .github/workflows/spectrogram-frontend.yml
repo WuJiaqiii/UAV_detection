@@ -12,7 +12,6 @@ on:
       - "config/**"
       - "requirements.txt"
       - "prepare_submission.py"
-      - "export_submission.py"
       - "main.py"
       - ".github/workflows/spectrogram-frontend.yml"
       - ".gitmodules"
@@ -35,7 +34,7 @@ jobs:
           python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements.txt
       - name: Compile project Python
-        run: python -m compileall -q main.py prepare_submission.py export_submission.py util data model scripts tests
+        run: python -m compileall -q main.py prepare_submission.py util data model scripts tests
       - name: Frontend and dataset integration tests
         run: |
           mkdir -p work

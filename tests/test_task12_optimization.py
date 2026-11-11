@@ -178,7 +178,7 @@ class ExperimentRecipeTests(unittest.TestCase):
         inputs=self.root/'inputs';inputs.mkdir(exist_ok=True)
         weights=self.root/'detector.pt';weights.write_bytes(b'fixture')
         return SimpleNamespace(suite=self.root/'suite',inputs=[inputs],yolo_weights=weights,
-            base_config=ROOT/'config/competition_v2_train.yaml',protocol=protocol,unknown_classes=['U'] if protocol=='open_set' else None,seed=42,epochs=2)
+            base_config=ROOT/'config/competition_train.yaml',protocol=protocol,unknown_classes=['U'] if protocol=='open_set' else None,seed=42,epochs=2)
 
     def test_prepare_is_a_controlled_factorial_and_load_checks_config_hash(self):
         a=self.args()
@@ -197,7 +197,7 @@ class ExperimentRecipeTests(unittest.TestCase):
     def test_supcon_override_is_visible_and_primary_supcon_does_not_change_component_policy(self):
         from util.cli import main
         from util.open_set_experiment import stage_arguments
-        base=yaml.safe_load((ROOT/'config/competition_v2_train.yaml').read_text())
+        base=yaml.safe_load((ROOT/'config/competition_train.yaml').read_text())
         base['experiment']['training_variant']='primary_ce';base['train']['supcon_weight']=.1
         path=self.root/'case.yaml';path.write_text(yaml.safe_dump(base))
         with contextlib.redirect_stdout(io.StringIO()),self.assertWarnsRegex(UserWarning,'overrides'):

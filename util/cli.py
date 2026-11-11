@@ -270,10 +270,6 @@ def main(argv=None):
         return
     task = argv.pop(0)
     if task not in TASKS:
-        # Preserve the original direct training/GT-evaluation CLI during phase 1.
-        if task.startswith("-"):
-            from util.train_entry import build_parser
-            return dispatch("train", build_parser().parse_args([task, *argv]))
         raise ValueError(f"Unknown task {task}; choose {', '.join(TASKS)}")
     wrapper = argparse.ArgumentParser(add_help=False)
     wrapper.add_argument("--config", type=Path)

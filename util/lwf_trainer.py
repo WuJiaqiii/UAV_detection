@@ -72,9 +72,9 @@ class LwFTrainer(Trainer):
         old_count = int(config.lwf_old_num_classes)
         if not 0 < old_count < int(config.num_classes):
             raise ValueError("LwF requires 0 < lwf_old_num_classes < num_classes")
-        teacher_ckpt = str(config.lwf_teacher_checkpoint or config.checkpoint_path or "").strip()
+        teacher_ckpt = str(config.lwf_teacher_checkpoint or "").strip()
         if not teacher_ckpt:
-            raise ValueError("LwF requires --lwf_teacher_checkpoint or --checkpoint_path")
+            raise ValueError("LwF requires --lwf_teacher_checkpoint")
         from util.checkpoint import load_checkpoint_object
         teacher_checkpoint = load_checkpoint_object(teacher_ckpt)
         if not isinstance(teacher_checkpoint.get("config", {}).get("classes"), dict):
@@ -86,22 +86,8 @@ class LwFTrainer(Trainer):
             freeze_backbone=False).to(config.device)
         teacher_model.load_state_dict(_strip_module_prefix(teacher_checkpoint["model_state_dict"]), strict=True)
         load_state_skip_mismatch(classifier, teacher_ckpt, config.device, logger, checkpoint=teacher_checkpoint)
-        # Prevent base Trainer from loading checkpoint directly,
-        # because old/new classifier heads may have different shapes.
-        original_checkpoint_path = config.checkpoint_path
-        was_frozen = getattr(config, "_frozen", False)
-        if was_frozen:
-            config.unfreeze()
-        config.checkpoint_path = None
-
-        try:
-            super().__init__(config=config, dataloaders=dataloaders, logger=logger, detector=detector,
-                             preprocessor=preprocessor, classifier=classifier, bbox_cache=bbox_cache)
-        finally:
-            config.checkpoint_path = original_checkpoint_path
-            if was_frozen:
-                config.freeze()
-        self.checkpoint_path = original_checkpoint_path
+        super().__init__(config=config, dataloaders=dataloaders, logger=logger, detector=detector,
+                         preprocessor=preprocessor, classifier=classifier, bbox_cache=bbox_cache)
 
         self.old_num_classes = old_count
         self.temperature = float(config.lwf_temperature)

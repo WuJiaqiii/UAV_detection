@@ -17,7 +17,7 @@ def inspect(args):
     from util.open_set import file_sha256,load_npz
     from util.feature_visualization import write_feature_plots,write_plot_gallery
     from util.run_context import create_directory
-    from scripts.competition_pipeline import ITEMS
+    from scripts.competition_infer import ITEMS
     batch=json.loads(args.manifest.read_text(encoding='utf-8'))
     output=args.output.expanduser().resolve() if args.output else create_directory('competition_cluster_inspection')
     if args.output:output.mkdir(parents=True,exist_ok=False)

@@ -32,7 +32,7 @@ def build_parser():
     # Runtime / Mode
     g_run = parser.add_argument_group("Runtime")
     g_run.add_argument("--seed", type=int, default=42)
-    g_run.add_argument("--run_mode", type=str, default="train", choices=["train", "infer"])
+    parser.set_defaults(run_mode="train", checkpoint_path=None)
     g_run.add_argument("--train_signal_mode", type=str, default="single", choices=["single", "multi"], help="Only used in train mode. Recommended: single")
     g_run.add_argument("--use_data_parallel", action=argparse.BooleanOptionalAction, default=False)
     g_run.add_argument("--use_amp_autocast", action=argparse.BooleanOptionalAction, default=False)
@@ -192,8 +192,11 @@ def build_parser():
                          help="Keep pretrained BN running statistics during small incremental updates")
 
     g_io = parser.add_argument_group("Checkpoint / Cache")
-    g_io.add_argument("--checkpoint_path", type=str, default=None)
     g_io.add_argument("--save_interval", type=int, default=5)
+    g_io.add_argument("--checkpoint_keep_last", type=int, default=2,
+                      help="Retain the latest N saved epoch snapshots, plus best and explicit epochs")
+    g_io.add_argument("--checkpoint_keep_epochs", type=int, nargs="*", default=[],
+                      help="Keep these 1-based epochs for later model selection")
 
     g_cache = parser.add_argument_group("BBox Cache")
     g_cache.add_argument("--bbox_cache_mode", type=str, default="off",
@@ -203,13 +206,9 @@ def build_parser():
     g_cache.add_argument("--bbox_cache_dataset_root", type=str, default="", help="Optional dataset root used to build cache metadata.")
 
     g_vis = parser.add_argument_group("Visualization")
-    g_vis.add_argument("--save_val_detect_vis", action=argparse.BooleanOptionalAction, default=True, help="Save class-balanced validation visualizations in separate epoch directories.")
-    g_vis.add_argument("--val_detect_vis_ratio", type=float, default=0.01, help="Fraction sampled within each validation class every epoch. Set 0 to disable.")
+    g_vis.add_argument("--save_val_detect_vis", action=argparse.BooleanOptionalAction, default=False, help="Save class-balanced validation visualizations in separate epoch directories.")
+    g_vis.add_argument("--val_detect_vis_ratio", type=float, default=0.0, help="Fraction sampled within each validation class every epoch. Set 0 to disable.")
     g_vis.add_argument("--val_detect_vis_min_per_class", type=int, default=1, help="Minimum visualized samples per present validation class, capped by available samples; ratio=0 still disables saving.")
-    g_vis.add_argument("--infer_detect_vis_ratio", type=float, default=1)
-    g_vis.add_argument("--clear_val_detect_vis_each_epoch", action=argparse.BooleanOptionalAction, default=False, help="Legacy option, ignored: epoch-specific validation directories are retained.")
-    g_vis.add_argument("--save_infer_detect_vis", action=argparse.BooleanOptionalAction, default=True, help="Whether to save infer yolo/groups visualization images.")
-    g_vis.add_argument("--save_infer_classified_vis", action=argparse.BooleanOptionalAction, default=True, help="Whether to save infer classified group visualization images.")
 
     return parser
 
@@ -335,6 +334,8 @@ def setup_incremental_class_split(config, logger=None):
         )
 
 def validate_training_options(args):
+    if args.checkpoint_keep_last < 1 or any(n < 1 for n in args.checkpoint_keep_epochs):
+        raise ValueError('checkpoint_keep_last>=1 and positive checkpoint_keep_epochs required')
     from util.mask_input import validate_classifier_input
     if validate_classifier_input(args) == 'mask_amplitude' and (
             args.input_type == 'png' or (args.input_type == 'mat' and args.mat_spec_domain == 'image')):
@@ -393,10 +394,8 @@ def main(args):
         raise RuntimeError("Distributed training is not implemented for the detection/classification pipeline")
     if args.use_data_parallel or args.use_amp_autocast:
         raise ValueError("--use_data_parallel and --use_amp_autocast are not implemented")
-    if args.run_mode == "train" and args.train_signal_mode != "single":
+    if args.train_signal_mode != "single":
         raise ValueError("Training currently supports only --train_signal_mode single")
-    if args.input_type == "iq_dat" and args.run_mode == "infer":
-        raise ValueError("IQ .dat files have no target frequency labels; the current inference evaluator requires them")
     if args.input_type == "iq_dat" and args.bbox_cache_mode != "off":
         raise ValueError("IQ training uses random time crops; file-level bbox caching would reuse boxes from the wrong crop")
     if not (0.0 < float(args.sample_ratio) <= 1.0):
@@ -413,8 +412,6 @@ def main(args):
         raise FileNotFoundError("The yolov5 submodule is empty; initialize it before training")
     if not Path(args.yolo_weights).is_file():
         raise FileNotFoundError(f"YOLO weights not found: {args.yolo_weights}")
-    if args.checkpoint_path and not Path(args.checkpoint_path).is_file():
-        raise FileNotFoundError(f"Classifier checkpoint not found: {args.checkpoint_path}")
 
     rank, local_rank, world_size = 0, 0, 1
 
@@ -433,51 +430,36 @@ def main(args):
     config.rank, config.world_size, config.local_rank = rank, world_size, local_rank
 
     setup_incremental_class_split(config)
-    if config.run_mode == "infer" and "Background" not in config.classes:
-        raise ValueError("End-to-end inference evaluation requires a Background class")
 
     use_explicit_train_val = _path_is_set(config.train_dataset_path) or _path_is_set(config.val_dataset_path)
-    if config.run_mode == "train" and config.incremental_split_mode == "incremental" and not use_explicit_train_val:
+    if config.incremental_split_mode == "incremental" and not use_explicit_train_val:
         raise ValueError("Incremental mode requires explicit train and validation dataset paths")
-    if rank == 0:
-        config.freeze()
-        config.make_dir()
-        config.save_config()
-        logger = create_logger(os.path.join(config.log_dir, "train_log.log" if config.run_mode == "train" else "infer_log.log"))
-        logger.init_exp(config)
-        logger.info(f"DDP initialized: world_size={world_size}")
-        logger.info(f"run_mode={config.run_mode}, train_signal_mode={getattr(config, 'train_signal_mode', 'single')}")
-        if str(config.run_mode).lower() == "train" and use_explicit_train_val:
-            logger.info(f"Use explicit train/val datasets.")
-            logger.info(f"train_dataset_path={config.train_dataset_path}")
-            logger.info(f"val_dataset_path={config.val_dataset_path}")
-    else:
-        logger = logging.getLogger("ddp_logger")
-        logger.addHandler(logging.NullHandler())
+    config.freeze()
+    config.make_dir()
+    config.save_config()
+    logger = create_logger(os.path.join(config.log_dir,'train_log.log'))
+    logger.init_exp(config)
+    if use_explicit_train_val:
+        logger.info(f'train_dataset_path={config.train_dataset_path}')
+        logger.info(f'val_dataset_path={config.val_dataset_path}')
 
-    if str(config.run_mode).lower() == "train":
-        if use_explicit_train_val and not (_path_is_set(config.train_dataset_path) and _path_is_set(config.val_dataset_path)):
-            raise ValueError("Provide both --train_dataset_path and --val_dataset_path")
-        if use_explicit_train_val:
-            dataset_cls = RawIQDataset if config.input_type == "iq_dat" else UAVDataset
-            train_dataset = dataset_cls(config, logger, dataset_path=config.train_dataset_path, split_name="train")
-            val_dataset = dataset_cls(config, logger, dataset_path=config.val_dataset_path, split_name="val")
-            if getattr(config, "lwf_replay_per_class", 0):
-                from data.incremental_replay import create_replay_loader
-                train_loader = create_replay_loader(config, train_dataset, val_dataset, logger)
-            else:
-                train_loader = create_dataloader(train_dataset, config, shuffle=True, sample_ratio=float(config.sample_ratio))
-            val_loader = create_dataloader(val_dataset, config, shuffle=False, sample_ratio=1.0)
-        elif config.input_type == "iq_dat":
-            train_loader, val_loader = create_iq_train_val_loaders(config, logger)
-        else:
-            dataset = UAVDataset(config, logger)
-            train_loader, val_loader = get_dataloader(dataset, config, mode="train")
-    else:
+    if use_explicit_train_val and not (_path_is_set(config.train_dataset_path) and _path_is_set(config.val_dataset_path)):
+        raise ValueError("Provide both --train_dataset_path and --val_dataset_path")
+    if use_explicit_train_val:
         dataset_cls = RawIQDataset if config.input_type == "iq_dat" else UAVDataset
-        dataset = dataset_cls(config, logger, split_name="infer")
-        infer_loader = get_dataloader(dataset, config, mode="infer")
-        train_loader, val_loader = None, None
+        train_dataset = dataset_cls(config, logger, dataset_path=config.train_dataset_path, split_name="train")
+        val_dataset = dataset_cls(config, logger, dataset_path=config.val_dataset_path, split_name="val")
+        if getattr(config, "lwf_replay_per_class", 0):
+            from data.incremental_replay import create_replay_loader
+            train_loader = create_replay_loader(config, train_dataset, val_dataset, logger)
+        else:
+            train_loader = create_dataloader(train_dataset, config, shuffle=True, sample_ratio=float(config.sample_ratio))
+        val_loader = create_dataloader(val_dataset, config, shuffle=False, sample_ratio=1.0)
+    elif config.input_type == "iq_dat":
+        train_loader, val_loader = create_iq_train_val_loaders(config, logger)
+    else:
+        dataset = UAVDataset(config, logger)
+        train_loader, val_loader = get_dataloader(dataset, config, mode="train")
 
     classifier = MaskImageClassifier(
         backbone=config.backbone,
@@ -536,10 +518,7 @@ def main(args):
     )
 
     try:
-        if str(config.run_mode).lower() == "train":
-            trainer.train()
-        else:
-            trainer.infer(infer_loader)
+        trainer.train()
     finally:
         trainer.writer.close()
         for handler in list(logger.handlers):

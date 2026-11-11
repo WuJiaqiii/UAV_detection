@@ -61,8 +61,8 @@ def stage_arguments(args, config_path):
     if train_settings.get("input_type", args.input_type) != args.input_type:
         raise ValueError("train.input_type must agree with experiment.input_type")
     if train_settings.get("run_mode", "train") != "train" or train_settings.get("trainer_type", "normal") != "normal":
-        raise ValueError("experiment uses normal known-only training; LwF/resume remain separate train tasks")
-    train_settings.update(input_type=args.input_type, run_mode="train", trainer_type="normal", seed=args.seed)
+        raise ValueError("experiment uses fresh known-only training; use the incremental entry for LwF")
+    train_settings.update(input_type=args.input_type, trainer_type="normal", seed=args.seed)
     train = train_parser().parse_args(settings_tokens(train_parser(), train_settings))
     validate_training_options(train)
     train._run_dir = output / "training"

@@ -15,7 +15,7 @@ from model.representation import (
     SupervisedContrastiveLoss, augment_group_boxes, contrastive_mask_batch, validate_representation_options,
 )
 from model.resnet import MaskImageClassifier
-from util.single_signal_eval import resolve_config
+from util.eval_common import resolve_config
 from util.trainer import Trainer
 from util.lwf_trainer import LwFTrainer
 
@@ -230,31 +230,3 @@ class TrainingIntegrationTests(unittest.TestCase):
         self.assertTrue(np.isfinite(result[0]))
         self.assertFalse(torch.equal(before, trainer.classifier.net.conv1.weight))
         self.assertTrue(all(not parameter.requires_grad for parameter in trainer.teacher.parameters()))
-
-    def test_resume_selects_a_best_checkpoint_within_the_new_run(self):
-        config = self.config(weight=0.)
-        first = self.make_trainer(config)
-        self.addCleanup(first.writer.close)
-        checkpoint = self.root / "resume.pth"
-        torch.save({"model_state_dict": first.classifier.state_dict(), "config": {"classes": config.classes},
-                    "epoch": 0, "best_val_acc": 99.}, checkpoint)
-        config.checkpoint_path = str(checkpoint)
-        resumed = self.make_trainer(config)
-        self.addCleanup(resumed.writer.close)
-        self.assertEqual(resumed.start_epoch, 1)
-        self.assertEqual(resumed.resume_best_val_acc, 99.)
-        self.assertEqual(resumed.best_val_acc, -1.)
-        config.epochs, config.save_interval, config.early_stop_patience = 2, 5, 10
-        config.model_dir = str(self.root / "continuation_models")
-        resumed.train_one_epoch = Mock(return_value=(1., 42., 1.))
-        resumed.validate = Mock(return_value=(1., 42., 1.))
-        resumed.train()
-        self.assertTrue((Path(config.model_dir) / "best.pth").is_file())
-
-    def test_resume_cannot_silently_run_zero_epochs(self):
-        trainer = Trainer.__new__(Trainer)
-        trainer.train_loader, trainer.val_loader = object(), object()
-        trainer.start_epoch = 2
-        trainer.config = type("Config", (), {"epochs": 2})()
-        with self.assertRaisesRegex(ValueError, "greater than checkpoint"):
-            trainer.train()

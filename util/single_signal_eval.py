@@ -1,12 +1,9 @@
-"""Legacy file-level policy on shared group prediction, slicing and voting."""
+"""Single-signal file policy using shared group prediction, slicing and voting."""
 from collections import Counter
 from pathlib import Path
 
 from data.iq_dat_loader import BYTES_PER_COMPLEX_SAMPLE
-from util.eval_common import (
-    INFERENCE_DEFAULTS, SUPPORTED_SUFFIXES, collect_inputs, validate_classes,
-    resolve_config, plan_iq_slices, load_spectrum, vote_predictions, read_path_mapping,
-)
+from util.eval_common import plan_iq_slices, load_spectrum, vote_predictions, read_path_mapping
 from util.group_predictor import GroupPredictor
 
 

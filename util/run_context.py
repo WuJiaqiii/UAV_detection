@@ -21,8 +21,6 @@ def now():
 
 def run_type(task, args):
     if task == "train":
-        if getattr(args, "run_mode", "train") == "infer":
-            return "validation"
         mode = getattr(args, "incremental_split_mode", "normal")
         if getattr(args, "trainer_type", "normal") == "lwf" or mode == "incremental":
             return "incremental_train"

@@ -19,3 +19,9 @@ data/dataset*/
 *.mat
 *.png
 config/*_local_*.yaml
+
+# Generated deployment packages and interrupted checkpoint writes.
+submission/
+submissions/
+*.pth.tmp
+*.pt.tmp

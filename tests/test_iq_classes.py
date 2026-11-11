@@ -11,7 +11,7 @@ import torch
 from data.iq_dat_loader import (
     RawIQDataset, create_iq_train_val_loaders, discover_iq_classes,
 )
-from util.checkpoint import load_training_checkpoint, save_training_checkpoint
+from util.checkpoint import load_classifier_checkpoint, save_training_checkpoint
 from util.config import Config
 from util.eval_common import resolve_config
 from util.train_entry import build_parser, main, setup_incremental_class_split
@@ -137,33 +137,29 @@ class IQClassTests(unittest.TestCase):
         cfg.train_data_include_classes = ["Device-A"]
         self.assertEqual(len(RawIQDataset(cfg)), 1)
 
-    def test_folder_mapping_is_saved_and_reused_by_resume_and_inference(self):
+    def test_folder_mapping_is_saved_and_reused_by_inference(self):
         self.recording("all", "Device-A")
         self.recording("all", "Device-Z")
         cfg = self.config("--dataset_path", str(self.root / "all"),
                           "--class_names", "Device-Z", "Device-A")
         setup_incremental_class_split(cfg)
         model = torch.nn.Linear(3, cfg.num_classes)
-        checkpoint = save_training_checkpoint(model, None, None, 0, .5, self.root / "models", config=cfg)
+        checkpoint = save_training_checkpoint(model, 0, .5, self.root / "models", config=cfg)
         restored = torch.nn.Linear(3, cfg.num_classes)
-        saved = load_training_checkpoint(restored, checkpoint, "cpu", expected_classes=cfg.classes)
+        saved = load_classifier_checkpoint(restored, checkpoint, "cpu", expected_classes=cfg.classes)
         self.assertEqual(saved["config"]["classes"], cfg.classes)
         inferred = resolve_config(saved)
         self.assertEqual(inferred.classes, cfg.classes)
         self.assertEqual(inferred.num_classes, 2)
         with self.assertRaisesRegex(ValueError, "class mapping"):
-            load_training_checkpoint(restored, checkpoint, "cpu",
+            load_classifier_checkpoint(restored, checkpoint, "cpu",
                                      expected_classes={"Device-A": 0, "Device-Z": 1})
 
-    def test_mat_defaults_and_explicit_order_remain_available(self):
-        for names in (None, ["Custom-B", "Custom-A"]):
-            args = SimpleNamespace(input_type="mat", class_names=names)
-            with self.subTest(names=names), patch("util.config.os.makedirs"):
-                cfg = Config(args)
-            if names is None:
-                self.assertEqual(cfg.classes["Lightbridge"], 1)
-            else:
-                self.assertEqual(cfg.classes, {"Custom-B": 0, "Custom-A": 1})
+    def test_mat_requires_explicit_order_without_historical_protocol_defaults(self):
+        with self.assertRaisesRegex(ValueError,'explicit class_names'):
+            Config(SimpleNamespace(input_type='mat',class_names=None))
+        cfg=Config(SimpleNamespace(input_type='mat',class_names=['Custom-B','Custom-A']))
+        self.assertEqual(cfg.classes,{'Custom-B':0,'Custom-A':1})
 
     def test_training_checks_yolo_submodule_at_project_root_after_entry_move(self):
         (self.root / "yolov5").mkdir()

@@ -1,187 +1,92 @@
+"""Compact classifier artifacts for fresh training, inference and LwF teachers."""
 import os
-import warnings
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
 import torch
 
 
-def load_checkpoint_object(path, map_location="cpu"):
-    """Load a trusted project checkpoint, including foreign-OS path metadata."""
-    from util import checkpoint_pickle
-    return torch.load(path, map_location=map_location, weights_only=False,
-                      pickle_module=checkpoint_pickle)
+def load_checkpoint_object(path, map_location='cpu'):
+    """Read a trusted checkpoint. Foreign-OS legacy pickle shims are not supported."""
+    return torch.load(path, map_location=map_location, weights_only=False)
 
 
 def _strip_module_prefix(state_dict):
-    if not isinstance(state_dict, dict) or len(state_dict) == 0:
-        return state_dict
-
-    first_key = next(iter(state_dict.keys()))
-    if not str(first_key).startswith("module."):
-        return state_dict
-
-    return {
-        str(k).replace("module.", "", 1): v
-        for k, v in state_dict.items()
-    }
+    return {key.removeprefix('module.'): value for key, value in state_dict.items()}
 
 
-def _validate_checkpoint_classes(ckpt, expected_classes, logger=None):
-    """Check label semantics before changing model or optimizer state.
-
-    Dictionary insertion order is irrelevant; each name must retain its ID.
-    Older checkpoints without class metadata remain loadable with a warning.
-    """
+def _validate_checkpoint_classes(checkpoint, expected_classes, logger=None):
     if expected_classes is None:
         return
     if not isinstance(expected_classes, Mapping):
-        raise ValueError("expected_classes must be a mapping of class names to IDs")
-
-    config = ckpt.get("config")
-    saved_classes = config.get("classes") if isinstance(config, Mapping) else None
-    if saved_classes is None:
-        message = (
-            "[ckpt] checkpoint has no config.classes metadata; class names and IDs "
-            "cannot be verified. Ensure the current classes match the original training."
-        )
-        if logger is not None:
-            logger.warning(message)
-        else:
-            warnings.warn(message, UserWarning, stacklevel=3)
-        return
-    if not isinstance(saved_classes, Mapping):
-        raise ValueError("Checkpoint config.classes must be a mapping of class names to IDs")
-    if dict(saved_classes) != dict(expected_classes):
-        raise ValueError(
-            "Checkpoint class mapping mismatch: "
-            f"saved={dict(saved_classes)}, expected={dict(expected_classes)}. "
-            "Use the same class names and label IDs as the original training, "
-            "including exclude_classes and incremental_split_mode settings. "
-            "To add new classes, use the dedicated LwF teacher initialization path."
-        )
+        raise ValueError('expected_classes must be a mapping of class names to IDs')
+    saved = checkpoint.get('config', {}).get('classes')
+    if not isinstance(saved, Mapping):
+        raise ValueError('Checkpoint config.classes is required')
+    if dict(saved) != dict(expected_classes):
+        raise ValueError(f'Checkpoint class mapping mismatch: saved={dict(saved)}, expected={dict(expected_classes)}')
 
 
-def save_training_checkpoint(model, optimizer, scheduler, epoch: int, best_val_acc: float, model_dir, config=None, logger=None, is_best: bool = False,
-                             selection_metric="acc", selection_score=None, validation_metrics=None):
+def load_classifier_checkpoint(model, path, device='cpu', *, expected_classes=None):
+    checkpoint = load_checkpoint_object(path, device)
+    if not isinstance(checkpoint, dict) or 'model_state_dict' not in checkpoint:
+        raise RuntimeError(f'No model_state_dict found in checkpoint: {path}')
+    _validate_checkpoint_classes(checkpoint, expected_classes)
+    model.load_state_dict(_strip_module_prefix(checkpoint['model_state_dict']), strict=True)
+    return checkpoint
+
+
+def metadata(value):
+    """Store plain values; new artifacts never pickle platform-specific Path objects."""
+    if isinstance(value, (Path, torch.device)):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {key: metadata(item) for key, item in value.items() if not str(key).startswith('_')}
+    if isinstance(value, (tuple, list)):
+        return [metadata(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f'Unsupported checkpoint metadata: {type(value).__name__}')
+
+
+def prune_epoch_checkpoints(model_dir, keep_last, keep_epochs):
+    """Only prune this run's epoch_N.pth files; best and explicit selected epochs survive."""
+    if keep_last < 1 or any(n < 1 for n in keep_epochs):
+        raise ValueError('checkpoint_keep_last>=1 and positive checkpoint_keep_epochs required')
+    files = []
+    for path in Path(model_dir).glob('epoch_*.pth'):
+        match = re.fullmatch(r'epoch_(\d+)\.pth', path.name)
+        if match and path.is_file() and not path.is_symlink():
+            files.append((int(match[1]), path))
+    keep = {n for n, _ in sorted(files, reverse=True)[:keep_last]} | set(keep_epochs)
+    for number, path in files:
+        if number not in keep:
+            path.unlink()
+
+
+def save_training_checkpoint(model, epoch, best_val_acc, model_dir, config=None, logger=None,
+                             is_best=False, selection_metric='acc', selection_score=None,
+                             validation_metrics=None):
     model_dir = Path(model_dir)
+    # Validate retention before creating or replacing any file.
+    keep_last = int(getattr(config, 'checkpoint_keep_last', 2))
+    keep_epochs = list(getattr(config, 'checkpoint_keep_epochs', []))
+    if keep_last < 1 or any(n < 1 for n in keep_epochs):
+        raise ValueError('checkpoint_keep_last>=1 and positive checkpoint_keep_epochs required')
     model_dir.mkdir(parents=True, exist_ok=True)
-
-    save_obj = {
-        "epoch": int(epoch),
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
-        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
-        "best_val_acc": float(best_val_acc),
-        "selection_metric": selection_metric,
-        "selection_score": float(best_val_acc if selection_score is None else selection_score),
-        "validation_metrics": validation_metrics or {},
-        "config": vars(config) if hasattr(config, "__dict__") else {},
-    }
-
-    ckpt_path = model_dir / f"epoch_{epoch + 1}.pth"
-    tmp_path = model_dir / f"epoch_{epoch + 1}.pth.tmp"
-
-    torch.save(save_obj, tmp_path)
-    os.replace(tmp_path, ckpt_path)
-
-    if logger is not None:
-        logger.info(f"[ckpt] saved: {ckpt_path}")
-
-    if is_best:
-        best_path = model_dir / "best.pth"
-        best_tmp = model_dir / "best.pth.tmp"
-
-        torch.save(save_obj, best_tmp)
-        os.replace(best_tmp, best_path)
-
-        if logger is not None:
-            logger.info(f"[ckpt] saved best: {best_path}")
-
-    return ckpt_path
-
-
-def load_training_checkpoint(
-    model,
-    checkpoint_path: str,
-    device,
-    optimizer=None,
-    scheduler=None,
-    logger=None,
-    load_optimizer: bool = False,
-    skip_mismatch: bool = False,
-    expected_classes=None,
-):
-    """Load classifier state, optionally restoring training state and checking labels.
-
-    ``expected_classes`` is a name-to-ID mapping, as used by ``Config.classes``.
-    ``skip_mismatch`` only controls tensor shapes, not class mapping validation.
-    """
-    checkpoint_path = str(checkpoint_path or "").strip()
-    if not checkpoint_path:
-        return None
-
-    if not os.path.isfile(checkpoint_path):
-        if logger is not None:
-            logger.warning(f'Checkpoint "{checkpoint_path}" not found')
-        return None
-
-    ckpt = load_checkpoint_object(checkpoint_path, map_location=device)
-
-    if not isinstance(ckpt, dict):
-        raise RuntimeError(f"Unsupported checkpoint format: {checkpoint_path}")
-
-    if "model_state_dict" not in ckpt:
-        raise RuntimeError(
-            f"No model_state_dict found in checkpoint: {checkpoint_path}"
-        )
-
-    _validate_checkpoint_classes(ckpt, expected_classes, logger=logger)
-    state_dict = _strip_module_prefix(ckpt["model_state_dict"])
-
-    if skip_mismatch:
-        model_state = model.state_dict()
-        filtered = {}
-        skipped = []
-
-        for k, v in state_dict.items():
-            if k in model_state and tuple(v.shape) == tuple(model_state[k].shape):
-                filtered[k] = v
-            else:
-                skipped.append(k)
-
-        state_dict = filtered
-
-        if logger is not None and skipped:
-            logger.warning(
-                f"[ckpt] skipped mismatch keys: {skipped[:20]}"
-                f"{' ...' if len(skipped) > 20 else ''}"
-            )
-
-    missing, unexpected = model.load_state_dict(state_dict, strict=not skip_mismatch)
-
-    if logger is not None:
-        logger.info(f"[ckpt] loaded model from {checkpoint_path}")
-        if len(missing) > 0:
-            logger.warning(f"[ckpt] missing keys: {missing[:10]}{' ...' if len(missing) > 10 else ''}")
-        if len(unexpected) > 0:
-            logger.warning(f"[ckpt] unexpected keys: {unexpected[:10]}{' ...' if len(unexpected) > 10 else ''}")
-
-    if load_optimizer:
-        if optimizer is not None and ckpt.get("optimizer_state_dict") is not None:
-            try:
-                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-                if logger is not None:
-                    logger.info("[ckpt] optimizer loaded")
-            except Exception as e:
-                raise RuntimeError("Checkpoint optimizer state cannot be restored") from e
-
-        if scheduler is not None and ckpt.get("scheduler_state_dict") is not None:
-            try:
-                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-                if logger is not None:
-                    logger.info("[ckpt] scheduler loaded")
-            except Exception as e:
-                raise RuntimeError("Checkpoint scheduler state cannot be restored") from e
-
-    return ckpt
+    saved = dict(format_version=3, epoch=int(epoch), model_state_dict=model.state_dict(),
+                 best_val_acc=float(best_val_acc), selection_metric=selection_metric,
+                 selection_score=float(best_val_acc if selection_score is None else selection_score),
+                 validation_metrics=validation_metrics or {},
+                 config=metadata(vars(config)) if config is not None else {})
+    path = model_dir/f'epoch_{epoch+1}.pth'
+    targets = [path, model_dir/'best.pth'] if is_best else [path]
+    for target in targets:
+        temporary = target.with_suffix('.pth.tmp')
+        torch.save(saved, temporary)
+        os.replace(temporary, target)
+    prune_epoch_checkpoints(model_dir, keep_last, keep_epochs)
+    if logger:
+        logger.info(f'[ckpt] saved {path}; best={is_best}; retained latest {keep_last} plus {keep_epochs}')
+    return path

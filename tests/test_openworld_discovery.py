@@ -18,7 +18,7 @@ from util.open_set import (
     FEATURE_VERSION, OpenSetProfile, apply_open_set, build_profile, inference_signature,
     load_npz, normalize_features, recording_identity, save_npz,
 )
-from util.single_signal_eval import resolve_config
+from util.eval_common import resolve_config
 from util.unknown_discovery import discover_unknown
 
 

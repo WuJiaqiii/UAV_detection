@@ -34,7 +34,6 @@ class RunContextTests(unittest.TestCase):
         for task, fields, expected in (
             ("train", {}, "train"), ("train", {"incremental_split_mode": "base"}, "base_train"),
             ("train", {"trainer_type": "lwf"}, "incremental_train"),
-            ("train", {"run_mode": "infer"}, "validation"),
             ("predict", {"label_from_parent": True}, "validation"),
             ("predict", {"open_set_profile": "profile.npz"}, "open_set_inference"),
             ("experiment", {}, "open_set_experiment"), ("experiment", {"split_only": True}, "open_set_split"),
@@ -91,9 +90,9 @@ class RunContextTests(unittest.TestCase):
             main(["predict", "--inputs", "missing", "--checkpoint_path", "model.pth", "--yolo_weights", "detector.pt", "--dry_run"])
         self.assertFalse(self.root.exists())
 
-    def test_cli_and_legacy_training_share_the_output_manager(self):
+    def test_explicit_training_uses_the_output_manager(self):
         with patch("util.train_entry.main", return_value=None) as training, contextlib.redirect_stdout(io.StringIO()):
-            report = main(["--yolo_weights", "detector.pt"])
+            report = main(["train", "--yolo_weights", "detector.pt"])
         self.assertEqual(Path(report["run_dir"]).parent, self.root)
         self.assertEqual(training.call_args.args[0]._run_dir, Path(report["run_dir"]))
 

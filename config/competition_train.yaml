@@ -1,8 +1,8 @@
-# Mainline A: original Maha++ rejection; 20 known classes.
+# v3 mainline: fresh 20-class training, independent calibration, complete-duration inference.
+# YOLO weights stay fixed. Train, profile, and all six tests use the same 0.02 gate.
 experiment:
   protocol: all_known
-  inputs:
-  - /media/kaneki/05E4235537EC7AC2/dataset_wjq/train_dataset
+  inputs: [/path/to/train_dataset]
   input_type: iq_dat
   recursive: true
   exclude_classes: []
@@ -12,13 +12,18 @@ experiment:
   calibration_ratio: 0.2
   test_ratio: 0.0
 train:
-  yolo_weights: /media/kaneki/5490675f-8f6a-4932-bae3-f457edde3ca0/wujiaqi/UAV_signal_detection/code/yolov5/runs/train/exp10/weights/best.pt
+  yolo_weights: /path/to/detector.pt
+  yolo_conf_thres: 0.02
   iq_sample_rate: 100000000
-  iq_byte_order: <
+  iq_byte_order: '<'
   backbone: resnet18
   mask_pretrained: true
   mask_img_size: 224
   epochs: 100
+  save_val_detect_vis: false
+  val_detect_vis_ratio: 0.0
+  checkpoint_keep_last: 2
+  checkpoint_keep_epochs: []
   batch_size: 32
   num_workers: 1
   lr: 0.0001
@@ -36,8 +41,12 @@ train:
 evaluation:
   signal_mode: multi
   unknown_input_mode: single
+  iq_sample_rate: 100000000
+  iq_byte_order: '<'
+  yolo_conf_thres: 0.02
   novelty_policy: calibrated_track
   iq_stride_ms: 50.0
+  tail_policy: cover
   max_slices: 0
   min_votes: 1
   track_feature_cosine_min: 0.8
@@ -51,12 +60,16 @@ profile:
   max_reference_per_class: 2000
   profile_recheck: false
 discovery:
-  unknown_cluster_backend: hdbscan
+  unknown_cluster_backend: spectral
+  unknown_bounded_strategy: spectral
   unknown_cluster_policy: auto
+  spectral_neighbors: 10
+  spectral_seed: 42
+  spectral_n_init: 10
   unknown_min_cluster_size: 5
   unknown_min_samples: 3
   unknown_min_recordings: 2
+  unknown_min_silhouette: 0.15
   unknown_allow_single_cluster: true
   save_visuals: false
   save_feature_plots: false
-  feature_plot_method: pca

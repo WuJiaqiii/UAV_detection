@@ -16,7 +16,7 @@ from util.multi_signal_eval import (
     FrequencyTracker, MultiSignalPredictor, band_iou, evaluate_multi_file,
     group_geometry, load_multi_truth, merge_bands, multi_evaluation_metrics, resolve_rf_centers,
 )
-from util.single_signal_eval import resolve_config
+from util.eval_common import resolve_config
 from util.signal_eval_report import write_html_report
 
 

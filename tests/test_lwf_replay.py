@@ -15,7 +15,7 @@ from data.incremental_replay import ReplayBatchSampler, select_replay_records
 from model.resnet import MaskImageClassifier
 from util.incremental_metrics import incremental_validation_metrics
 from util.lwf_trainer import LwFTrainer
-from util.single_signal_eval import resolve_config
+from util.eval_common import resolve_config
 from util.train_entry import build_parser, validate_training_options
 from util.trainer import Trainer
 

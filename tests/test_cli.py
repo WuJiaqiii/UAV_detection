@@ -73,7 +73,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIsNone(discovery.labels_json)
         self.assertEqual(discovery.test_labels_json, self.root/"truth.json")
 
-    def test_training_class_order_and_legacy_arguments_are_preserved(self):
+    def test_training_class_order_is_preserved_and_legacy_entry_is_rejected(self):
         path = self.config({"train": {"yolo_weights": "yolo.pt", "class_names": ["B", "A", "Unknown"],
             "exclude_classes": ["Unknown"], "supcon_weight": .1, "seed": 7}})
         args = self.dry(["train", "--config", str(path)])
@@ -83,12 +83,11 @@ class ConfigurationTests(unittest.TestCase):
         setup_incremental_class_split(config)
         self.assertEqual(config.classes, {"B": 0, "A": 1})
         self.assertEqual(args.seed, 7)
-        with patch("util.train_entry.main") as train:
-            main(["--yolo_weights", "legacy.pt", "--run_mode", "train"])
-        self.assertEqual(train.call_args.args[0].yolo_weights, "legacy.pt")
+        with self.assertRaisesRegex(ValueError, 'Unknown task'):
+            main(['--yolo_weights', 'legacy.pt', '--run_mode', 'train'])
 
     def test_example_configs_parse_for_every_documented_task(self):
-        for task, name in (("train", "train.yaml"), ("train", "train_iq.yaml"), ("train", "train_incremental.yaml"), ("predict", "predict.yaml"),
+        for task, name in (("train", "train_iq.yaml"), ("predict", "predict.yaml"),
                            ("profile", "open_set.yaml"), ("discover", "open_set.yaml"),
                            ("predict", "open_set.yaml"), ("cluster", "cluster.yaml")):
             with self.subTest(task=task, config=name):

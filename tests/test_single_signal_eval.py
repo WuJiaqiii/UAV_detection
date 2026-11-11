@@ -16,10 +16,8 @@ from torch import nn
 from scripts.evaluate_single_signal import build_parser, run
 from util.mask_input import boxes_to_centered_mask, build_mask_input
 from util.preprocess import SignalPreprocessor
-from util.single_signal_eval import (
-    SingleSignalPredictor, collect_inputs, evaluate_file, evaluation_metrics,
-    load_spectrum, load_truth, plan_iq_slices, resolve_config, validate_classes, vote_predictions,
-)
+from util.eval_common import collect_inputs, load_spectrum, plan_iq_slices, resolve_config, validate_classes, vote_predictions
+from util.single_signal_eval import SingleSignalPredictor, evaluate_file, evaluation_metrics, load_truth
 from util.spectrogram_frontend import SPEC_SHAPE, render_gray, FrontendConfig
 
 
@@ -137,12 +135,11 @@ class InputAndPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown inference setting"):
             resolve_config(self.ckpt, overrides={"typo": 2})
 
-    def test_legacy_checkpoint_requires_explicit_classes(self):
+    def test_checkpoint_without_saved_class_mapping_is_rejected(self):
         with self.assertRaises(ValueError):
-            resolve_config({"model_state_dict": {}})
-        with self.assertWarns(UserWarning):
-            cfg = resolve_config({"model_state_dict": {}}, classes=CLASSES)
-        self.assertEqual(cfg.classes, CLASSES)
+            resolve_config({'model_state_dict':{}})
+        with self.assertRaisesRegex(ValueError,'config.classes'):
+            resolve_config({'model_state_dict':{}},classes=CLASSES)
 
     def test_mat_png_reading_and_mixed_input_discovery(self):
         matrix = np.ones(SPEC_SHAPE, dtype=np.float32)

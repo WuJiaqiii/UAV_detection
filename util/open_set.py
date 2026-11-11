@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 from util.recordings import file_sha256, recording_identity
 
-FEATURE_VERSION = "mask-penultimate-l2-accepted-track-mean-l2-v1"
+FEATURE_VERSION = "uav-v3-mask-penultimate-l2-accepted-track-mean-l2"
 
 
 def normalize_features(features):
